@@ -45,7 +45,7 @@ class GemmUniversal {
 #include "blaze/gemm/kernel/kernel_matmul_with_scale_add.h"
 #include "blaze/gemm/kernel/kernel_qbmm_cube_without_batch.h"
 #include "blaze/gemm/kernel/kernel_qgmm_cube.h"
-#include "blaze/gemm/kernel/kernel_tqbmm_mx.h"
+#include "blaze/gemm/kernel/kernel_tqbmm.h"
 #include "blaze/gemm/kernel/kernel_tbmm_basic.h"
 #include "blaze/gemm/kernel/kernel_grouped_matmul.h"
 #include "blaze/gemm/kernel/kernel_qgmm_mx_mix_finalize_routing.h"

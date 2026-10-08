@@ -1,0 +1,5 @@
+casename,m,k,n,batch,dtype,c_dtype,transB,base_m,base_n,base_k,tile_k_al1,tile_k_bl1,l1_buffers,db_l0c
+tqbmm_fp8_64_128_128_1_fp16,64,128,128,1,fp8,float16,false,64,128,64,128,128,2,1
+tqbmm_fp8_64_128_128_2_bf16,64,128,128,2,fp8,bfloat16,false,64,128,64,128,128,2,1
+tqbmm_fp8_32_256_128_4_fp16,32,256,128,4,fp8,float16,false,32,128,64,256,256,2,1
+tqbmm_fp8_64_512_256_2_fp16,64,512,256,2,fp8,float16,false,64,256,64,512,512,2,1

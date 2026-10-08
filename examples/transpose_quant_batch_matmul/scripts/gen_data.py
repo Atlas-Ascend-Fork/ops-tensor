@@ -40,7 +40,10 @@ def main():
     parser.add_argument("K", type=int)
     parser.add_argument("Batch", type=int)
     parser.add_argument(
-        "--dtype", type=str, default="fp8_e4m3", choices=["fp8_e4m3", "fp4_e2m1"]
+        "--dtype",
+        type=str,
+        default="fp8_e4m3",
+        choices=["fp8_e4m3", "fp4_e2m1", "hifp8", "fp8"],
     )
     parser.add_argument(
         "--output-dir", type=str, default=None, help="Directory to write .bin files"
@@ -56,7 +59,12 @@ def main():
     )
     os.makedirs(out_dir, exist_ok=True)
 
-    if args.dtype == "fp4_e2m1":
+    if args.dtype in ("hifp8", "fp8", "fp8_e4m3"):
+        a_data = np.random.randint(0, 256, size=m * batch * k, dtype=np.uint8)
+        b_data = np.random.randint(0, 256, size=k * batch * n, dtype=np.uint8)
+        a_bytes = a_data
+        b_bytes = b_data
+    elif args.dtype == "fp4_e2m1":
         a_data = np.random.randint(0, 16, size=m * batch * k, dtype=np.uint8)
         b_data = np.random.randint(0, 16, size=k * batch * n, dtype=np.uint8)
         a_bytes = pack_fp4(a_data)
@@ -67,15 +75,32 @@ def main():
         a_bytes = a_data
         b_bytes = b_data
 
-    scale_a = np.full(m * batch * scale_k, 0x7F, dtype=np.uint8)
-    scale_b = np.full(batch * scale_k * n, 0x7F, dtype=np.uint8)
-    initial_c = np.zeros(m * batch * n * 2, dtype=np.uint8)
+    if args.dtype == "hifp8":
+        # HIFP8: per-channel uint64 scale (encode 1.0f as 0x3F80000000000000)
+        scale_bytes = np.array([0x3F80000000000000], dtype=np.uint64)
+        scale_bytes = np.full(n, 0x3F80000000000000, dtype=np.uint64)
+        scale_bytes.tofile(os.path.join(out_dir, "scale.bin"))
+        initial_c = np.zeros(m * batch * n * 2, dtype=np.uint8)
+        initial_c.tofile(os.path.join(out_dir, "initial_c.bin"))
+    elif args.dtype == "fp8":
+        # FP8 MIX: per-channel float scale + per-token float scale
+        scale_bytes = np.ones(n, dtype=np.float32)
+        scale_bytes.tofile(os.path.join(out_dir, "scale.bin"))
+        pertoken_scale = np.ones(m, dtype=np.float32)
+        pertoken_scale.tofile(os.path.join(out_dir, "pertoken_scale.bin"))
+        initial_c = np.zeros(m * batch * n * 2, dtype=np.uint8)
+        initial_c.tofile(os.path.join(out_dir, "initial_c.bin"))
+    else:
+        # MX: e8m0 scale
+        scale_a = np.full(m * batch * scale_k, 0x7F, dtype=np.uint8)
+        scale_b = np.full(batch * scale_k * n, 0x7F, dtype=np.uint8)
+        scale_a.tofile(os.path.join(out_dir, "scale_a.bin"))
+        scale_b.tofile(os.path.join(out_dir, "scale_b.bin"))
+        initial_c = np.zeros(m * batch * n * 2, dtype=np.uint8)
+        initial_c.tofile(os.path.join(out_dir, "initial_c.bin"))
 
     a_bytes.tofile(os.path.join(out_dir, "input_a.bin"))
     b_bytes.tofile(os.path.join(out_dir, "input_b.bin"))
-    scale_a.tofile(os.path.join(out_dir, "scale_a.bin"))
-    scale_b.tofile(os.path.join(out_dir, "scale_b.bin"))
-    initial_c.tofile(os.path.join(out_dir, "initial_c.bin"))
 
     print(f"Generated: M={m}, N={n}, K={k}, batch={batch}, dtype={args.dtype}")
 

@@ -25,7 +25,7 @@
 #define __fp8e4m3 fp8_e4m3fn_t
 #define __fp4e2m1x2 fp4x2_e2m1_t
 #endif
-#include "blaze/gemm/kernel/kernel_tqbmm_mx.h"
+#include "blaze/gemm/kernel/kernel_tqbmm.h"
 #if defined(ASCENDC_CPU_DEBUG)
 #undef __fp4e2m1x2
 #undef __fp8e4m3

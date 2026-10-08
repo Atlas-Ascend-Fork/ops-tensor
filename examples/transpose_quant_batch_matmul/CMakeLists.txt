@@ -8,3 +8,5 @@
 # ============================================================================
 
 ops_example_add_executable(tqbmm_mx tqbmm_mx/tqbmm_mx.cpp)
+ops_example_add_executable(tqbmm_fixpipe_quant tqbmm_fixpipe_quant/tqbmm_fixpipe_quant.cpp)
+ops_example_add_executable(tqbmm_mix tqbmm_mix/tqbmm_mix.cpp)

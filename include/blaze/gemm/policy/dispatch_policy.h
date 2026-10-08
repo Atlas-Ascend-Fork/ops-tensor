@@ -28,32 +28,35 @@ struct KernelMmadWithScaleMxActivationQuant {}; // Multi-block with Mx scale, AI
 struct KernelMmadWithScaleFixpipeQuant {};      // Multi-block with fixpipe quant scale (A8W8 fixpipe)
 struct KernelMmadWithScaleFixpipeQuantWithoutBatch {}; // Multi-block with fixpipe quant scale, without batch broadcast
 struct KernelGroupedMmadWithScaleFixpipeQuant {};      // Grouped S8S4 with fixpipe per-channel/per-group scale
-struct KernelGroupedMmadFixpipeQuant {};        // Grouped multi-block with fixpipe quant scale (A8W8 fixpipe GMM)
-struct KernelMmadWithScaleMix {};               // Multi-block with fixpipe mix scale (WeightNZ)
-struct KernelMmadWithScaleMixWithoutBatch {};   // Multi-block with fixpipe mix scale (WeightNZ), without batch
-struct KernelMultiBlockStreamK {};              // Multi-tile transfer with K-axis spliting and caching
-struct KernelQbmmMultiBlockStreamK {};          // QBMM MX StreamK schedule
-struct KernelQbmmPertensorMultiBlockStreamK {}; // QBMM per-tensor StreamK schedule
-struct KernelMmadMultiBlockBasic {};            // Multi-tile basic
-struct KernelMmadFmmWithScaleAdd {};            // Fused matmul with scale/add epilogue
-struct KernelMmadSyrk {};                       // Symmetric rank-k update, single nd2nz fetch per row-block
-struct KernelIterBatchBroadcast {};             // Multi-tile batchMatmul broadcast + iterbatch
-struct KernelIterBatch {};                      // Multi-tile batchMatmul iterbatch
-struct KernelMmadMultiBlockBmmBroadcast {};     // Multi-tile batchMatmul broadcast
-struct KernelMmadMultiBlockAFullLoad {};        // Multi-tile aFullLoad
-struct KernelMmadMultiBlockBFullLoad {};        // Multi-tile fullLoad
-struct KernelMmadMultiBlockFixpipeOpti {};      // Multi-tile FixpipeOpti
-struct KernelMmadMultiBlockTBMM {};             // tbmm schedule
-struct KernelMmadMultiBlockTQBMM {};            // tqbmm schedule
-struct KernelMixWithWeightPrologue {};          // Mix matmul with AIV weight preprocessing
-struct KernelMixWithWeightPergroupPrologue {};  // Mix matmul with AIV per-group weight dequant preprocessing
-struct KernelWqgmmMxMix {};                     // Grouped MX mix kernel with AIV weight preprocessing
-struct KernelGmmSwiGluMixMx {};                 // MIX AIC+AIV schedule for GroupedMatmul + SwiGLU + MX quant
-struct KernelMatmulEmuSplitWeight {};           // Double bf16 matmul to simulate fp32 (AIC+AIV)
-struct KernelMmadWithScaleMxMix {};             // Multi-block with Mx scale, epilogue after block mmad
-struct KernelQgmmMxMixFinalizeRouting {};       // MIX AIC+AIV schedule for GroupedMatmulFinalizeRouting MX
-struct KernelGroupedMmadNoQuant {};             // Grouped multi-block without quantization
-struct KernelMmadAPrefetchBAntiquant {};        // AIV weight dequantization and AIC matrix multiplication
+struct KernelGroupedMmadFixpipeQuant {};         // Grouped multi-block with fixpipe quant scale (A8W8 fixpipe GMM)
+struct KernelMmadWithScaleMix {};                // Multi-block with fixpipe mix scale (WeightNZ)
+struct KernelMmadWithScaleMixWithoutBatch {};    // Multi-block with fixpipe mix scale (WeightNZ), without batch
+struct KernelMultiBlockStreamK {};               // Multi-tile transfer with K-axis spliting and caching
+struct KernelQbmmMultiBlockStreamK {};           // QBMM MX StreamK schedule
+struct KernelQbmmPertensorMultiBlockStreamK {};  // QBMM per-tensor StreamK schedule
+struct KernelMmadMultiBlockBasic {};             // Multi-tile basic
+struct KernelMmadFmmWithScaleAdd {};             // Fused matmul with scale/add epilogue
+struct KernelMmadSyrk {};                        // Symmetric rank-k update, single nd2nz fetch per row-block
+struct KernelIterBatchBroadcast {};              // Multi-tile batchMatmul broadcast + iterbatch
+struct KernelIterBatch {};                       // Multi-tile batchMatmul iterbatch
+struct KernelMmadMultiBlockBmmBroadcast {};      // Multi-tile batchMatmul broadcast
+struct KernelMmadMultiBlockAFullLoad {};         // Multi-tile aFullLoad
+struct KernelMmadMultiBlockBFullLoad {};         // Multi-tile fullLoad
+struct KernelMmadMultiBlockFixpipeOpti {};       // Multi-tile FixpipeOpti
+struct KernelMmadMultiBlockTBMM {};              // tbmm schedule
+struct KernelMmadMultiBlockTQBMM {};             // tqbmm schedule
+struct KernelMmadMultiBlockTQBMMFixpipeQuant {}; // tqbmm fixpipe quant schedule (HIFP8)
+struct KernelMmadMultiBlockTQBMMMx {};           // tqbmm mix schedule (FP8 per-token dequant)
+struct KernelMixWithWeightPrologue {};           // Mix matmul with AIV weight preprocessing
+struct KernelMixWithWeightPergroupPrologue {};   // Mix matmul with AIV per-group weight dequant preprocessing
+struct KernelWqgmmMxMix {};                      // Grouped MX mix kernel with AIV weight preprocessing
+struct KernelGmmSwiGluMixMx {};                  // MIX AIC+AIV schedule for GroupedMatmul + SwiGLU + MX quant
+struct KernelMatmulEmuSplitWeight {};            // Double bf16 matmul to simulate fp32 (AIC+AIV)
+struct KernelMmadWithScaleMxMix {};              // Multi-block with Mx scale, epilogue after block mmad
+struct KernelQgmmMxMixFinalizeRouting {};        // MIX AIC+AIV schedule for GroupedMatmulFinalizeRouting MX
+struct KernelGroupedMmadNoQuant {};              // Grouped multi-block without quantization
+struct KernelMmadAPrefetchBAntiquant {};         // AIV weight dequantization and AIC matrix multiplication
+
 enum class MatmulOutputMode : std::uint8_t { OVERWRITE = 0, INPLACE_ADD = 1 };
 enum class MatMulL0C2Out : std::uint8_t { ON_THE_FLY = 0, ND_FIXPIPE_1_1 = 1, ND_FIXPIPE_1_2 = 2 };
 
@@ -66,12 +69,13 @@ enum class MatMulL0C2Out : std::uint8_t { ON_THE_FLY = 0, ND_FIXPIPE_1_1 = 1, ND
  * @param [in] GmmArrayPtr_: grouped shape array pointer type, preserving the caller's address space
  */
 template <uint64_t FullLoadMode_ = 0, bool AtomicAdd_ = false, class ScheduleType_ = KernelMmadWithScaleFixpipeQuant,
-          class GmmArrayPtr_ = __gm__ int32_t*>
+          class GmmArrayPtr_ = __gm__ int32_t*, uint64_t NonContiguousType_ = 0>
 struct MatmulWithScaleFixpipeQuant {
     using ScheduleType = ScheduleType_;
     using GmmArrayPtr = GmmArrayPtr_;
     static constexpr uint64_t FULL_LOAD_MODE = FullLoadMode_;
     static constexpr bool IS_ATOMIC_ADD = AtomicAdd_;
+    static constexpr uint64_t NON_CONTIGUOUS_TYPE = NonContiguousType_;
 };
 
 /**
@@ -80,11 +84,13 @@ struct MatmulWithScaleFixpipeQuant {
  * @param [in] FullLoadMode_: full-load mode, 0 = none, A_FULL_LOAD_MODE = A full load
  * @param [in] AtomicAdd_: whether to enable atomic add on output
  */
-template <uint64_t FullLoadMode_ = 0, bool AtomicAdd_ = false, class ScheduleType_ = KernelMmadWithScaleMix>
+template <uint64_t FullLoadMode_ = 0, bool AtomicAdd_ = false, class ScheduleType_ = KernelMmadWithScaleMix,
+          uint64_t NonContiguousType_ = 0>
 struct MatmulWithScaleMix {
     using ScheduleType = ScheduleType_;
     static constexpr uint64_t FULL_LOAD_MODE = FullLoadMode_;
     static constexpr bool IS_ATOMIC_ADD = AtomicAdd_;
+    static constexpr uint64_t NON_CONTIGUOUS_TYPE = NonContiguousType_;
 };
 
 /**

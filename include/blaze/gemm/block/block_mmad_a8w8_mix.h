@@ -38,10 +38,11 @@ using AscendC::SetFlag;
 using AscendC::SetMMLayoutTransform;
 using AscendC::WaitFlag;
 
-template <uint64_t FullLoadMode_, bool AtomicAdd_, class ScheduleType_, class AType_, class LayoutA_, class BTypeTuple_,
-          class LayoutB_, class CType_, class LayoutC_, class BiasType_, class LayoutBias_>
-class BlockMmad<MatmulWithScaleMix<FullLoadMode_, AtomicAdd_, ScheduleType_>, AType_, LayoutA_, BTypeTuple_, LayoutB_,
-                CType_, LayoutC_, BiasType_, LayoutBias_> {
+template <uint64_t FullLoadMode_, bool AtomicAdd_, class ScheduleType_, uint64_t NonContiguousType_, class AType_,
+          class LayoutA_, class BTypeTuple_, class LayoutB_, class CType_, class LayoutC_, class BiasType_,
+          class LayoutBias_>
+class BlockMmad<MatmulWithScaleMix<FullLoadMode_, AtomicAdd_, ScheduleType_, NonContiguousType_>, AType_, LayoutA_,
+                BTypeTuple_, LayoutB_, CType_, LayoutC_, BiasType_, LayoutBias_> {
 public:
     using AType = AType_;
     using BType = typename AscendC::Std::tuple_element<0, BTypeTuple_>::type;
@@ -49,7 +50,7 @@ public:
     using LayoutB = LayoutB_;
     using LayoutBias = LayoutBias_;
     using L0CType = AscendC::Std::conditional_t<AscendC::IsSameType<AType, int8_t>::value, int32_t, float>;
-    using DispatchPolicy = MatmulWithScaleMix<FullLoadMode_, AtomicAdd_, ScheduleType_>;
+    using DispatchPolicy = MatmulWithScaleMix<FullLoadMode_, AtomicAdd_, ScheduleType_, NonContiguousType_>;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
 

@@ -99,6 +99,7 @@ public:
         uint32_t x2QuantMode{0};
         bool isBias{false};
         uint32_t biasDtype{0};
+        int64_t batch{1};
     };
 
     __aicore__ inline BlockEpilogueDequant() {}
@@ -117,6 +118,7 @@ public:
         n_ = params.n;
         baseM_ = params.baseM;
         baseN_ = params.baseN;
+        batch_ = params.batch;
         isBias_ = params.isBias;
         isPerChannel_ = (params.x2QuantMode == static_cast<uint32_t>(QuantMode::PERCHANNEL_MODE));
         isPerToken_ = (params.x1QuantMode == static_cast<uint32_t>(QuantMode::PERTOKEN_MODE));
@@ -194,7 +196,7 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(pingPongId_);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(pingPongId_);
 
-            int64_t gmOffset = offsetC + (mOffset + i * mSizeForOnce) * n_;
+            int64_t gmOffset = offsetC + (mOffset + i * mSizeForOnce) * n_ * batch_;
             CopyResultToGm(mSize, singleCoreN, gmOffset);
 
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(pingPongId_);
@@ -614,10 +616,10 @@ private:
 
         // UB->GM via Tensor API copy_ub_to_gm. Both ends are nd_ext_layout_ptn with mSize rows and
         // singleCoreN valid columns; the row pitch differs per buffer (UB padded to nDstAligned,
-        // GM strided by the full output width n_), which reproduces the original DataCopyPad
-        // gap-based strided copy out.
+        // GM strided by the full output row pitch n_ * batch_ for the (M, B, N) layout), which
+        // reproduces the original DataCopyPad gap-based strided copy out.
         auto ubLayout = Gemm::MakeNDExtLayout(mSize, singleCoreN, static_cast<int64_t>(nDstAligned));
-        auto gmLayout = Gemm::MakeNDExtLayout(mSize, singleCoreN, n_);
+        auto gmLayout = Gemm::MakeNDExtLayout(mSize, singleCoreN, n_ * batch_);
         auto outUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, OutType>(dequantOffset),
                                           ubLayout);
         auto outGm = asc::te::make_tensor(
@@ -645,6 +647,7 @@ private:
     int64_t n_{0};
     int64_t baseM_{0};
     int64_t baseN_{0};
+    int64_t batch_{1};
     bool isBias_{false};
     uint32_t biasDtype_{0};
     GM_ADDR biasGmAddr_{nullptr};

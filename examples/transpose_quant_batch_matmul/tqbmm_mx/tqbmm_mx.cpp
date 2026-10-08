@@ -12,7 +12,7 @@
  * @file transpose_quant_batch_matmul_mx.cpp
  * @brief TQBMM MX Transpose Quant Batch MatMul example.
  *
- * Exercises Blaze::Gemm::Kernel::GemmUniversal (kernel_tqbmm_mx.h)
+ * Exercises Blaze::Gemm::Kernel::GemmUniversal (kernel_tqbmm.h)
  * with Blaze::Gemm::MatmulWithScaleMx dispatch policy and
  * Blaze::Gemm::Block::BlockMmad (block_mmad_qbmm_mx.h).
  *
@@ -38,7 +38,8 @@
 #define __fp4e2m1x2 fp4x2_e2m1_t
 #include "blaze/gemm/block/block_mmad_qbmm_mx.h"
 #include "blaze/gemm/block/block_scheduler_qbmm.h"
-#include "blaze/gemm/kernel/kernel_tqbmm_mx.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_tqbmm.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #undef __fp4e2m1x2

@@ -7,7 +7,7 @@
 - **算子**: transpose_quant_batch_matmul
 - **场景**: tqbmm_mx
 - **算法特点**: A/B 双侧 MX 量化，仅支持 mxFP8（fp8_e4m3）和 mxFP4（fp4_e2m1），支持 Transpose Batch
-- **参考实现**: 基于 Blaze 框架 `blaze/gemm/kernel/kernel_tqbmm_mx.h` + `blaze/gemm/block/block_mmad_qbmm_mx.h`
+- **参考实现**: 基于 Blaze 框架 `blaze/gemm/kernel/kernel_tqbmm.h` + `blaze/gemm/block/block_mmad_qbmm_mx.h`
 
 ## 支持架构
 
@@ -118,7 +118,7 @@ tqbmm_mx/
 
 | 组件            | 头文件                                          | 职责                            |
 | --------------- | ----------------------------------------------- | ------------------------------- |
-| Kernel          | `blaze/gemm/kernel/kernel_tqbmm_mx.h`         | Transpose MX quant batch matmul |
+| Kernel          | `blaze/gemm/kernel/kernel_tqbmm.h`         | Transpose MX quant batch matmul |
 | Block MMAD      | `blaze/gemm/block/block_mmad_qbmm_mx.h`       | Block 级 MX 矩阵乘              |
 | Block Scheduler | `blaze/gemm/block/block_scheduler_qbmm.h`     | QBMM V3 调度器                  |
 | Epilogue        | `blaze/epilogue/block/block_epilogue_empty.h` | 空 epilogue                     |

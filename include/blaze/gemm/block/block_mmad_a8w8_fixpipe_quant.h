@@ -35,11 +35,11 @@ using AscendC::IsSameType;
 using AscendC::SetFlag;
 using AscendC::WaitFlag;
 
-template <uint64_t FullLoadMode_, bool AtomicAdd_, class ScheduleType_, class GmmArrayPtr_, class AType_,
-          class LayoutA_, class BTypeTuple_, class LayoutB_, class CType_, class LayoutC_, class BiasType_,
-          class LayoutBias_>
-class BlockMmad<MatmulWithScaleFixpipeQuant<FullLoadMode_, AtomicAdd_, ScheduleType_, GmmArrayPtr_>, AType_, LayoutA_,
-                BTypeTuple_, LayoutB_, CType_, LayoutC_, BiasType_, LayoutBias_> {
+template <uint64_t FullLoadMode_, bool AtomicAdd_, class ScheduleType_, class GmmArrayPtr_, uint64_t NonContiguousType_,
+          class AType_, class LayoutA_, class BTypeTuple_, class LayoutB_, class CType_, class LayoutC_,
+          class BiasType_, class LayoutBias_>
+class BlockMmad<MatmulWithScaleFixpipeQuant<FullLoadMode_, AtomicAdd_, ScheduleType_, GmmArrayPtr_, NonContiguousType_>,
+                AType_, LayoutA_, BTypeTuple_, LayoutB_, CType_, LayoutC_, BiasType_, LayoutBias_> {
 public:
     using AType = AType_;
     using BType = typename AscendC::Std::tuple_element<0, BTypeTuple_>::type;
@@ -51,11 +51,11 @@ public:
     using LayoutC = LayoutC_;
     using LayoutBias = LayoutBias_;
     using L0CType = AscendC::Std::conditional_t<AscendC::IsSameType<AType, int8_t>::value, int32_t, float>;
-    using DispatchPolicy = MatmulWithScaleFixpipeQuant<FullLoadMode_, AtomicAdd_, ScheduleType_, GmmArrayPtr_>;
+    using DispatchPolicy = MatmulWithScaleFixpipeQuant<FullLoadMode_, AtomicAdd_, ScheduleType_, GmmArrayPtr_,
+                                                       NonContiguousType_>;
     using WorkspaceType = L0CType;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
-
     static constexpr bool WEIGHT_NZ = IsWeightNz<LayoutB>::value;
     static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
