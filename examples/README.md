@@ -117,6 +117,7 @@ examples/
 | `grouped_matmul/`               | quant_grouped_matmul_mx, quant_grouped_matmul_activation_quant_mx, [quant_grouped_matmul_swiglu_quant_mx](grouped_matmul/quant_grouped_matmul_swiglu_quant_mx/README.md), [quant_grouped_matmul_cubeonly](grouped_matmul/quant_grouped_matmul_cubeonly/README.md), [grouped_matmul_mx_a8w4](grouped_matmul/grouped_matmul_mx_a8w4/README.md) | Grouped MatMul 与量化、激活量化、SwiGLU MX 样例 |
 | `quant_matmul_activation_quant/` | quant_matmul_activation_quant                                                                | 量化矩阵乘激活融合样例                   |
 | `transpose_quant_batch_matmul/`  | tqbmm_mx                                                                                     | 转置量化批量矩阵乘法样例                 |
+| `gemm_syrk/`                      | [gemm_syrk_basic](gemm_syrk/gemm_syrk_basic/README.md)                                        | 对称秩k更新（syrk）样例，单次搬运 + 上三角调度，C 原地更新 |
 
 ## 4. 执行方法
 

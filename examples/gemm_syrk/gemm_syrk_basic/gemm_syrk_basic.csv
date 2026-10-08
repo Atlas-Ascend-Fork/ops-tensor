@@ -1,0 +1,8 @@
+casename,m,k,batch,alpha,beta,dtype,trans
+gemm_syrk_basic_fp16,128,256,1,1.0,1.0,float16,false
+gemm_syrk_basic_bf16,128,256,1,1.0,1.0,bfloat16,false
+gemm_syrk_alpha_beta_fp16,256,512,1,2.0,0.5,float16,false
+gemm_syrk_batch_fp16,64,128,4,1.0,1.0,float16,false
+gemm_syrk_tail_fp16,200,40,2,1.5,0.5,float16,false
+gemm_syrk_trans_fp16,128,256,1,1.0,1.0,float16,true
+gemm_syrk_trans_bf16,64,128,2,2.0,1.0,bfloat16,true
