@@ -25,6 +25,7 @@
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/kernel/kernel_universal.h"
 #include "tensor_api/tensor.h"
@@ -244,7 +245,7 @@ private:
         if constexpr (HAS_ACTIVATION_QUANT) {
             if ASCEND_IS_AIC {
                 if (isVecSetSyncCom_) {
-                    WaitForVector();
+                    Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
                 }
             }
         }
@@ -436,20 +437,20 @@ private:
             if constexpr (HAS_ACTIVATION_QUANT) {
                 if ASCEND_IS_AIC {
                     if (isVecSetSyncCom_) {
-                        WaitForVector();
+                        Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
                     }
                     auto ubC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0),
                                                        asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
                                                            (blockM + 1) & ~static_cast<int64_t>(1), Align32(blockN)));
                     blockMmad_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, ubC, blockShape);
-                    NotifyVector();
+                    Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
                 }
                 isVecSetSyncCom_ = true;
                 if ASCEND_IS_AIV {
-                    WaitForCube();
+                    Sync::WaitForCube();
                     epilogueOp_({blockM, blockN, static_cast<int64_t>(0), static_cast<int64_t>(0)},
                                 {blockInfo.outputOffsets.outputOffset, blockInfo.outputOffsets.outputScaleOffset});
-                    NotifyCube();
+                    Sync::NotifyCube();
                 }
             } else {
                 auto gmBlockC = gmC.slice(asc::te::make_coord(mPos, nPos), asc::te::make_shape(blockM, blockN));

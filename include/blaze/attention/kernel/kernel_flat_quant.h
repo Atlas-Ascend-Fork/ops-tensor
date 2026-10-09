@@ -22,6 +22,7 @@
 #include "kernel_operator_intf.h"
 #endif
 #include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/attention/kernel/kernel_universal.h"
 #include "blaze/attention/block/block_mmad_flat_quant.h"
@@ -134,10 +135,10 @@ private:
             if ASCEND_IS_AIC {
                 if (roundIdx > 0) {
                     if ((roundIdx & 1) == 1) {
-                        AscendC::CrossCoreWaitFlag<FLAT_QUANT_SYNC_MODE, PIPE_FIX>(FLAT_QUANT_SYNC_AIV_AIC_FLAG);
+                        Gemm::Sync::WaitForVector<FLAT_QUANT_SYNC_MODE, PIPE_FIX>(FLAT_QUANT_SYNC_AIV_AIC_FLAG);
                     } else {
-                        AscendC::CrossCoreWaitFlag<FLAT_QUANT_SYNC_MODE, PIPE_FIX>(FLAT_QUANT_SYNC_AIV_AIC_FLAG +
-                                                                                   FLAT_QUANT_FLAG_ID_MAX);
+                        Gemm::Sync::WaitForVector<FLAT_QUANT_SYNC_MODE, PIPE_FIX>(FLAT_QUANT_SYNC_AIV_AIC_FLAG +
+                                                                                  FLAT_QUANT_FLAG_ID_MAX);
                     }
                 }
                 int64_t rowOffset = batchOffset * m_;
@@ -145,18 +146,18 @@ private:
 
                 blockMmadOp(gmBlockA, gmP1, gmP2, blockShape, tileIdx < coreNums);
                 if (roundIdx % 2 == 0) {
-                    AscendC::CrossCoreSetFlag<FLAT_QUANT_SYNC_MODE, PIPE_FIX>(FLAT_QUANT_SYNC_AIC_AIV_FLAG);
+                    Gemm::Sync::NotifyVector<FLAT_QUANT_SYNC_MODE, PIPE_FIX>(FLAT_QUANT_SYNC_AIC_AIV_FLAG);
                 } else {
-                    AscendC::CrossCoreSetFlag<FLAT_QUANT_SYNC_MODE, PIPE_FIX>(FLAT_QUANT_SYNC_AIC_AIV_FLAG +
-                                                                              FLAT_QUANT_FLAG_ID_MAX);
+                    Gemm::Sync::NotifyVector<FLAT_QUANT_SYNC_MODE, PIPE_FIX>(FLAT_QUANT_SYNC_AIC_AIV_FLAG +
+                                                                             FLAT_QUANT_FLAG_ID_MAX);
                 }
             }
             if ASCEND_IS_AIV {
                 if ((roundIdx & 1) == AscendC::GetSubBlockIdx()) {
-                    AscendC::CrossCoreWaitFlag<FLAT_QUANT_SYNC_MODE, PIPE_V>(FLAT_QUANT_SYNC_AIC_AIV_FLAG);
+                    Gemm::Sync::WaitForCube<FLAT_QUANT_SYNC_MODE, PIPE_V>(FLAT_QUANT_SYNC_AIC_AIV_FLAG);
                     epilogueOp(batchOffset, iterBatch);
                     if (tileIdx + coreNums < CeilAlign(blockNums, coreNums)) {
-                        AscendC::CrossCoreSetFlag<FLAT_QUANT_SYNC_MODE, PIPE_MTE3>(FLAT_QUANT_SYNC_AIV_AIC_FLAG);
+                        Gemm::Sync::NotifyCube<FLAT_QUANT_SYNC_MODE, PIPE_MTE3>(FLAT_QUANT_SYNC_AIV_AIC_FLAG);
                     }
                 }
             }

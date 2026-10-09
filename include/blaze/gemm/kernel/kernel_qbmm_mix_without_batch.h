@@ -22,6 +22,7 @@
 #include "kernel_operator_intf.h"
 #endif
 #include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/block/block_scheduler_qbmm.h"
@@ -127,7 +128,7 @@ private:
         constexpr int64_t kPos = 0;
         if ASCEND_IS_AIC {
             if (hasBlock) {
-                WaitForVector();
+                Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
             }
             auto gmBlockA = gmA.slice(asc::te::make_coord(mPos, kPos), asc::te::make_shape(curM, k));
             auto gmBlockB = gmB.slice(asc::te::make_coord(kPos, nPos), asc::te::make_shape(k, curN));
@@ -140,12 +141,12 @@ private:
             auto ubC = asc::te::make_tensor(
                 asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(l0cUbBaseOffset * sizeof(L0CType)), layoutUbC);
             mmOp_(gmBlockA, gmBlockB, ubC, singleShape);
-            NotifyVector();
+            Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
         }
         if ASCEND_IS_AIV {
-            WaitForCube();
+            Sync::WaitForCube();
             epilogueOp_(curM, curN, nPos, mPos, nPos, mPos * n + nPos, l0cUbBaseOffset);
-            NotifyCube();
+            Sync::NotifyCube();
         }
     }
 
@@ -189,7 +190,7 @@ private:
         }
         if ASCEND_IS_AIC {
             if (hasBlock) {
-                WaitForVector();
+                Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
             }
         }
     }

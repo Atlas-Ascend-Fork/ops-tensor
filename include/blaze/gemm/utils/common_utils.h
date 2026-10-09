@@ -22,6 +22,8 @@
 #include "kernel_operator.h"
 #endif
 #include "tensor_api/utils/utils.h"
+// 引入 sync.h 使 host 边 PIPE_FIX 兜底宏先于下方 Deprecated 模板默认实参生效
+#include "blaze/gemm/utils/sync.h"
 
 namespace Blaze {
 namespace Gemm {
@@ -118,10 +120,10 @@ constexpr uint64_t MAX_BATCH_DIM = 4;
 
 // AIC(cube) <-> AIV(vector) cross-core notify/wait handshake used by the QBMM MIX kernels
 // (kernel_qbmm_mix.h / kernel_qbmm_mix_without_batch.h). Provided as free functions (no helper class).
-constexpr uint16_t QBMM_MIX_SYNC_MODE = 4;
-constexpr uint16_t QBMM_MIX_AIC_SYNC_AIV_FLAG = 0;
-constexpr uint16_t QBMM_MIX_AIV_SYNC_AIC_FLAG = 1;
-constexpr uint16_t QBMM_MIX_FLAG_ID_MAX = 16;
+constexpr uint16_t MIX_SYNC_MODE = 4;
+constexpr uint16_t MIX_AIC_SYNC_AIV_FLAG = 0;
+constexpr uint16_t MIX_AIV_SYNC_AIC_FLAG = 1;
+constexpr uint16_t MIX_FLAG_ID_MAX = 16;
 
 // (kernel_qbmm_mx_activation_quant.h).
 constexpr int64_t BLOCK_SIZE = 32;
@@ -224,26 +226,33 @@ __aicore__ inline uint64_t CalScaleNZGmAddrOffset(bool transB, int64_t batchIdx,
     return static_cast<uint64_t>(batchIdx) * static_cast<uint64_t>(scaleK) * Align16(static_cast<uint64_t>(n));
 }
 
-__aicore__ inline void NotifyVector()
+// [Deprecated] 以下四个同步方法仅为向后兼容保留，新代码请勿调用。
+// 建议改用 blaze/gemm/utils/sync.h 中 Blaze::Gemm::Sync 命名空间下的同名方法，
+// 新方法支持 isMixCV1V2 和 NpuArch 模板参数，功能更完整。
+template <uint16_t Mode = MIX_SYNC_MODE, pipe_t Pipe = PIPE_FIX>
+__aicore__ inline void NotifyVector(uint16_t id = MIX_AIC_SYNC_AIV_FLAG)
 {
-    AscendC::CrossCoreSetFlag<QBMM_MIX_SYNC_MODE, PIPE_FIX>(QBMM_MIX_AIC_SYNC_AIV_FLAG);
-    AscendC::CrossCoreSetFlag<QBMM_MIX_SYNC_MODE, PIPE_FIX>(QBMM_MIX_AIC_SYNC_AIV_FLAG + QBMM_MIX_FLAG_ID_MAX);
+    AscendC::CrossCoreSetFlag<Mode, Pipe>(id);
+    AscendC::CrossCoreSetFlag<Mode, Pipe>(id + MIX_FLAG_ID_MAX);
 }
 
-__aicore__ inline void WaitForVector()
+template <uint16_t Mode = MIX_SYNC_MODE, pipe_t Pipe = PIPE_FIX>
+__aicore__ inline void WaitForVector(uint16_t id = MIX_AIV_SYNC_AIC_FLAG)
 {
-    AscendC::CrossCoreWaitFlag<QBMM_MIX_SYNC_MODE, PIPE_FIX>(QBMM_MIX_AIV_SYNC_AIC_FLAG);
-    AscendC::CrossCoreWaitFlag<QBMM_MIX_SYNC_MODE, PIPE_FIX>(QBMM_MIX_AIV_SYNC_AIC_FLAG + QBMM_MIX_FLAG_ID_MAX);
+    AscendC::CrossCoreWaitFlag<Mode, Pipe>(id);
+    AscendC::CrossCoreWaitFlag<Mode, Pipe>(id + MIX_FLAG_ID_MAX);
 }
 
-__aicore__ inline void NotifyCube()
+template <uint16_t Mode = MIX_SYNC_MODE, pipe_t Pipe = PIPE_V>
+__aicore__ inline void NotifyCube(uint16_t id = MIX_AIV_SYNC_AIC_FLAG)
 {
-    AscendC::CrossCoreSetFlag<QBMM_MIX_SYNC_MODE, PIPE_V>(QBMM_MIX_AIV_SYNC_AIC_FLAG);
+    AscendC::CrossCoreSetFlag<Mode, Pipe>(id);
 }
 
-__aicore__ inline void WaitForCube()
+template <uint16_t Mode = MIX_SYNC_MODE, pipe_t Pipe = PIPE_V>
+__aicore__ inline void WaitForCube(uint16_t id = MIX_AIC_SYNC_AIV_FLAG)
 {
-    AscendC::CrossCoreWaitFlag<QBMM_MIX_SYNC_MODE, PIPE_V>(QBMM_MIX_AIC_SYNC_AIV_FLAG);
+    AscendC::CrossCoreWaitFlag<Mode, Pipe>(id);
 }
 
 __aicore__ inline void SetHF32(uint8_t isHf32)

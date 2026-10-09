@@ -21,6 +21,7 @@
 #endif
 #include "blaze/epilogue/fusion/default_fusion_op.h"
 #include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "tensor_api/tensor.h"
 
@@ -104,9 +105,9 @@ public:
 
             // wait for AIC fixpipe (chunk ready) on the pipe that consumes UB first
             if constexpr (DispatchPolicy::FUSED_OP_TYPE == Gemm::OP_TYPE_RELU) {
-                AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG + slot);
+                Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG + slot);
             } else {
-                AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIC_SYNC_AIV_FLAG + slot);
+                Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIC_SYNC_AIV_FLAG + slot);
             }
             AscendC::LocalTensor<DataTypeIn> ubLocal_{AscendC::TPosition::VECIN, 0,
                                                       AscendC::TOTAL_UB_SIZE / sizeof(DataTypeIn)};
@@ -129,7 +130,7 @@ public:
             }
 
             // notify AIC the UB slot is free
-            AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG + slot);
+            Gemm::Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG + slot);
             cvPingPong_++;
         }
     }

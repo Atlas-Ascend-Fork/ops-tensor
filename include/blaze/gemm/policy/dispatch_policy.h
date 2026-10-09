@@ -228,7 +228,6 @@ struct MatmulMultiBlockBasicSplitK {
  */
 template <uint64_t FullLoadMode_ = A_FULL_LOAD_MODE, uint64_t FusedOpType_ = 0,
           class KernelSchedule_ = KernelMmadMultiBlockAFullLoad, uint64_t NonContiguousType_ = 0>
-
 struct MatmulMultiBlockAFullLoad {
     using ScheduleType = KernelSchedule_;
     static constexpr uint64_t FULL_LOAD_MODE = FullLoadMode_;

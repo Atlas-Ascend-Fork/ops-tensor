@@ -23,6 +23,7 @@
 #include "kernel_operator_intf.h"
 #endif
 #include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "tensor_api/tensor.h"
 
@@ -401,7 +402,7 @@ __aicore__ inline void GemmUniversal<QBMM_MX_KERNEL_TEM_PARAMS>::End()
 {
     if ASCEND_IS_AIC {
         if (isVecSetSyncCom_) {
-            WaitForVector();
+            Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
         }
     }
 }
@@ -425,18 +426,18 @@ __aicore__ inline void GemmUniversal<QBMM_MX_KERNEL_TEM_PARAMS>::ProcessOneBlock
         ubmemPtr, asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>((baseM + 1) & ~1, Align32(baseN)));
     if ASCEND_IS_AIC {
         if (isVecSetSyncCom_) {
-            WaitForVector();
+            Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
         }
         mmadOp_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, locOutUb, singleShape);
-        NotifyVector();
+        Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
     }
     isVecSetSyncCom_ = true;
     if ASCEND_IS_AIV {
-        WaitForCube();
+        Sync::WaitForCube();
         epilogueOp_({baseM, baseN, 0, 0},
                     {mPos * n + nPos,
                      mPos * CeilDiv(n, BLOCK_SIZE * ALIGN_NUM_2) * ALIGN_NUM_2 + CeilDiv(nPos, BLOCK_SIZE), 0, 0, 0});
-        NotifyCube();
+        Sync::NotifyCube();
     }
 }
 
@@ -473,10 +474,10 @@ __aicore__ inline void GemmUniversal<QBMM_MX_KERNEL_TEM_PARAMS>::ProcessTileLoop
         const auto baseN = asc::te::get<IDX_N_TILEIDX>(singleShape);
         if (baseM <= 0 || baseN <= 0) {
             if ASCEND_IS_AIC {
-                NotifyVector();
+                Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
             }
             if ASCEND_IS_AIV {
-                NotifyCube();
+                Sync::NotifyCube();
             }
             return;
         }

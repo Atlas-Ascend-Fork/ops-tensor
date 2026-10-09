@@ -25,6 +25,7 @@
 #include "blaze/epilogue/block/block_epilogue_muls_add.h"
 #include "blaze/gemm/block/block_mmad_matmul_emu_split_weight.h"
 #include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "kernel_universal.h"
 #include "tensor_api/tensor.h"
@@ -149,7 +150,7 @@ private:
 
             if ASCEND_IS_AIC {
                 if (enableCVSync[targetSubBlockId]) {
-                    AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG + flagOffset);
+                    Sync::WaitForVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG + flagOffset);
                 }
 
                 auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(xGmAddr_), layoutA);
@@ -180,17 +181,17 @@ private:
                              useSubBlockOne);
 
                 enableCVSync[targetSubBlockId] = true;
-                AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG + flagOffset);
+                Sync::NotifyVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG + flagOffset);
             }
 
             if ASCEND_IS_AIV {
                 if (AscendC::GetSubBlockIdx() != targetSubBlockId) {
                     continue;
                 }
-                AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG);
+                Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG);
                 epilogueOp_({curM, curN, 1, 1}, offsetC);
                 if (blockIdx + 2 * AscendC::GetBlockNum() < static_cast<int64_t>(totalBlocks)) {
-                    AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG);
+                    Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG);
                 }
             }
         }

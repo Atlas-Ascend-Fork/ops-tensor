@@ -20,6 +20,7 @@
 #pragma once
 
 #include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
@@ -320,15 +321,9 @@ private:
         asc::te::l0c_to_gm_params fixpParams{asc::te::unit_flag_mode::enable_update};
         if constexpr (DispatchPolicy::L0C2OUT_MODEL != ON_THE_FLY) {
             uint16_t slot = (ubDB_ > 1) ? static_cast<uint16_t>(cvPingPong_ & 0x1) : 0U;
-            AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG + slot);
-            if (splitM_) {
-                AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG + slot + FLAG_ID_MAX);
-            }
+            Sync::WaitForVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG + slot, splitM_);
             CopyOutFromL0C2UB(tensorC, tensorL0C, tileN, curM, slot);
-            AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG + slot);
-            if (splitM_) {
-                AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG + slot + FLAG_ID_MAX);
-            }
+            Sync::NotifyVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG + slot, splitM_);
             cvPingPong_++;
         } else {
             auto tensorGmC = tensorC.slice(asc::te::make_coord(0, iterN * curBaseN_), asc::te::make_shape(curM, tileN));

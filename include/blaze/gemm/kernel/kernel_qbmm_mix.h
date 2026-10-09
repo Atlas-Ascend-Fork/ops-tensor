@@ -24,7 +24,7 @@
 #include "kernel_operator_intf.h"
 #endif
 #include "blaze/gemm/utils/common_utils.h"
-#include "blaze/gemm/block/block_scheduler_qbmm.h"
+#include "blaze/gemm/utils/sync.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {
@@ -186,7 +186,7 @@ private:
         constexpr int64_t kPos = 0;
         if ASCEND_IS_AIC {
             if (!isFirstBlock_) {
-                WaitForVector();
+                Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
             }
 
             auto gmBlockA = gmA.slice(asc::te::make_coord(mPos, kPos), asc::te::make_shape(curM, k));
@@ -200,11 +200,11 @@ private:
             auto ubC = asc::te::make_tensor(
                 asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(l0cUbBaseOffset * sizeof(L0CType)), layoutUbC);
             mmadOp_(gmBlockA, gmBlockB, ubC, singleShape);
-            NotifyVector();
+            Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
             isFirstBlock_ = false;
         }
         if ASCEND_IS_AIV {
-            WaitForCube();
+            Sync::WaitForCube();
             int64_t offsetScale = nPos;
             int64_t offsetPtScale = mPos;
             int64_t offsetBias = nPos;
@@ -213,7 +213,7 @@ private:
                 offsetBias += batchCOffset_ * n;
             }
             epilogueOp_(curM, curN, offsetScale, offsetPtScale, offsetBias, offsetC, l0cUbBaseOffset);
-            NotifyCube();
+            Sync::NotifyCube();
         }
     }
 
@@ -257,7 +257,7 @@ __aicore__ inline void GemmUniversal<QBMM_MIX_KERNEL_TEM_PARAMS>::Run(const Para
 
     if ASCEND_IS_AIC {
         if (!isFirstBlock_) {
-            WaitForVector();
+            Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
         }
     }
 }

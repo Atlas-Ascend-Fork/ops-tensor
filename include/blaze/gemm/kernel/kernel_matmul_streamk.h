@@ -20,6 +20,7 @@
 #include "blaze/gemm/block/block_mmad_matmul_streamk.h"
 #include "blaze/gemm/block/block_mmad_matmul_streamk_split_k.h"
 #include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "kernel_universal.h"
 #include "tensor_api/tensor.h"
 
@@ -99,8 +100,7 @@ private:
         BlockMmad blockMmad;
         int64_t curBlockIdx = AscendC::GetBlockIdx();
         if (curBlockIdx >= bs.GetCoreNums()) {
-            AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG);
-            AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG + FLAG_ID_MAX);
+            Sync::NotifyVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG, true);
             return;
         }
 
@@ -182,8 +182,7 @@ private:
                       bs.CheckIsSkScene(tmpBlockIdx));
 
             if (tmpBlockIdx + usedCoreNum >= totalBlockNums) {
-                AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG);
-                AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG + FLAG_ID_MAX);
+                Sync::NotifyVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG, true);
             }
         }
 
@@ -196,12 +195,12 @@ private:
         uint64_t lastLoopTotalCnt = (mBlockNums_ * nBlockNums_ * batch_ % usedCoreNum) * skBlockNums_;
         uint64_t curBlockIdxInAiv = AscendC::GetBlockIdx();
         if (curBlockIdxInAiv >= lastLoopTotalCnt * AscendC::GetTaskRation()) {
-            AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIC_SYNC_AIV_FLAG);
+            Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIC_SYNC_AIV_FLAG);
             AscendC::SyncAll();
             return;
         }
 
-        AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIC_SYNC_AIV_FLAG);
+        Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIC_SYNC_AIV_FLAG);
         AscendC::SyncAll();
         BlockEpilogue epilogueOp;
         // size of m in L1 & L0 & singlecore, per core use L1 once in stream k

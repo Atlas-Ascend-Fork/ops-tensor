@@ -124,47 +124,6 @@ struct Params {
 | l1Stages | uint32_t | L1 缓冲数量 | 1、2 或 4（默认 1） |
 | l0cStages | uint16_t | L0C 缓冲数量 | 1 或 2（默认 1） |
 
-## 特殊约束
-
-### 调度策略限制
-仅支持以下调度策略：
-- `MatmulMultiBlockBasic<>`（非全载模式）
-- `MatmulMultiBlockBasic<B_FULL_LOAD_MODE>`（B 矩阵全载）
-- `MatmulMultiBlockBasic<A_FULL_LOAD_MODE>`（A 矩阵全载）
-
-不支持 `MatmulMultiBlockWithStreamK` 等其他调度策略。
-
-### 计算模式
-仅支持 AIC 模式，不支持 AIV 计算。
-
-### 输出目标
-结果直接输出到 GM，不支持 workspace。
-
-### Layout Trait
-使用 `IsTrans` 和 `IsWeightNz` traits 判断 Layout：
-- `IsTrans<LayoutA>::value`：判断 A 矩阵是否转置
-- `IsTrans<LayoutB>::value`：判断 B 矩阵是否转置
-- `IsWeightNz<LayoutB>::value`：判断 B 矩阵是否为 NZ 格式
-
-### L1 缓冲布局
-```
-L1 空间布局（2 buffer）：
-AL1Ping|BL1Ping|BiasPing|AL1Pong|BL1Pong|BiasPong
-
-L1 空间布局（4 buffer）：
-AL1Buf0|BL1Buf0|BiasBuf0|AL1Buf1|BL1Buf1|BiasBuf1|AL1Buf2|BL1Buf2|BiasBuf2|AL1Buf3|BL1Buf3|BiasBuf3
-```
-
-### MM Layout Transform
-构造函数和析构函数中设置 MM Layout Transform：
-```
-// 构造函数（ASCEND_IS_NOT_AIV）
-SetMMLayoutTransform(true);  // 适配 Fixpipe 输出
-
-// 析构函数（ASCEND_IS_NOT_AIV）
-SetMMLayoutTransform(false); // 关闭
-```
-
 ## 公共成员方法（Public API）
 
 ### 构造函数
