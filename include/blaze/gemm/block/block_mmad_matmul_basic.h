@@ -408,9 +408,6 @@ private:
     }
 
 private:
-    static constexpr uint16_t L1_BUFFER_ID_BASE = 0;
-    static constexpr uint16_t L0_BUFFER_ID_BASE = 4;
-    static constexpr uint16_t SCALEL1_BUFFER_ID_BASE = 6;
     uint64_t mL1_{1};
     uint64_t nL1_{1};
     uint64_t kL1_{1};

@@ -237,6 +237,19 @@ private:
 };
 
 /* =========================================================================
+ * Block 层 tile 锁 mutex_id 布局（配合下方 LockMte2/LockMte1/LockM/LockFix 使用）
+ *
+ *   [0, 4)    → L1 stage 锁（同一 stage 内的 A/B/Bias/BLow/BHigh 共享）
+ *   [4, 6)    → L0 ping-pong 锁
+ *   [6, 8)    → L0C ping-pong 锁（syrk fixpipe）
+ *   [8, 9)    → int8 输出 quantization scale L1 锁
+ * ========================================================================= */
+constexpr uint16_t L1_BUFFER_ID_BASE = 0;
+constexpr uint16_t L0_BUFFER_ID_BASE = 4;
+constexpr uint16_t L0C_BUFFER_ID_BASE = 6;
+constexpr uint16_t SCALEL1_BUFFER_ID_BASE = 8;
+
+/* =========================================================================
  * 独立锁函数
  * ========================================================================= */
 __aicore__ inline void LockMte2(uint8_t bufferId) { asc_lock(pipe_t::PIPE_MTE2, bufferId); }

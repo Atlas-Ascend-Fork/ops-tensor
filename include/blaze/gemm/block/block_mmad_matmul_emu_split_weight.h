@@ -91,62 +91,54 @@ public:
         // 2buffer时：|APing,BLowPing,BHighPing---|APong,BLowPong,BHighPong---|
         for (uint32_t i = 0; i < L1_STAGES; ++i) {
             uint64_t base = slotSize * i;
-            bufMgr_.InitAL1(i, base, i);
-            bufMgr_.InitBL1(i, base + aL1OneSize, i);
-            bufMgr_.InitBL1(i + L1_STAGES, base + aL1OneSize + bL1OneSize, i + L1_STAGES);
+            aL1Buffer_[i] = base;
+            bLowL1Buffer_[i] = base + aL1OneSize;
+            bHighL1Buffer_[i] = base + aL1OneSize + bL1OneSize;
         }
-        bufMgr_.InitL0();
-        bufMgr_.InitL0C();
     }
 
     template <typename TensorA, typename TensorBHigh, typename TensorBLow, typename TensorCHigh, typename TensorCLow>
     __aicore__ inline void operator()(TensorA gmA, TensorBHigh gmBHigh, TensorBLow gmBLow, TensorCHigh ubBlockCHigh,
                                       TensorCLow ubBlockCLow, BlockShape singleShape, bool targetSubBlockId = false)
     {
+        static constexpr uint64_t HALF_L0C_SIZE = AscendC::TOTAL_L0C_SIZE / DOUBLE_BUFFER_COUNT;
         uint64_t kL1Iter = Blaze::Gemm::CeilDiv(k_, kL1_);
 
         auto gmTensors = AscendC::Std::make_tuple(gmA, gmBHigh, gmBLow);
         auto ubTensors = AscendC::Std::make_tuple(ubBlockCHigh, ubBlockCLow);
 
-        const auto& l0cSlot1 = bufMgr_.GetL0CSlot(0);
-        const auto& l0cSlot2 = bufMgr_.GetL0CSlot(1);
         auto curM = asc::te::get<MNK_M>(singleShape);
         auto curN = asc::te::get<MNK_N>(singleShape);
         auto layoutL0C = asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<C0_SIZE_L0C>>{}(curM,
                                                                                                                 curN);
-        auto tensorL0C1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0c, L0CType_>(l0cSlot1.Addr()),
-                                               layoutL0C);
-        auto tensorL0C2 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0c, L0CType_>(l0cSlot2.Addr()),
+        auto tensorL0C1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0c, L0CType_>(0), layoutL0C);
+        auto tensorL0C2 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0c, L0CType_>(HALF_L0C_SIZE),
                                                layoutL0C);
         auto l0CTensors = AscendC::Std::make_tuple(tensorL0C1, tensorL0C2);
 
         for (uint64_t iter0 = 0; iter0 < kL1Iter; ++iter0) {
-            uint64_t l1BufId = l1LoopCnt_ & L1_BUFFER_MASK;
+            uint16_t l1BufId = l1LoopCnt_ & L1_BUFFER_MASK;
             uint64_t kL1Offset = iter0 * kL1_;
             uint64_t curKL1 = (iter0 + 1 == kL1Iter) ? (k_ - kL1Offset) : kL1_;
 
-            const auto& aL1Slot = bufMgr_.GetL1ASlot(l1BufId);
-            const auto& bLowL1Slot = bufMgr_.GetL1BSlot(l1BufId);
-            const auto& bHighL1Slot = bufMgr_.GetL1BSlot(l1BufId + L1_STAGES);
-
-            auto l1Slots = AscendC::Std::make_tuple(aL1Slot, bLowL1Slot, bHighL1Slot);
             auto l1Shape = BlockShape{curM, curN, static_cast<int64_t>(curKL1), static_cast<int64_t>(iter0)};
-            auto l1Tensors = CopyL1FromGM(gmTensors, l1Shape, l1Slots);
+            auto l1Tensors = CopyL1FromGM(gmTensors, l1Shape, l1BufId);
 
             uint64_t kL0Iter = Blaze::Gemm::CeilDiv(curKL1, baseK_);
             for (uint16_t iter1 = 0; iter1 < kL0Iter; ++iter1) {
                 auto kL0Offset = iter1 * baseK_;
                 auto curKL0 = (kL0Offset + baseK_ > curKL1) ? (curKL1 - kL0Offset) : baseK_;
-                const auto& l0Slot = bufMgr_.GetL0Slot(l0PingPong_ & 0x1);
+                uint16_t l0BufferId = l0PingPong_ & 0x1;
 
                 auto l0Shape = BlockShape{curM, curN, static_cast<int64_t>(curKL0), static_cast<int64_t>(kL0Offset)};
-                auto l0Tensors = CopyL0FromL1(l1Tensors, l0Shape, l0Slot, l1Slots);
+                auto l0Tensors = CopyL0FromL1(l1Tensors, l0Shape, l0BufferId, l1BufId);
 
                 bool isFirstKBeat = (iter0 == 0 && iter1 == 0);
                 bool isLastKBeat = (iter0 + 1 == kL1Iter && iter1 + 1 == kL0Iter);
                 {
-                    auto l0Lock = l0Slot.LockM();
+                    Gemm::LockM(l0BufferId + L0_BUFFER_ID_BASE);
                     Compute(l0CTensors, l0Tensors, l0Shape, isFirstKBeat, isLastKBeat);
+                    Gemm::UnLockM(l0BufferId + L0_BUFFER_ID_BASE);
                 }
                 l0PingPong_++;
             }
@@ -165,12 +157,13 @@ private:
     uint64_t l0PingPong_{0UL};
     uint64_t l1LoopCnt_{0UL};
 
-    // Weight(B)切分成wHigh和wLow两部分, L1ASlots = L1_STAGES, L1BSlots = L1_STAGES * 2
-    Blaze::Gemm::BufferManager<L1_STAGES, L1_STAGES * 2, DOUBLE_BUFFER_COUNT> bufMgr_;
+    // Weight(B)切分成wHigh和wLow两部分: A与BLow共享L1 stage锁, BHigh使用独立锁
+    uint64_t aL1Buffer_[L1_STAGES] = {0};
+    uint64_t bLowL1Buffer_[L1_STAGES] = {0};
+    uint64_t bHighL1Buffer_[L1_STAGES] = {0};
 
-    template <typename GmTensors, typename SlotsTuple>
-    __aicore__ inline auto CopyL1FromGM(const GmTensors& gmTensors, const BlockShape& blockShape,
-                                        const SlotsTuple& slotsTuple)
+    template <typename GmTensors>
+    __aicore__ inline auto CopyL1FromGM(const GmTensors& gmTensors, const BlockShape& blockShape, uint16_t l1BufferId)
     {
         const auto& gmA = asc::te::get<0>(gmTensors);
         const auto& gmBHigh = asc::te::get<1>(gmTensors);
@@ -181,83 +174,67 @@ private:
         auto curKL1 = asc::te::get<MNK_K>(blockShape);
         auto kIdx = static_cast<uint64_t>(asc::te::get<3>(blockShape));
 
-        const auto& aL1Slot = asc::te::get<0>(slotsTuple);
-        const auto& bLowL1Slot = asc::te::get<1>(slotsTuple);
-        const auto& bHighL1Slot = asc::te::get<2>(slotsTuple);
-
         auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
 
+        Gemm::LockMte2(l1BufferId + L1_BUFFER_ID_BASE);
+
         auto layoutAL1 = MakeLayoutAL1{}(curM, curKL1);
-        auto tensorAL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, AType_>(aL1Slot.Addr()),
-                                              layoutAL1);
+        auto tensorAL1 = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l1, AType_>(aL1Buffer_[l1BufferId]), layoutAL1);
         auto gmBlockA = gmA.slice(asc::te::make_coord(0, kIdx * kL1_), asc::te::make_shape(curM, curKL1));
-        {
-            auto lock = aL1Slot.LockMte2();
-            asc::te::copy(copyGM2L1, tensorAL1, gmBlockA);
-        }
+        asc::te::copy(copyGM2L1, tensorAL1, gmBlockA);
 
         auto layoutWL1 = MakeLayoutBL1{}(curKL1, curN);
         auto tensorBLowL1 = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::l1, BType_>(bLowL1Slot.Addr()), layoutWL1);
+            asc::te::make_mem_ptr<asc::te::location::l1, BType_>(bLowL1Buffer_[l1BufferId]), layoutWL1);
         auto gmBlockBLow = gmBLow.slice(asc::te::make_coord(kIdx * kL1_, 0), asc::te::make_shape(curKL1, curN));
-        {
-            auto lock = bLowL1Slot.LockMte2();
-            asc::te::copy(copyGM2L1, tensorBLowL1, gmBlockBLow);
-        }
+        asc::te::copy(copyGM2L1, tensorBLowL1, gmBlockBLow);
 
         auto tensorBHighL1 = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::l1, BType_>(bHighL1Slot.Addr()), layoutWL1);
+            asc::te::make_mem_ptr<asc::te::location::l1, BType_>(bHighL1Buffer_[l1BufferId]), layoutWL1);
         auto gmBlockBHigh = gmBHigh.slice(asc::te::make_coord(kIdx * kL1_, 0), asc::te::make_shape(curKL1, curN));
-        {
-            auto lock = bHighL1Slot.LockMte2();
-            asc::te::copy(copyGM2L1, tensorBHighL1, gmBlockBHigh);
-        }
+        asc::te::copy(copyGM2L1, tensorBHighL1, gmBlockBHigh);
+
+        Gemm::UnLockMte2(l1BufferId + L1_BUFFER_ID_BASE);
 
         return AscendC::Std::make_tuple(tensorAL1, tensorBLowL1, tensorBHighL1);
     }
 
-    template <typename L1Tensors, typename SlotsTuple>
-    __aicore__ inline auto CopyL0FromL1(const L1Tensors& l1Tensors, const BlockShape& blockShape,
-                                        const Blaze::Gemm::BufferSlot& l0Slot, const SlotsTuple& slotsTuple)
+    template <typename L1Tensors>
+    __aicore__ inline auto CopyL0FromL1(const L1Tensors& l1Tensors, const BlockShape& blockShape, uint16_t l0BufferId,
+                                        uint16_t l1BufferId)
     {
         const auto& tensorAL1 = asc::te::get<0>(l1Tensors);
         const auto& tensorBLowL1 = asc::te::get<1>(l1Tensors);
         const auto& tensorBHighL1 = asc::te::get<2>(l1Tensors);
 
+        static constexpr uint64_t HALF_L0_SIZE = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT;
+        uint64_t l0BaseOffset = HALF_L0_SIZE * l0BufferId;
         auto curM = asc::te::get<MNK_M>(blockShape);
         auto curN = asc::te::get<MNK_N>(blockShape);
         auto curKL0 = asc::te::get<MNK_K>(blockShape);
         auto kL0Offset = static_cast<uint64_t>(asc::te::get<3>(blockShape));
 
-        const auto& aL1Slot = asc::te::get<0>(slotsTuple);
-        const auto& bLowL1Slot = asc::te::get<1>(slotsTuple);
-        const auto& bHighL1Slot = asc::te::get<2>(slotsTuple);
+        Gemm::LockMte1(l1BufferId + L1_BUFFER_ID_BASE);
+        Gemm::LockMte1(l0BufferId + L0_BUFFER_ID_BASE);
 
         auto copyL12L0A = asc::te::make_copy(asc::te::copy_l1_to_l0a{});
         auto copyL12L0B = asc::te::make_copy(asc::te::copy_l1_to_l0b{});
 
         auto layoutAL0 = asc::te::make_frame_layout<asc::te::nz_layout_ptn, asc::te::layout_trait_default<AType_>>(
             curM, curKL0);
-        auto tensorAL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0a, AType_>(l0Slot.Addr()),
+        auto tensorAL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0a, AType_>(l0BaseOffset),
                                               layoutAL0);
         auto tensorBlockAL1 = tensorAL1.slice(asc::te::make_coord(0, kL0Offset), asc::te::make_shape(curM, curKL0));
-        {
-            auto l1LockA = aL1Slot.LockMte1();
-            auto l0Lock = l0Slot.LockMte1();
-            asc::te::copy(copyL12L0A, tensorAL0, tensorBlockAL1);
-        }
+        asc::te::copy(copyL12L0A, tensorAL0, tensorBlockAL1);
 
         auto layoutBL0 = asc::te::make_frame_layout<asc::te::zn_layout_ptn, asc::te::layout_trait_default<BType_>>(
             curKL0, curN);
-        auto tensorBL01 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0b, BType_>(l0Slot.Addr()),
+        auto tensorBL01 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0b, BType_>(l0BaseOffset),
                                                layoutBL0);
         auto tensorBlockBL1Low = tensorBLowL1.slice(asc::te::make_coord(kL0Offset, 0),
                                                     asc::te::make_shape(curKL0, curN));
-        {
-            auto l1LockBLow = bLowL1Slot.LockMte1();
-            auto l0Lock = l0Slot.LockMte1();
-            asc::te::copy(copyL12L0B, tensorBL01, tensorBlockBL1Low);
-        }
+        asc::te::copy(copyL12L0B, tensorBL01, tensorBlockBL1Low);
 
         uint64_t l0bOneBufBytes = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(curKL0),
                                                          static_cast<uint64_t>(C0_SIZE_L0C)) *
@@ -265,14 +242,13 @@ private:
                                                          static_cast<uint64_t>(C0_SIZE_L0C)) *
                                   sizeof(BType_);
         auto tensorBL02 = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::l0b, BType_>(l0Slot.Addr() + l0bOneBufBytes), layoutBL0);
+            asc::te::make_mem_ptr<asc::te::location::l0b, BType_>(l0BaseOffset + l0bOneBufBytes), layoutBL0);
         auto tensorBlockBL1High = tensorBHighL1.slice(asc::te::make_coord(kL0Offset, 0),
                                                       asc::te::make_shape(curKL0, curN));
-        {
-            auto l1LockBHigh = bHighL1Slot.LockMte1();
-            auto l0Lock = l0Slot.LockMte1();
-            asc::te::copy(copyL12L0B, tensorBL02, tensorBlockBL1High);
-        }
+        asc::te::copy(copyL12L0B, tensorBL02, tensorBlockBL1High);
+
+        Gemm::UnLockMte1(l1BufferId + L1_BUFFER_ID_BASE);
+        Gemm::UnLockMte1(l0BufferId + L0_BUFFER_ID_BASE);
 
         return AscendC::Std::make_tuple(tensorAL0, tensorBL01, tensorBL02);
     }

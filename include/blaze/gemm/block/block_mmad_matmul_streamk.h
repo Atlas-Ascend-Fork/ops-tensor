@@ -17,6 +17,7 @@
 
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
+#include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "block_mmad.h"
 #include "tensor_api/tensor.h"
@@ -73,11 +74,6 @@ public:
     __aicore__ inline BlockMmad()
     {
         if ASCEND_IS_NOT_AIV {
-            for (uint16_t i = 0; i < MTE1_MTE2_EVENT_ID_NUM; i++) {
-                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(i);
-            }
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(ZERO_FLAG);
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(FIRST_FLAG);
             AscendC::SetMMLayoutTransform(true);
         }
     }
@@ -85,11 +81,6 @@ public:
     __aicore__ inline ~BlockMmad()
     {
         if ASCEND_IS_NOT_AIV {
-            for (uint16_t i = 0; i < MTE1_MTE2_EVENT_ID_NUM; i++) {
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(i);
-            }
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(ZERO_FLAG);
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(FIRST_FLAG);
             AscendC::SetMMLayoutTransform(false);
         }
     }
@@ -123,7 +114,6 @@ public:
                                       TensorWorkspace gmWorkspace, BlockShape tileShape, int64_t kCntIndex,
                                       bool checkIsSkScene)
     {
-        static constexpr uint64_t HALF_L0_SIZE = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT;
         int64_t curML1 = asc::te::get<MNK_M>(tileShape);
         int64_t curNL1 = asc::te::get<MNK_N>(tileShape);
         uint64_t curSingleCoreK = asc::te::get<MNK_K>(tileShape);
@@ -138,8 +128,6 @@ public:
             uint64_t curKL1 = (iter0 + 1 == curKL1Iter) ? (curSingleCoreK - iter0 * kL1_) : kL1_;
             uint64_t l1BufId = abL1LoopCnt_ & (l1Stages_ - 1);
 
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BufId);
-
             TripleShape l1Shape{curML1, curNL1, static_cast<int64_t>(curKL1)};
             // Copy L1 From GM
             auto l1TensorTuple = CopyL1FromGM(gmA, gmB, gmBias, l1Shape, l1BufId, iter0, kCntIndex);
@@ -147,41 +135,31 @@ public:
             auto tensorBL1 = asc::te::get<1>(l1TensorTuple);
             auto tensorBiasL1 = asc::te::get<2>(l1TensorTuple);
 
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BufId);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BufId);
-
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BufId + L1_EVENT_ID_OFFSET);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BufId + L1_EVENT_ID_OFFSET);
-
             uint64_t kL0Iter = Blaze::Gemm::CeilDiv(curKL1, baseK_);
             for (uint64_t iter1 = 0; iter1 < kL0Iter; ++iter1) {
                 uint64_t curK0 = (iter1 + 1 == kL0Iter) ? (curKL1 - iter1 * baseK_) : baseK_;
-                uint64_t l0Offset = HALF_L0_SIZE * (l0PingPong_ & 0x1);
-                uint64_t mte1Flag = l0PingPong_ & 0x1;
-
-                AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(static_cast<uint16_t>(mte1Flag));
+                uint16_t l0BufferId = l0PingPong_ & 0x1;
 
                 TripleShape l0Shape{curML1, curNL1, static_cast<int64_t>(curK0)};
                 bool needBias = NeedProcessBias(iter0, iter1, kCntIndex);
                 // Copy L0 From L1
-                auto l0TensorTuple = CopyL0FromL1(tensorAL1, tensorBL1, tensorBiasL1, l0Shape, l0Offset, baseK_ * iter1,
-                                                  needBias, l1BufId, iter1, kCntIndex);
+                auto l0TensorTuple = CopyL0FromL1(tensorAL1, tensorBL1, tensorBiasL1, l0Shape, l0BufferId,
+                                                  baseK_ * iter1, needBias, l1BufId, kCntIndex);
 
                 auto tensorAL0 = asc::te::get<0>(l0TensorTuple);
                 auto tensorBL0 = asc::te::get<1>(l0TensorTuple);
                 auto tensorBiasL0 = asc::te::get<2>(l0TensorTuple);
-
-                AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(static_cast<uint16_t>(mte1Flag));
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(static_cast<uint16_t>(mte1Flag));
 
                 asc::te::unit_flag_mode unitFlag = (iter0 + 1 == curKL1Iter && iter1 + 1 == kL0Iter) ?
                                                        asc::te::unit_flag_mode::enable_update :
                                                        asc::te::unit_flag_mode::enable_keep;
                 bool initCmatrix = iter0 == 0 && iter1 == 0 && (!isBias_ || (isBias_ && kCntIndex != 0));
                 // Mmad
-                Compute(tensorAL0, tensorBL0, tensorBiasL0, tensorL0C, l0Shape, needBias, unitFlag, initCmatrix);
-
-                AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(static_cast<uint16_t>(mte1Flag));
+                {
+                    Gemm::LockM(l0BufferId + L0_BUFFER_ID_BASE);
+                    Compute(tensorAL0, tensorBL0, tensorBiasL0, tensorL0C, l0Shape, needBias, unitFlag, initCmatrix);
+                    Gemm::UnLockM(l0BufferId + L0_BUFFER_ID_BASE);
+                }
                 l0PingPong_++;
             }
             if (iter0 + 1 == curKL1Iter) {
@@ -194,8 +172,6 @@ public:
                                   gmC, tensorL0C);
                 }
             }
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BufId);
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BufId + L1_EVENT_ID_OFFSET);
             abL1LoopCnt_++;
         }
     }
@@ -216,6 +192,8 @@ private:
 
         auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
 
+        Gemm::LockMte2(l1BufId + L1_BUFFER_ID_BASE);
+
         auto layoutAL1 = MakeLayoutAL1{}(curM, curKL1);
         auto tensorAL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Buffer_[l1BufId]),
                                               layoutAL1);
@@ -235,18 +213,24 @@ private:
             asc::te::copy(copyGM2L1, tensorBiasL1, tensorBias);
         }
 
+        Gemm::UnLockMte2(l1BufId + L1_BUFFER_ID_BASE);
+
         return AscendC::Std::make_tuple(tensorAL1, tensorBL1, tensorBiasL1);
     }
 
     template <typename TensorA, typename TensorB, typename TensorBias>
     __aicore__ inline auto CopyL0FromL1(const TensorA& tensorAL1, const TensorB& tensorBL1,
-                                        const TensorBias& tensorBiasL1, const TripleShape& l0Shape, uint64_t l0Offset,
-                                        uint64_t kIdx, bool needBias, uint64_t biasBufId, uint64_t iter1,
-                                        int64_t kCntIndex)
+                                        const TensorBias& tensorBiasL1, const TripleShape& l0Shape, uint16_t l0BufferId,
+                                        uint64_t kIdx, bool needBias, uint16_t l1BufferId, int64_t kCntIndex)
     {
+        static constexpr uint64_t HALF_L0_SIZE = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT;
+        uint64_t l0Offset = HALF_L0_SIZE * l0BufferId;
         uint64_t curM = asc::te::get<MNK_M>(l0Shape);
         uint64_t curN = asc::te::get<MNK_N>(l0Shape);
         uint64_t curK0 = asc::te::get<MNK_K>(l0Shape);
+
+        Gemm::LockMte1(l1BufferId + L1_BUFFER_ID_BASE);
+        Gemm::LockMte1(l0BufferId + L0_BUFFER_ID_BASE);
 
         auto copyL12L0A = asc::te::make_copy(asc::te::copy_l1_to_l0a{});
         auto layoutAL0 = asc::te::make_frame_layout<asc::te::nz_layout_ptn, asc::te::layout_trait_default<AType>>(
@@ -256,13 +240,9 @@ private:
         auto tensorBlockAL1 = tensorAL1.slice(asc::te::make_coord(0, kIdx), asc::te::make_shape(curM, curK0));
         asc::te::copy(copyL12L0A, tensorAL0, tensorBlockAL1);
 
-        if (iter1 == 0) {
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(biasBufId + L1_EVENT_ID_OFFSET);
-        }
-
         uint64_t nL1Align = Blaze::Gemm::CeilAlign(curN, static_cast<uint64_t>(AscendC::BLOCK_CUBE));
         auto layoutBiasL0 = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, nL1Align);
-        auto offsetBiasL0 = nL1_ * biasBufId * sizeof(float);
+        auto offsetBiasL0 = nL1_ * l1BufferId * sizeof(float);
         auto tensorBiasL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::bias, float>(offsetBiasL0),
                                                  layoutBiasL0);
         if (needBias) {
@@ -277,6 +257,9 @@ private:
                                               layoutBL0);
         auto tensorBlockBL1 = tensorBL1.slice(asc::te::make_coord(kIdx, 0), asc::te::make_shape(curK0, curN));
         asc::te::copy(copyL12L0B, tensorBL0, tensorBlockBL1);
+
+        Gemm::UnLockMte1(l1BufferId + L1_BUFFER_ID_BASE);
+        Gemm::UnLockMte1(l0BufferId + L0_BUFFER_ID_BASE);
 
         return AscendC::Std::make_tuple(tensorAL0, tensorBL0, tensorBiasL0);
     }
@@ -302,9 +285,6 @@ private:
     }
 
 private:
-    static constexpr uint16_t MTE1_MTE2_EVENT_ID_NUM = 4;
-    static constexpr uint16_t L1_EVENT_ID_OFFSET = 2;
-
     uint64_t mL1_{1};
     uint64_t nL1_{1};
     uint64_t kL1_{1};

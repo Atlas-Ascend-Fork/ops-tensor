@@ -109,34 +109,31 @@ public:
         bL1LoopCnt_ = 0;
         l0cPingPong_ = 0;
         isAL1Loaded_ = false;
-        bufMgr_.InitAL1(0, 0, l1Stages_);
         // 2 buffer: A | B0 B1 | Bias0 Bias1
         // 4 buffer: A | B0 B1 B2 B3 | Bias0 Bias1 Bias2 Bias3
         for (uint32_t i = 0; i < l1Stages_; ++i) {
-            bufMgr_.InitBL1(i, aL1OneSize + bL1OneSize * i, i);
-            bufMgr_.InitBias(i, aL1OneSize + bL1OneSize * l1Stages_ + biasL1OneSize * i, i);
+            bL1Buffer_[i] = aL1OneSize + bL1OneSize * i;
+            biasL1Buffer_[i] = aL1OneSize + bL1OneSize * l1Stages_ + biasL1OneSize * i;
         }
-        bufMgr_.InitBT(sizeof(float) * baseN_);
-        bufMgr_.InitL0();
-        bufMgr_.InitL0C();
     }
 
     template <typename TensorA, typename TensorB, typename TensorBias, typename TensorC>
     __aicore__ inline void operator()(TensorA& gmA, TensorB& gmB, TensorBias& gmBias, TensorC& gmC,
                                       TupleShape& blockShape)
     {
+        static constexpr uint64_t HALF_L0C_SIZE = AscendC::TOTAL_L0C_SIZE / DOUBLE_BUFFER_COUNT;
         uint64_t curM = asc::te::get<MNK_M>(blockShape);
         uint64_t curN = asc::te::get<MNK_N>(blockShape);
 
         // A GM->L1 A全载模式
-        const auto& aL1Slot = bufMgr_.GetL1ASlot(0);
         auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
         auto layoutAL1 = MakeLayoutAL1{}(curM, oriK_);
-        auto tensorAL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Slot.Addr()),
+        auto tensorAL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Buffer_),
                                               layoutAL1);
         if (!isAL1Loaded_) {
-            auto lock = aL1Slot.LockMte2();
+            Gemm::LockMte2(L1_BUFFER_ID_BASE);
             asc::te::copy(copyGM2L1, tensorAL1, gmA);
+            Gemm::UnLockMte2(L1_BUFFER_ID_BASE);
             isAL1Loaded_ = true;
         }
 
@@ -146,32 +143,28 @@ public:
         kL1Iter_ = CeilDiv(oriK_, kL1_);
         for (uint64_t iterM = 0; iterM < mL1Iter_; ++iterM) {
             auto tileM = (iterM + 1 == mL1Iter_) ? (curM - baseM_ * iterM) : baseM_;
-            const auto& l0cSlot = bufMgr_.GetL0CSlot(l0cPingPong_ & 0x1);
+            uint64_t l0cOffset = HALF_L0C_SIZE * (l0cPingPong_ & 0x1);
             // LoC搬出
             auto layoutL0C = asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<16>>{}(tileM, curN);
-            auto tensorL0C = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0c, float>(l0cSlot.Addr()),
+            auto tensorL0C = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0c, float>(l0cOffset),
                                                   layoutL0C);
 
             for (uint64_t iter0 = 0; iter0 < kL1Iter_; ++iter0) {
                 auto curKL1 = (iter0 + 1 == kL1Iter_) ? (oriK_ - kL1_ * iter0) : kL1_;
                 // A常驻L1，B/Bias按2或4个stage轮转
-                uint64_t bL1BufId = bL1LoopCnt_ & (l1Stages_ - 1);
-                uint64_t btBufId = bL1LoopCnt_ & 0x1;
-                const auto& bL1Slot = bufMgr_.GetL1BSlot(bL1BufId);
-                const auto& biasL1Slot = bufMgr_.GetL1BiasSlot(bL1BufId);
-                const auto& btSlot = bufMgr_.GetBTSlot(btBufId);
-                auto l1Slots = AscendC::Std::make_tuple(aL1Slot, bL1Slot, biasL1Slot);
+                uint16_t bL1BufId = bL1LoopCnt_ & (l1Stages_ - 1);
+                uint16_t btBufId = bL1LoopCnt_ & 0x1;
 
                 // GM->L1
                 TripleShape l1Shape{tileM, curN, curKL1};
-                auto l1TensorTuple = CopyL1FromGM(gmB, gmBias, l1Shape, l1Slots, iter0);
+                auto l1TensorTuple = CopyL1FromGM(gmB, gmBias, l1Shape, bL1BufId, iter0);
                 auto tensorBL1 = asc::te::get<0>(l1TensorTuple);
                 auto tensorBiasL1 = asc::te::get<1>(l1TensorTuple);
 
                 uint64_t kL0Iter = CeilDiv(curKL1, baseK_);
                 for (uint64_t iter1 = 0; iter1 < kL0Iter; ++iter1) {
                     uint64_t curK0 = (iter1 + 1 == kL0Iter) ? (curKL1 - iter1 * baseK_) : baseK_;
-                    const auto& l0Slot = bufMgr_.GetL0Slot(l0PingPong_ & 0x1);
+                    uint16_t l0BufferId = l0PingPong_ & 0x1;
 
                     uint64_t aL1MOffset = iterM * baseM_;
                     uint64_t aL1KOffset = iter0 * kL1_ + iter1 * baseK_;
@@ -181,8 +174,9 @@ public:
                     // A L1->L0
                     TripleShape l0Shape{tileM, curN, curK0};
                     bool needBias = NeedProcessBias(iter0, iter1);
-                    auto l0TensorTuple = CopyL0FromL1(tensorAL1, tensorBL1, tensorBiasL1, l0Shape, l0Slot, needBias,
-                                                      l1Slots, btSlot, aL1MOffset, aL1KOffset, bL1KOffset, bL1NOffset);
+                    auto l0TensorTuple = CopyL0FromL1(tensorAL1, tensorBL1, tensorBiasL1, l0Shape, l0BufferId, needBias,
+                                                      bL1BufId, btBufId, aL1MOffset, aL1KOffset, bL1KOffset,
+                                                      bL1NOffset);
                     auto tensorAL0 = asc::te::get<0>(l0TensorTuple);
                     auto tensorBL0 = asc::te::get<1>(l0TensorTuple);
                     auto tensorBiasL0 = asc::te::get<2>(l0TensorTuple);
@@ -193,10 +187,10 @@ public:
                                                             asc::te::unit_flag_mode::enable_keep);
 
                     {
-                        auto l0Lock = l0Slot.LockM();
-                        auto btLock = btSlot.LockM();
+                        Gemm::LockM(l0BufferId + L0_BUFFER_ID_BASE);
                         Compute(tensorAL0, tensorBL0, tensorBiasL0, tensorL0C, l0Shape, needBias, unitFlag,
                                 initCmatrix);
+                        Gemm::UnLockM(l0BufferId + L0_BUFFER_ID_BASE);
                     }
                     l0PingPong_++;
                 }
@@ -220,91 +214,84 @@ private:
         return isBias_ && kIter0 == 0 && kIter1 == 0;
     }
 
-    template <typename TensorB, typename TensorBias, typename SlotsTuple>
+    template <typename TensorB, typename TensorBias>
     __aicore__ inline auto CopyL1FromGM(const TensorB& tensorB, const TensorBias& tensorBias,
-                                        const TripleShape& l1Shape, const SlotsTuple& slotsTuple, uint64_t kIdx)
+                                        const TripleShape& l1Shape, uint16_t bL1BufferId, uint64_t kIdx)
     {
         uint64_t curN = asc::te::get<MNK_N>(l1Shape);
         uint64_t curKL1 = asc::te::get<MNK_K>(l1Shape);
-        const auto& bL1Slot = asc::te::get<MNK_N>(slotsTuple);
-        const auto& biasL1Slot = asc::te::get<MNK_K>(slotsTuple);
 
         auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+
+        Gemm::LockMte2(bL1BufferId + L1_BUFFER_ID_BASE);
+
         // B GM->L1
         auto layoutBL1 = MakeLayoutBL1{}(curKL1, curN);
-        auto tensorBL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, BType>(bL1Slot.Addr()),
-                                              layoutBL1);
+        auto tensorBL1 = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l1, BType>(bL1Buffer_[bL1BufferId]), layoutBL1);
         auto gmTileB = tensorB.slice(asc::te::make_coord(kIdx * kL1_, 0), asc::te::make_shape(curKL1, curN));
-        {
-            auto lock = bL1Slot.LockMte2();
-            asc::te::copy(copyGM2L1, tensorBL1, gmTileB);
-        }
+        asc::te::copy(copyGM2L1, tensorBL1, gmTileB);
 
         // Bias GM->L1
         auto layoutBiasL1 = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, curN);
         auto tensorBiasL1 = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(biasL1Slot.Addr()), layoutBiasL1);
+            asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(biasL1Buffer_[bL1BufferId]), layoutBiasL1);
         if (isBias_ && kIdx == 0) {
-            auto lock = biasL1Slot.LockMte2();
             asc::te::copy(copyGM2L1, tensorBiasL1, tensorBias);
         }
+
+        Gemm::UnLockMte2(bL1BufferId + L1_BUFFER_ID_BASE);
 
         return AscendC::Std::make_tuple(tensorBL1, tensorBiasL1);
     }
 
-    template <typename TensorA, typename TensorB, typename TensorBias, typename SlotsTuple>
+    template <typename TensorA, typename TensorB, typename TensorBias>
     __aicore__ inline auto CopyL0FromL1(const TensorA& tensorAL1, const TensorB& tensorBL1,
-                                        const TensorBias& tensorBiasL1, const TripleShape& l0Shape,
-                                        const BufferSlot& l0Slot, bool needBias, const SlotsTuple& slotsTuple,
-                                        const BufferSlot& btSlot, uint64_t aL1MOffset, uint64_t aL1KOffset,
-                                        uint64_t bL1KOffset, uint64_t bL1NOffset)
+                                        const TensorBias& tensorBiasL1, const TripleShape& l0Shape, uint16_t l0BufferId,
+                                        bool needBias, uint16_t bL1BufferId, uint16_t btBufferId, uint64_t aL1MOffset,
+                                        uint64_t aL1KOffset, uint64_t bL1KOffset, uint64_t bL1NOffset)
     {
+        static constexpr uint64_t HALF_L0_SIZE = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT;
+        uint64_t l0BaseOffset = HALF_L0_SIZE * l0BufferId;
         auto curM = asc::te::get<MNK_M>(l0Shape);
         auto curN = asc::te::get<MNK_N>(l0Shape);
         auto curK0 = asc::te::get<MNK_K>(l0Shape);
-        const auto& aL1Slot = asc::te::get<MNK_M>(slotsTuple);
-        const auto& bL1Slot = asc::te::get<MNK_N>(slotsTuple);
-        const auto& biasL1Slot = asc::te::get<MNK_K>(slotsTuple);
+
+        Gemm::LockMte1(bL1BufferId + L1_BUFFER_ID_BASE);
+        Gemm::LockMte1(l0BufferId + L0_BUFFER_ID_BASE);
 
         // A L1->L0A
         auto copyL12L0A = asc::te::make_copy(asc::te::copy_l1_to_l0a{});
         auto layoutAL0 = asc::te::make_frame_layout<asc::te::nz_layout_ptn, asc::te::layout_trait_default<AType>>(
             curM, curK0);
-        auto tensorAL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0a, AType>(l0Slot.Addr()),
+        auto tensorAL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0a, AType>(l0BaseOffset),
                                               layoutAL0);
         auto tensorBlockAL1 = tensorAL1.slice(asc::te::make_coord(aL1MOffset, aL1KOffset),
                                               asc::te::make_shape(curM, curK0));
-        {
-            auto l1LockA = aL1Slot.LockMte1();
-            auto l0Lock = l0Slot.LockMte1();
-            asc::te::copy(copyL12L0A, tensorAL0, tensorBlockAL1);
-        }
+        asc::te::copy(copyL12L0A, tensorAL0, tensorBlockAL1);
 
         // B L1->L0B
         auto copyL12L0B = asc::te::make_copy(asc::te::copy_l1_to_l0b{});
         auto layoutBL0 = asc::te::make_frame_layout<asc::te::zn_layout_ptn, asc::te::layout_trait_default<BType>>(curK0,
                                                                                                                   curN);
-        auto tensorBL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0b, BType>(l0Slot.Addr()),
+        auto tensorBL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0b, BType>(l0BaseOffset),
                                               layoutBL0);
         auto tensorBlockBL1 = tensorBL1.slice(asc::te::make_coord(bL1KOffset, bL1NOffset),
                                               asc::te::make_shape(curK0, curN));
-        {
-            auto l1LockB = bL1Slot.LockMte1();
-            auto l0Lock = l0Slot.LockMte1();
-            asc::te::copy(copyL12L0B, tensorBL0, tensorBlockBL1);
-        }
+        asc::te::copy(copyL12L0B, tensorBL0, tensorBlockBL1);
 
         // Bias L1->L0
         uint64_t nl1Align = Blaze::Gemm::CeilAlign(curN, static_cast<int64_t>(AscendC::BLOCK_CUBE));
         auto layoutBiasL0 = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, nl1Align);
-        auto tensorBiasL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::bias, float>(btSlot.Addr()),
-                                                 layoutBiasL0);
+        auto tensorBiasL0 = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::bias, float>(baseN_ * btBufferId * sizeof(float)), layoutBiasL0);
         if (needBias) {
-            auto biasLock = biasL1Slot.LockMte1();
-            auto btLock = btSlot.LockMte1();
             auto copyL12BT = asc::te::make_copy(asc::te::copy_l1_to_biastable{});
             asc::te::copy(copyL12BT, tensorBiasL0, tensorBiasL1);
         }
+
+        Gemm::UnLockMte1(bL1BufferId + L1_BUFFER_ID_BASE);
+        Gemm::UnLockMte1(l0BufferId + L0_BUFFER_ID_BASE);
 
         return AscendC::Std::make_tuple(tensorAL0, tensorBL0, tensorBiasL0);
     }
@@ -348,7 +335,9 @@ private:
     bool enableL0cPingPong_{false};
     bool isAL1Loaded_{false};
 
-    BufferManager<1, 4, 2> bufMgr_; // 1 = A full-load, 4 = B 4-stage pipeline, 2 = L0 ping-pong
+    uint64_t aL1Buffer_{0};
+    uint64_t bL1Buffer_[4] = {0};
+    uint64_t biasL1Buffer_[4] = {0};
 };
 } // namespace Block
 } // namespace Gemm

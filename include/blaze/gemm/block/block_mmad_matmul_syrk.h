@@ -306,13 +306,6 @@ private:
     }
 
 private:
-    // Buffer ID bases for the free-function lock domain, aligned with
-    // block_mmad_matmul_basic.h: L1 stages {0..3}, L0 ping-pong {4,5}, and
-    // the single L0C accumulator slot at 6 (no ping-pong, one Fix domain).
-    static constexpr uint16_t L1_BUFFER_ID_BASE = 0;
-    static constexpr uint16_t L0_BUFFER_ID_BASE = 4;
-    static constexpr uint16_t L0C_BUFFER_ID_BASE = 6;
-
     uint64_t k_{1};
     uint64_t mL1_{1};
     uint64_t nL1_{1};
