@@ -45,9 +45,6 @@ public:
     using L0cType = float;
     using TupleShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
 
-    static constexpr uint64_t HALF_L0C_SIZE = AscendC::TOTAL_L0C_SIZE / Gemm::DOUBLE_BUFFER_COUNT / sizeof(L0cType);
-    static constexpr uint64_t HALF_L0C_SIZE_BYTES = AscendC::TOTAL_L0C_SIZE / Gemm::DOUBLE_BUFFER_COUNT;
-
     struct Params {
         GM_ADDR aGmAddr{nullptr};
         GM_ADDR bGmAddr{nullptr};
@@ -89,6 +86,7 @@ public:
     __aicore__ inline void operator()(TensorA gmA, TensorP1 gmP1, TensorP2 gmP2, TupleShape tileShape,
                                       bool isFirstRound)
     {
+        static constexpr uint64_t HALF_L0C_SIZE = AscendC::TOTAL_L0C_SIZE / Gemm::DOUBLE_BUFFER_COUNT / sizeof(L0cType);
         mL1_ = asc::te::get<Gemm::MNK_M>(tileShape);
         nL1_ = asc::te::get<Gemm::MNK_N>(tileShape);
         kL1_ = asc::te::get<Gemm::MNK_K>(tileShape);

@@ -156,7 +156,7 @@ private:
                 if ((roundIdx & 1) == AscendC::GetSubBlockIdx()) {
                     Gemm::Sync::WaitForCube<FLAT_QUANT_SYNC_MODE, PIPE_V>(FLAT_QUANT_SYNC_AIC_AIV_FLAG);
                     epilogueOp(batchOffset, iterBatch);
-                    if (tileIdx + coreNums < CeilAlign(blockNums, coreNums)) {
+                    if (tileIdx + coreNums < Gemm::CeilAlign(blockNums, coreNums)) {
                         Gemm::Sync::NotifyCube<FLAT_QUANT_SYNC_MODE, PIPE_MTE3>(FLAT_QUANT_SYNC_AIV_AIC_FLAG);
                     }
                 }

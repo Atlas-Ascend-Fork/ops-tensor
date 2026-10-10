@@ -1,0 +1,7 @@
+casename,K,M,N,iterBatch,hasP2
+flat_quant_basic,4,64,64,1,true
+flat_quant_iter_batch,16,32,128,2,true
+flat_quant_multi_round,32,64,64,2,true
+flat_quant_tail_round,24,64,32,2,true
+flat_quant_no_p2,8,64,64,1,false
+flat_quant_wide_m,16,128,32,1,true
