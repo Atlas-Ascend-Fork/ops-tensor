@@ -16,7 +16,7 @@ x1@x2累加器从UB读取，x3从GM读取；缩放和相加均以VF（vector-fun
 ## 特殊约束
 
 ### 计算位置
-仅在AIV上执行，由[KernelMatmulWithScaleAdd](../../gemm/kernel/kernel_matmul_with_scale_add.md)在AIC完成当前Block的矩阵乘后调用。
+仅在AIV上执行，由[KernelMatmulWithScaleAdd](../../gemm/kernel/kernel_matmul_with_scale_add.md)（`GemmUniversal` 按 `KernelMmadFmmWithScaleAdd` 调度策略特化）在AIC完成当前Block的矩阵乘后调用。
 
 ### 数据类型
 - L0C累加类型和向量计算类型固定为fp32。
@@ -85,8 +85,12 @@ __aicore__ inline void operator()(
     int64_t dstOffset,
     bool splitM,
     int64_t baseM,
-    int64_t baseN)
+    int64_t baseN,
+    int64_t stagingBaseOffset = -1,
+    int64_t stagingBytes = -1)
 ```
+说明：`stagingBaseOffset`/`stagingBytes` 指定 x3 与输出复用的 staging 窗口（UB 偏移与字节数）；默认 `-1` 时窗口紧随 fp32 累加器之后并占用剩余 UB 空间，UB 中存放多个累加器镜像时由调用方显式传入。
+
 执行流程：
 1. 根据`splitM`和`subBlockIdx`计算当前AIV负责的行数及行偏移。
 2. 按`baseN`遍历当前Block的N tile，并等待AIC Fixpipe就绪。

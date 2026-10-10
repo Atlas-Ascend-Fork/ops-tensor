@@ -12,7 +12,7 @@ AIC（Cube 核）                    AIV（向量核）
     |                                  |-- Epilogue：读 UB → 后处理 → 写 GM
 ```
 
-Epilogue 运行在 AIV 上，与 AIC 的 MMAD 计算**并行**。两者通过 CrossCore Flag 同步。
+Epilogue 运行在 AIV 上，与 AIC 的 MMAD 计算**并行**。两者通过块内 AIC-AIV 同步标志（`Gemm::Sync`）协同。
 
 ## 2. 标准接口
 
@@ -47,9 +47,9 @@ AIC 写 L0C→UB 后设 flag，AIV 等 flag 后读 UB 处理：
 
 ```cpp
 // AIV 侧
-CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG + slot);
+Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG + slot);
 // ... 处理 UB 数据 ...
-CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG + slot);
+Gemm::Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG + slot);
 ```
 
 ### 4.2 UB 布局
@@ -117,7 +117,7 @@ epilogueOp(blockShape, offsetC, splitM, baseM, baseN);
 
 - [ ] 暴露 `Params` + `Init` + `operator()`
 - [ ] UB 布局在 `Init` 中一次性计算
-- [ ] CrossCore 同步 flag ID 与 AIC 侧一致
+- [ ] 块内 AIC-AIV 同步 flag ID 与 AIC 侧一致
 - [ ] VF 函数用 `__simd_vf__`，可组合子函数用 `__simd_callee__`
 - [ ] 向量写操作后 `LocalMemBar` 保证可见性
 - [ ] `static_assert` 校验元素类型、内存位置、Layout

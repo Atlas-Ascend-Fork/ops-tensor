@@ -29,7 +29,7 @@ AttentionUniversal
 
 | Kernel 类型 | 计算模式 | 双矩阵乘 | 后处理 | AIC-AIV 同步 | BlockScheduler | 适用场景 |
 |------------|---------|---------|--------|-------------|---------------|---------|
-| KernelFlatQuant | AIC + AIV 双核 | 支持（A×P2→L1, P1×temp→UB） | MX FP4 量化 | CrossCore Flag（PIPE_FIX/PIPE_V/PIPE_MTE3） | BlockSchedulerFlatQuant | Attention 双矩阵乘 + 在线量化 |
+| KernelFlatQuant | AIC + AIV 双核 | 支持（A×P2→L1, P1×temp→UB） | MX FP4 量化 | 块内 AIC-AIV 同步（`Gemm::Sync`，PIPE_FIX/PIPE_V/PIPE_MTE3） | BlockSchedulerFlatQuant | Attention 双矩阵乘 + 在线量化 |
 
 ## 使用流程
 

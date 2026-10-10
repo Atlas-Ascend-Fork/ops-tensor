@@ -39,8 +39,8 @@ Block 层矩阵乘计算组件，执行单个 block 的矩阵乘计算。基于 
 ### 静态常量
 | 常量 | 说明 |
 |------|------|
-| transA | A 矩阵是否转置（根据 LayoutA 判断） |
-| transB | B 矩阵是否转置（根据 LayoutB 判断） |
+| TRANS_A | A 矩阵是否转置（根据 LayoutA 判断） |
+| TRANS_B | B 矩阵是否转置（根据 LayoutB 判断） |
 
 ### Layout 构建类型
 | 类型 | 说明 |
@@ -49,25 +49,33 @@ Block 层矩阵乘计算组件，执行单个 block 的矩阵乘计算。基于 
 | MakeLayoutBL1 | B 矩阵 L1 Layout 构建器 |
 
 说明：
-- 根据 transA/transB 自动选择 nz_layout_ptn 或 zn_layout_ptn
+- 根据 TRANS_A/TRANS_B 自动选择 nz_layout_ptn 或 zn_layout_ptn
 
 ### 核心数据结构
 
 #### Params
 ```
 struct Params {
-    GM_ADDR aGmAddr;         // A 矩阵 GM 地址
-    GM_ADDR bGmAddr;         // B 矩阵 GM 地址
-    GM_ADDR cGmAddr;         // C 矩阵 GM 地址
-    GM_ADDR biasGmAddr;      // Bias GM 地址（可选）
-    GM_ADDR workspaceGmAddr; // Workspace 地址（可选，StreamK）
+    GM_ADDR aGmAddr{nullptr};         // A 矩阵 GM 地址
+    GM_ADDR bGmAddr{nullptr};         // B 矩阵 GM 地址
+    GM_ADDR cGmAddr{nullptr};         // C 矩阵 GM 地址
+    GM_ADDR biasGmAddr{nullptr};      // Bias GM 地址
+    GM_ADDR groupListGmAddr{nullptr}; // GroupList 地址（预留扩展）
+    GM_ADDR workspaceGmAddr{nullptr}; // Workspace 地址（StreamK）
+    uint64_t mL1{0};                  // L1 M 维度尺寸
+    uint64_t nL1{0};                  // L1 N 维度尺寸
+    uint64_t kL1{0};                  // L1 K 维度尺寸
+    uint32_t mL0{0};                  // L0 M 维度尺寸
+    uint32_t nL0{0};                  // L0 N 维度尺寸
+    uint32_t kL0{0};                  // L0 K 维度尺寸
+    uint32_t l1Stages{1};             // L1 缓冲数量
+    uint16_t l0cStages{1};            // L0C 缓冲数量
 };
 ```
 
 ### 核心成员变量
 | 变量 | 类型 | 说明 |
 |------|------|------|
-| m_, n_, k_ | uint64_t | 问题规模 |
 | mL1_, nL1_, kL1_ | uint64_t | L1 tile 形状 |
 | baseM_, baseN_, baseK_ | uint64_t | L0 tile 形状 |
 | isBias_ | bool | 是否启用 bias 计算 |
@@ -89,10 +97,9 @@ __aicore__ inline ~BlockMmad()
 ### Init函数
 ```
 __aicore__ inline void Init(
-    const TupleShape& shape,     // 问题规模
     const Params& params)        // BlockMmad 参数
 ```
-功能：初始化 BlockMmad 组件，设置问题规模、tile 形状和缓冲策略。
+功能：初始化 BlockMmad 组件，设置 tile 形状和缓冲策略。
 
 ### operator函数
 ```
@@ -101,7 +108,7 @@ __aicore__ inline void operator()(
     TensorB gmB,                // B 矩阵输入 Tensor
     TensorBias gmBias,          // Bias 输入 Tensor
     TensorC gmC,                // C 矩阵输出 Tensor
-    TupleShape tileShape,       // Tile 形状
+    TupleShape blockShape,      // Block 形状 (m, n, k, batch)
     ... 其他参数)
 ```
 功能：执行单个 block 的矩阵乘计算。
@@ -120,7 +127,7 @@ __aicore__ inline void operator()(
    - LayoutA/LayoutB 必须为 asc::te 的合法布局类型
 
 2. **数据格式**：
-   - A 矩阵：根据 transA 自动选择布局
+   - A 矩阵：根据 TRANS_A 自动选择布局
    - B 矩阵：支持 ND 和 NZ 格式
    - L0C：固定使用 nz_layout_ptn 布局
 
@@ -139,13 +146,13 @@ using AType = half;
 using BType = half;
 using CType = float;
 using BiasType = float;
-using LayoutA = AscendC::Te::Layout::RowMajor;
-using LayoutB = AscendC::Te::Layout::ColMajor;
-using LayoutC = AscendC::Te::Layout::RowMajor;
+using LayoutA = asc::te::nd_ext_layout_ptn;
+using LayoutB = asc::te::nd_ext_layout_ptn;
+using LayoutC = asc::te::nd_ext_layout_ptn;
 using LayoutBias = LayoutC;
 
 // 定义调度策略
-using DispatchPolicy = Blaze::Gemm::MatmulMultiBlockBasic<FULL_LOAD_MODE>;
+using DispatchPolicy = Blaze::Gemm::MatmulMultiBlockBasic<NONE_FULL_LOAD_MODE>;
 
 // 定义 BlockMmad（根据需求选择实现）
 using BlockMmad = Blaze::Gemm::Block::BlockMmad<
@@ -155,24 +162,23 @@ using BlockMmad = Blaze::Gemm::Block::BlockMmad<
 ### 初始化模板
 ```
 BlockMmad blockMmad;
-TupleShape problemShape{m, n, k, batch};
 BlockMmad::Params params = {
     .aGmAddr = aGM,
     .bGmAddr = bGM,
     .cGmAddr = cGM,
     .biasGmAddr = biasGM,
-    .ml1 = mL1, .nl1 = nL1, .kl1 = kL1,
-    .ml0 = baseM, .nl0 = baseN, .kl0 = baseK,
+    .mL1 = mL1, .nL1 = nL1, .kL1 = kL1,
+    .mL0 = baseM, .nL0 = baseN, .kL0 = baseK,
     .l1Stages = 2,
     .l0cStages = 1
 };
-blockMmad.Init(problemShape, params);
+blockMmad.Init(params);
 ```
 
 ### 执行模板
 ```
-TupleL1L0Shape tileShape{shapeM, shapeN, shapeK, batch, baseM, baseN};
-blockMmad(gmA, gmB, gmBias, gmC, tileShape);
+TupleShape blockShape{shapeM, shapeN, shapeK, batch};
+blockMmad(gmA, gmB, gmBias, gmC, blockShape);
 ```
 
 ## 数据流与流水线

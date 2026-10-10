@@ -169,7 +169,8 @@ __aicore__ inline void Init(
     const BlockShape& l0TileShape,    // L0 tile 形状 (baseM, baseN, baseK)
     const L1Params& l1Params,         // L1 参数 (kL1, scaleKL1, l1BufNum)
     bool isBias,                      // 是否启用 bias
-    bool dbL0C)                       // 是否启用 L0C 双缓冲
+    bool dbL0C,                       // 是否启用 L0C 双缓冲
+    uint64_t splitKNum = 1)           // K 轴切分核数（默认 1）
 ```
 功能：初始化 BlockMmadMX 组件。
 参数说明：
@@ -180,6 +181,7 @@ __aicore__ inline void Init(
 | l1Params | L1Params | L1 参数（kL1、scaleKL1、l1BufNum） |
 | isBias | bool | 是否包含 bias 计算 |
 | dbL0C | bool | 是否启用 L0C 双缓冲 |
+| splitKNum | uint64_t | K 轴切分核数（默认 1） |
 
 说明：
 - `l1BufNum` 支持 2、3 或 4 缓冲
@@ -246,7 +248,8 @@ __aicore__ inline void operator()(
     TensorScaleB const& gmScaleB,    // ScaleB GM Tensor
     TensorBias const& gmBias,        // Bias GM Tensor
     TensorC const& gmC,              // C 矩阵输出 GM Tensor
-    BlockShape const& singleShape)   // Tile 形状
+    BlockShape const& singleShape,   // Tile 形状
+    uint64_t splitKIdx = 0)          // K 轴切分索引（默认 0）
 ```
 功能：执行单个 block 的量化矩阵乘计算。
 参数说明：
@@ -259,6 +262,7 @@ __aicore__ inline void operator()(
 | gmBias | TensorBias | Bias 输入 Tensor |
 | gmC | TensorC | C 矩阵输出 Tensor（float） |
 | singleShape | BlockShape | Tile 形状 |
+| splitKIdx | uint64_t | K 轴切分索引（默认 0） |
 
 ## 事件同步（MX 特有）
 

@@ -3,7 +3,7 @@
 
 ## 功能说明
 
-FlatQuant 双矩阵乘 + AIV MX 量化 Kernel，AIC+AIV 双核协同计算。AIC 侧完成两阶段矩阵乘（A×P2→L1 中间结果，P1×中间结果→L0C→UB），AIV 侧从 UB 读取 bf16 中间结果执行 MX FP4 量化（eMax→scale→quant），输出量化后的 FP4 数据和 E8M0 scale 到 GM。通过 CrossCore Flag 实现 AIC-AIV 跨核同步。
+FlatQuant 双矩阵乘 + AIV MX 量化 Kernel，AIC+AIV 双核协同计算。AIC 侧完成两阶段矩阵乘（A×P2→L1 中间结果，P1×中间结果→L0C→UB），AIV 侧从 UB 读取 bf16 中间结果执行 MX FP4 量化（eMax→scale→quant），输出量化后的 FP4 数据和 E8M0 scale 到 GM。通过块内同步标志（`Gemm::Sync`）实现 AIC-AIV 跨核同步。
 
 **继承自**：[AttentionUniversal 基础框架](./kernel_universal.md)（SFINAE 特化实现，匹配 `KernelFlatQuant`）
 
@@ -15,7 +15,7 @@ AIC 和 AIV 必须同时参与计算：
 - **AIV**：从 UB 读取 bf16 数据，执行 MX FP4 量化，输出 int8（FP4 packed）和 scale 到 GM
 
 ### 跨核同步
-使用 `CrossCoreSetFlag` / `CrossCoreWaitFlag` 实现 AIC→AIV 同步：
+使用 `Gemm::Sync::NotifyVector` / `WaitForVector`（AIC 侧）和 `Gemm::Sync::NotifyCube` / `WaitForCube`（AIV 侧）实现 AIC↔AIV 同步：
 - 同步模式：`FLAT_QUANT_SYNC_MODE = 4`
 - AIC→AIV 标志：`FLAT_QUANT_SYNC_AIC_AIV_FLAG = 9`（偶数轮）
 - AIC→AIV 标志：`FLAT_QUANT_SYNC_AIC_AIV_FLAG + FLAT_QUANT_FLAG_ID_MAX = 25`（奇数轮）
@@ -45,7 +45,7 @@ GM 地址映射：
 
 | 常量 | 值 | 说明 |
 |------|------|------|
-| FLAT_QUANT_SYNC_MODE | 4 | CrossCore 同步模式 |
+| FLAT_QUANT_SYNC_MODE | 4 | 块内 AIC-AIV 同步模式（SYNC_MODE_INTRA） |
 | FLAT_QUANT_SYNC_AIV_AIC_FLAG | 8 | AIV→AIC 同步标志 ID |
 | FLAT_QUANT_SYNC_AIC_AIV_FLAG | 9 | AIC→AIV 同步标志 ID |
 | FLAT_QUANT_FLAG_ID_MAX | 16 | Flag ID 偏移量上限（奇偶轮交替） |
@@ -155,21 +155,21 @@ for (int64_t tileIdx = curBlockIdx; tileIdx < blockNums; tileIdx += coreNums) {
     if ASCEND_IS_AIC {
         // 非首轮等待 AIV 完成上一轮的量化
         if (roundIdx > 0) {
-            CrossCoreWaitFlag<SYNC_MODE, PIPE_FIX>(AIV_AIC_FLAG [+ FLAG_ID_MAX if odd round]);
+            Gemm::Sync::WaitForVector<SYNC_MODE, PIPE_FIX>(AIV_AIC_FLAG [+ FLAG_ID_MAX if even round]);
         }
         // AIC 双矩阵乘
         blockMmadOp(gmBlockA, gmP1, gmP2, blockShape, isFirstRound);
         // 通知 AIV 数据已准备好
-        CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(AIC_AIV_FLAG [+ FLAG_ID_MAX if odd round]);
+        Gemm::Sync::NotifyVector<SYNC_MODE, PIPE_FIX>(AIC_AIV_FLAG [+ FLAG_ID_MAX if odd round]);
     }
     if ASCEND_IS_AIV {
         // AIV 等待 AIC 完成
-        CrossCoreWaitFlag<SYNC_MODE, PIPE_V>(AIC_AIV_FLAG);
+        Gemm::Sync::WaitForCube<SYNC_MODE, PIPE_V>(AIC_AIV_FLAG);
         // AIV MX 量化
         epilogueOp(batchOffset, iterBatch);
         // 非末轮通知 AIC 可以继续
         if (tileIdx + coreNums < CeilAlign(blockNums, coreNums)) {
-            CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(AIV_AIC_FLAG);
+            Gemm::Sync::NotifyCube<SYNC_MODE, PIPE_MTE3>(AIV_AIC_FLAG);
         }
     }
 }
@@ -259,7 +259,7 @@ GM (A, P1, P2) → L1 (AIC Phase1: A×P2) → L0C → L1 (temp)
                                                          ↓
                        L1 (P1, temp) → L0 (AIC Phase2: P1×temp) → L0C → UB
                                                                           ↓
-                                              CrossCore Sync (AIC→AIV)
+                                              Gemm::Sync (AIC→AIV)
                                                                           ↓
                                               AIV: UB → MX FP4 Quant → GM (Output + Scale)
 ```

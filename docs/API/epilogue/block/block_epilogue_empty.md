@@ -15,11 +15,11 @@
 仅支持 Basic Kernel：
 ```
 using BlockEpilogue = Blaze::Gemm::Block::BlockEpilogueEmpty;
-using MatmulKernel = Blaze::Gemm::Kernel::KernelMatmulBasic<
+using MatmulKernel = Blaze::Gemm::Kernel::GemmUniversal<
     ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 ```
 
-不支持 StreamK Kernel（StreamK Kernel 需要 `BlockEpilogueStreamK`）。
+不支持 StreamK Kernel（StreamK Kernel 需要 `BlockEpilogueMatmulStreamK`）。
 
 ### 无实际计算
 所有成员函数均为空实现，不执行任何操作：
@@ -86,7 +86,7 @@ __aicore__ inline void operator()(
 using BlockEpilogue = Blaze::Gemm::Block::BlockEpilogueEmpty;
 
 // 组装 Kernel
-using MatmulKernel = Blaze::Gemm::Kernel::KernelMatmulBasic<
+using MatmulKernel = Blaze::Gemm::Kernel::GemmUniversal<
     ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 ```
 
@@ -103,7 +103,7 @@ epilogue(blockShape, blockCoord, 0, 0);
 ## 设计说明
 
 ### 为什么需要 BlockEpilogueEmpty
-1. **模板参数要求**：`KernelMatmulBasic` 模板需要 `BlockEpilogue` 参数
+1. **模板参数要求**：`GemmUniversal` 模板需要 `BlockEpilogue` 参数
 2. **接口一致性**：保持与其他 Epilogue 组件（如 StreamK）相同的接口
 3. **扩展性**：未来可替换为实际的后处理组件（如 ReLU、Add 等）
 4. **零开销**：空实现不会引入额外计算开销
@@ -116,11 +116,11 @@ epilogue(blockShape, blockCoord, 0, 0);
 | 内存占用 | 无影响（无成员变量） |
 | 流水线 | 无影响（不参与计算流程） |
 
-### 与 BlockEpilogueStreamK 的关系
+### 与 BlockEpilogueMatmulStreamK 的关系
 ```
 BlockEpilogueEmpty         ← 当前实现（空，用于 Basic Kernel）
     ↓
-BlockEpilogueStreamK       ← 实际实现（用于 StreamK Kernel）
+BlockEpilogueMatmulStreamK ← 实际实现（用于 StreamK Kernel）
     ├── workspace 汇聚（K 轴切分累加）
     ├── 类型转换（float → half/bf16）
     └── ReLU 激活（可选）

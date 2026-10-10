@@ -44,11 +44,7 @@ mat_mul_fixpipe_bf16,512,256,64,64,bfloat16,false,false,false,ND,ND
 mat_mul_fixpipe_fp32,256,128,32,32,float32,false,false,false,ND,ND
 mat_mul_fixpipe_hf32,256,128,32,32,float32,false,false,true,ND,ND
 mat_mul_fixpipe_weightNz,512,256,64,0,float16,false,false,false,ND,NZ
-mat_mul_fixpipe_fp16_db,512,256,128,128,float16,false,false,false,ND,ND
-mat_mul_fixpipe_fp32_db,256,128,128,128,float32,false,false,false,ND,ND
 ```
-
-`_db` 后缀用例启用 UB double buffer（`ubDB=2`），跨 tile 交替使用 slot 0/1 实现 loc2ub 与 ub2gm 并行。
 
 **列说明**：
 

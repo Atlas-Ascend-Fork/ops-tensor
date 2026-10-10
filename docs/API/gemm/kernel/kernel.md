@@ -57,7 +57,7 @@ struct Params {
     ProblemShape problemShape;            // 问题 shape (m, n, k, batch)
     BlockMmadParams mmadParams;           // mmad 参数（包含 GM 地址）
     BlockEpilogueParams epilogueParams;   // epilogue 参数
-    BlockSchedulerParams schedulerParams; // scheduler 参数
+    BlockSchedulerParams schParams;       // scheduler 参数
 };
 ```
 

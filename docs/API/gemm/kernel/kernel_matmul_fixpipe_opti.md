@@ -77,8 +77,8 @@ struct Params {
 ```cpp
 // Fixpipe1v1 fp16，非 B 全载
 using DispatchPolicy = MatmulMultiBlockFixpipeOpti<ND_FIXPIPE_1_1, 0>;
-using BlockMmad = BlockMmad<DispatchPolicy, half, RowMajor, half, RowMajor,
-                             half, RowMajor, half, RowMajor>;
+using BlockMmad = BlockMmad<DispatchPolicy, half, asc::te::nd_ext_layout_ptn, half, asc::te::nd_ext_layout_ptn,
+                             half, asc::te::nd_ext_layout_ptn, half, asc::te::nd_ext_layout_ptn>;
 using BlockEpilogue = BlockEpilogueFixpipe<half, half, DispatchPolicy>;
 using MatmulKernel = GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 

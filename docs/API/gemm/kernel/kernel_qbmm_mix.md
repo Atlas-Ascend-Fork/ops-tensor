@@ -257,7 +257,7 @@ kernel(params);
 ## 数据流
 ```
 AIC:  GM(int8 A/B) → L1 → L0A/L0B → L0C(int32) --fixpipe NoQuant--> UB
-                                   │  (CrossCore Notify)
+                                   │  (Sync::NotifyVector)
 AIV:  UB(int32) × x2Scale [× x1Scale] + bias --VF dequant--> GM(bf16/fp16/fp32)
 ```
 

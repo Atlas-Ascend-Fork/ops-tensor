@@ -13,11 +13,11 @@ MX 量化矩阵乘 Tile，定义 MmadTraitMX trait，用于支持 MxFP4/MxFP8 �
 
 ### Trait 定义
 ```
-constexpr MmadTrait MX_MMAD_TRAIT = MmadTrait{0, false, false, true, MmadType::MX};
+constexpr asc::te::mmad_trait MX_MMAD_TRAIT = asc::te::mmad_trait{0, false, false, true, asc::te::mmad_type::mx};
 ```
 
 说明：
-- `MmadType::MX`：标识 MX 量化计算模式
+- `asc::te::mmad_type::mx`：标识 MX 量化计算模式
 - 自动应用于 Mmad 计算
 
 ## 特殊类型
@@ -25,21 +25,12 @@ constexpr MmadTrait MX_MMAD_TRAIT = MmadTrait{0, false, false, true, MmadType::M
 ### MmadTraitMX
 ```
 struct MmadTraitMX {
-    using TraitType = MmadTrait;
+    using TraitType = asc::te::mmad_trait;
     static constexpr const TraitType value = MX_MMAD_TRAIT;
 };
 ```
 
 功能：MX Mmad Trait 定义，用于量化矩阵乘。
-
-### mmad_traits 特化
-```
-template <>
-struct mmad_traits<mmad_operation, MmadTraitMX>
-    : public mmad_traits<mmad_operation, mmad_trait_default, MmadOpWith, MmadTraitMX> {};
-```
-
-功能：mmad_traits 针对 MmadTraitMX 的特化，继承默认 trait。
 
 ## 使用示例
 

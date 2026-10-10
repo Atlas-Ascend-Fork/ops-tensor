@@ -9,7 +9,7 @@ Fixpipe 模式矩阵乘后处理 Block，运行在 AIV（Vector）核。与 AIC�
 ## 特殊约束
 
 ### AIV 核专用
-仅运行在 AIV（Vector）核，与 AIC（Cube）核通过 CrossCore 同步标志协同工作：
+仅运行在 AIV（Vector）核，与 AIC（Cube）核通过块内 AIC-AIV 同步标志协同工作：
 - **AIC 核**：执行 Mmad 计算 → `CopyL0C2UB`（fixpipe 搬运 L0C→UB）→ 设置"数据就绪"标志
 - **AIV 核**：等待"数据就绪"标志 → （可选）ReLU → `DataCopyPad`（UB→GM）→ 设置"UB 空闲"标志
 
@@ -39,7 +39,7 @@ Fixpipe 模式矩阵乘后处理 Block，运行在 AIV（Vector）核。与 AIC�
 |------|----|------|
 | DATA_BLOCK | 32 | 数据块对齐字节数（32B） |
 | OUT_ALIGN | `DATA_BLOCK / sizeof(DataTypeOut)` | 输出元素对齐个数 |
-| AIC_SYNC_AIV_MODE_4 | 4 | CrossCore 同步模式 |
+| AIC_SYNC_AIV_MODE_4 | 4 | 块内 AIC-AIV 同步模式（SYNC_MODE_INTRA） |
 | AIV_SYNC_AIC_FLAG | 4 | AIV→AIC"UB 空闲"标志基址 |
 | AIC_SYNC_AIV_FLAG | 6 | AIC→AIV"数据就绪"标志基址 |
 | FLAG_ID_MAX | 16 | 标志 ID 上限 |
@@ -118,13 +118,13 @@ __aicore__ inline void Run(
 4. **N 轴循环**（`nIdx = 0 .. nL1Iter-1`）：
    - 计算 `tileN`（尾块取余量）与 `blockShapeNAlign = CeilAlign(tileN, c0Size)`
    - `slot = enablePp ? (cvPingPong_ & 1) : 0`
-   - **等待 AIC 数据就绪**：`CrossCoreWaitFlag<AIC_SYNC_AIV_MODE_4, PIPE_V/MTE3>(AIC_SYNC_AIV_FLAG + slot)`
+   - **等待 AIC 数据就绪**：`Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_V/MTE3>(AIC_SYNC_AIV_FLAG + slot)`
      - `FUSED_OP_TYPE == OP_TYPE_RELU` 时等 `PIPE_V`，否则等 `PIPE_MTE3`
    - 取 UB 对应 slot：`ubLocalTmp_ = ubLocal[slot * ubHalfElems]`
    - **ReLU 融合**（可选）：`FUSED_OP_TYPE == OP_TYPE_RELU` 且非 `bfloat16_t` 时执行 `Relu` + `V_MTE3` 标志同步
    - **搬出**：`DataCopyPad<DataTypeOut>(outputGlobal_[offset], ubLocalTmp_, copyParams)`
      - `offset = dstOffset + nIdx * curBaseN + halfBlockShapeM * N * (subBlockIdx & 1)`
-   - **通知 AIC UB 空闲**：`CrossCoreSetFlag<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG + slot)`
+   - **通知 AIC UB 空闲**：`Gemm::Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG + slot)`
    - `cvPingPong_++`
 
 ### operator函数
@@ -144,7 +144,7 @@ __aicore__ inline void operator()(
 | AIV→AIC UB 空闲 | AIV Set / AIC Wait | `AIV_SYNC_AIC_FLAG + slot`（4+slot） | 通知 AIC 该 slot 的 UB 可覆写 |
 | V_MTE3（ReLU 时） | V → MTE3 | 0x0 | ReLU 完成后再搬出 |
 
-说明：`AIC_SYNC_AIV_MODE_4` 为跨核同步模式；等待管线下标在 ReLU 场景为 `PIPE_V`（先算后搬），其余为 `PIPE_MTE3`（直接搬）。
+说明：`AIC_SYNC_AIV_MODE_4`（= `SYNC_MODE_INTRA`）为块内 AIC-AIV 同步模式（底层 `asc_sync_intra_wait/arrive`）；等待管线下标在 ReLU 场景为 `PIPE_V`（先算后搬），其余为 `PIPE_MTE3`（直接搬）。
 
 ## 调用示例
 
@@ -182,9 +182,9 @@ kernel(params);   // 框架内部在 AIV 侧调用 epilogue(blockShape, offsetC,
 ### 存储层次
 ```
 AIC: Mmad → L0C ─(CopyL0C2UB/fixpipe)→ UB[slot]
-                                        ↓ CrossCore 数据就绪
+                                        ↓ 块内同步 数据就绪
 AIV: WaitFlag ─→ (ReLU, 可选) ─→ DataCopyPad ─→ GM(C)
-                                        ↓ CrossCore UB 空闲
+                                        ↓ 块内同步 UB 空闲
 AIC: 复用 UB[slot] 写下一块
 ```
 
@@ -229,7 +229,7 @@ offset = dstOffset + nIdx * curBaseN + halfBlockShapeM * N * (GetSubBlockIdx() &
 
 ## 适用场景
 
-- **Fixpipe Kernel**：`KernelMatmulFixpipeOpti`、`KernelMatmulBL1FullLoad`（Fixpipe 模式）
+- **Fixpipe Kernel**：`GemmUniversal` 按 `KernelMmadMultiBlockFixpipeOpti` / `KernelMmadMultiBlockBFullLoad` 调度策略的特化（Fixpipe 模式）
 - **L0C→UB→GM 输出路径**：非 `ON_THE_FLY` 直销场景
 - **AIC/AIV 协同**：`MIX_AIC_1_2` 混合核任务
 - **可选 ReLU**：`FUSED_OP_TYPE = OP_TYPE_RELU` 的融合矩阵乘
@@ -239,4 +239,4 @@ offset = dstOffset + nIdx * curBaseN + halfBlockShapeM * N * (GetSubBlockIdx() &
 - [Block Epilogue 基础框架](./block_epilogue.md) — Epilogue 公共接口说明
 - [BlockMmadMatmulFixpipeOpti](../../gemm/block/block_mmad_matmul_fixpipe_opti.md) — Fixpipe 优化的 BlockMmad
 - [BlockMmadMatmulBL1FullLoad](../../gemm/block/block_mmad_matmul_bl1_full_load.md) — B 全载 BlockMmad（支持 Fixpipe）
-- [KernelMatmulFixpipeOpti](../../gemm/kernel/kernel_matmul_fixpipe_opti.md) — Fixpipe 优化 Kernel
+- [KernelMatmulFixpipeOpti](../../gemm/kernel/kernel_matmul_fixpipe_opti.md) — Fixpipe 优化 Kernel（GemmUniversal 特化）

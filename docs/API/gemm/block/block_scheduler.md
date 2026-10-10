@@ -20,7 +20,7 @@ class BlockScheduler;
 ### 特有模板参数
 | Scheduler | 特有参数 | 说明 |
 |-----------|----------|------|
-| BlockSchedulerMatmulBasic | FullLoadMode_ | 全载模式（0/1/2） |
+| BlockSchedulerMatmulBasic | FullLoadMode_, IsFp32_, IsNdFormat_ | 全载模式（0/1/2）、是否 FP32、是否 ND 格式 |
 | BlockSchedulerStreamK | - | - |
 | BlockSchedulerQuantBatchMatmulV3 | FullLoadMode_, LayoutA_, LayoutB_, AType_ | 全载模式、布局、数据类型 |
 
@@ -75,7 +75,9 @@ __aicore__ inline int64_t GetCoreNums();     // BlockSchedulerMatmulBasic, Block
 
 ### GetBlockShape
 ```cpp
-__aicore__ inline BlockShape GetBlockShape(int64_t blockIdx);       // BlockSchedulerMatmulBasic, BlockSchedulerMatmulStreamK
+template <bool TransB_ = false, class BType_>
+__aicore__ inline BlockShape GetBlockShape(int64_t blockIdx);       // BlockSchedulerMatmulBasic
+__aicore__ inline BlockShape GetBlockShape(int64_t blockIdx);       // BlockSchedulerMatmulStreamK
 template <QuantMode AQuantMode_, QuantMode BQuantMode_, bool WeightNz_ = false>
 __aicore__ inline BlockShape GetBlockShape(BlockCoord blockCoord);      // BlockSchedulerQuantBatchMatmulV3
 ```
@@ -110,7 +112,7 @@ __aicore__ inline void GetTileCoord(BlockCoord blockCoord, int64_t& mPos, int64_
 Z 型扫描示意（mTileNum=4, nTileNum=4）
 
      N轴 →
-   +--+--+--+--+  
+   +--+--+--+--+
    |0 |1 |2 |3 |  Row 0（正向）
 M  +--+--+--+--+
 轴  |7 |6 |5 |4 |  Row 1（反向）

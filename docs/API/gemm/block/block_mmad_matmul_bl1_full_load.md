@@ -21,8 +21,8 @@ using DispatchPolicy = MatmulMultiBlockBFullLoad<L0C2OUT_MODEL, FUSED_OP_TYPE, K
 | 值 | 含义 | 输出行为 |
 |----|------|---------|
 | `ON_THE_FLY` (0) | 直销 GM | `CopyL0C2GM` + `FixpipeParams{FINAL_ACCUMULATION}` |
-| `ND_FIXPIPE_1_1` (1) | Fixpipe fp16 | `CopyL0C2UB` + `CrossCoreSync` |
-| `ND_FIXPIPE_1_2` (2) | Fixpipe fp32 | `CopyL0C2UB` + `CrossCoreSync` + `splitM` |
+| `ND_FIXPIPE_1_1` (1) | Fixpipe fp16 | `CopyL0C2UB` + `Sync::WaitForVector/NotifyVector` |
+| `ND_FIXPIPE_1_2` (2) | Fixpipe fp32 | `CopyL0C2UB` + `Sync::WaitForVector/NotifyVector` + `splitM` |
 
 ## 特殊架构
 
@@ -51,7 +51,7 @@ GM(A) ──(每K批)──→ L1(A) ──→ L0A ──→  Mmad  ──→ L0
 GM(B) ──(一次)──→ L1(B) ──────────→ L0B ──┐               AIC │ AIV
 GM(A) ──(每K批)──→ L1(A) ──→ L0A ──→  Mmad  ──→ L0C ──→ UB ═══→ GM(C)
                                           ↑                     ↑
-                                    CrossCoreSync        BlockEpilogueFixpipe
+                                    AIC-AIV Sync         BlockEpilogueFixpipe
 ```
 
 - AIC 侧：Mmad 计算 → `WaitFlag(AIV→UB_free)` → `CopyL0C2UB` → `SetFlag(UB_data_ready)`
@@ -118,7 +118,7 @@ __aicore__ inline void CopyOutFromL0C(TensorC& tensorC, TensorL0C& tensorL0C,
                                       uint64_t tileN, uint64_t curM, uint64_t iterN)
 ```
 ON_THE_FLY 模式：`Copy(copyL0C2GM.with(FixpipeParams{FINAL_ACCUMULATION}), gmBlockC, tensorL0C)`
-Fixpipe 模式：`CrossCoreSync` → `CopyOutFromL0C2UB` → `CrossCoreSync`
+Fixpipe 模式：`Sync::WaitForVector`（等 AIV 空闲）→ `CopyOutFromL0C2UB` → `Sync::NotifyVector`（通知 AIV 就绪）
 
 ### CopyOutFromL0C2UB
 ```cpp
@@ -133,8 +133,8 @@ L0C→UB 拷贝，对齐到 `c0_element`。splitM 时使用 `CopyL0C2UBTraitSpli
 ```cpp
 // ON_THE_FLY 模式
 using DispatchPolicy = MatmulMultiBlockBFullLoad<ON_THE_FLY, 0>;
-using BlockMmadType = BlockMmad<DispatchPolicy, half, RowMajor, half, RowMajor,
-                                 half, RowMajor, half, RowMajor>;
+using BlockMmadType = BlockMmad<DispatchPolicy, half, asc::te::nd_ext_layout_ptn, half, asc::te::nd_ext_layout_ptn,
+                                 half, asc::te::nd_ext_layout_ptn, half, asc::te::nd_ext_layout_ptn>;
 BlockMmadType blockMmad;
 blockMmad.Init({.aGmAddr = aGM, .bGmAddr = bGM, .cGmAddr = cGM,
                 .oriK = k, .mL1 = 128, .nL1 = 256, .kL1 = 512,

@@ -52,7 +52,7 @@ if constexpr (L0C2OUT_MODEL == ON_THE_FLY) {
 - AIC 和 AIV 同时参与，共享整个 UB（fixpipe 通道）
 - AIC 做矩阵乘 + L0C→UB（`CopyL0C2UB`）
 - AIV 做 epilogue（UB→GM，`DataCopyPad`）
-- 需要 AIC-AIV 跨核同步（`CrossCoreSetFlag`/`CrossCoreWaitFlag`）
+- 需要 AIC-AIV 跨核同步（`Gemm::Sync` 块内同步标志）
 - epilogue 在 AIV 侧处理，不改写 AIC 侧逻辑
 
 ### 同步机制

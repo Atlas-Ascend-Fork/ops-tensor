@@ -76,11 +76,11 @@ __aicore__ inline void operator()(Params& params) {
         for (tiles) {
             mmad(gmBlockA, gmBlockB, ..., shape);
         }
-        CrossCoreSetFlag(AIC_SYNC_AIV_FLAG);  // 通知 AIV
+        Gemm::Sync::NotifyVector(AIC_SYNC_AIV_FLAG);  // 通知 AIV
     }
 
     if ASCEND_IS_AIV {
-        CrossCoreWaitFlag(AIC_SYNC_AIV_FLAG);  // 等 AIC 完成
+        Gemm::Sync::WaitForCube(AIC_SYNC_AIV_FLAG);  // 等 AIC 完成
         BlockEpilogue epi; epi.Init(epiParams);
         epi();  // 后处理 + 写 GM
     }
@@ -173,7 +173,7 @@ if ASCEND_IS_AIC {
 if ASCEND_IS_AIV {
     blockPrologue();  // FP4→FP8 转换，写 L1
 }
-// 通过 CrossCore Flag 交替同步（ready/free 协议）
+// 通过块内同步 Flag（Gemm::Sync）交替同步（ready/free 协议）
 ```
 
 ## 6. 常用辅助操作
@@ -183,14 +183,14 @@ if ASCEND_IS_AIV {
 | HF32 模式 | `SetHF32(isHf32)` / `UnsetHF32(isHf32)` |
 | L2 Cache | `SetL2Cache(gmA, gmB, mode)` |
 | 原子加 | `AscendC::SetAtomicAdd<float>()` / `SetAtomicNone()` |
-| 跨核同步 | `CrossCoreSetFlag<MODE, PIPE>(flagId)` / `CrossCoreWaitFlag<MODE, PIPE>(flagId)` |
+| 跨核同步 | `Gemm::Sync::NotifyVector/WaitForVector`（AIC 侧）、`Gemm::Sync::NotifyCube/WaitForCube`（AIV 侧）；部分组件直接使用 `AscendC::CrossCoreSetFlag/WaitFlag` |
 
 ## 7. 检查清单
 
 - [ ] `GemmUniversal` 特化的 SFINAE 条件匹配 `ScheduleType`
 - [ ] `Params` 聚合 ProblemShape + BlockMmad::Params + BlockEpilogue::Params + BlockScheduler::Params
 - [ ] AIC-only 路径加 `if ASCEND_IS_AIV { return; }`
-- [ ] AIC+AIV 路径用 CrossCore Flag 同步
+- [ ] AIC+AIV 路径用 `Gemm::Sync` 块内同步 Flag
 - [ ] GM Tensor 用正确的 LayoutPattern 创建
 - [ ] Tile 循环用 `blockIdx += coreNums` 步进
 - [ ] Kernel entry 函数签名：`__global__ __aicore__ void xxx_kernel_entry(GM_ADDR..., GM_ADDR tilingGM)`

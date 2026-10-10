@@ -69,8 +69,8 @@ KernelMatmul
 | KernelQgmmMx | 仅 AIC | MX FP4/MX FP8 | ScaleA + ScaleB | 无 | 不需要 | group list | BlockSchedulerGmmSwatWithTailSplit | 无 | 量化 Grouped Matmul |
 | KernelQgmmSwiGluMx | AIC + AIV 双核 | MXFP8 | ScaleA + ScaleB + 输出 E8M0 scale | BlockEpilogueSwigluMxQuant | 不需要 | group list | BlockSchedulerGmmSwatWithTailSplit | 有 | Grouped Matmul + SwiGLU mode 2 + MX 量化 |
 | KernelQgmmCube | 仅 AIC | int8/HiFloat8/FP8 | ScaleA + ScaleB | 无 | 不需要 | group list | BlockSchedulerGmmSwatWithTailSplit | 无 | 量化 Grouped Matmul |
-| KernelMatmulStreamK | AIC + AIV 双核 | 不支持 | 不支持 | BlockEpilogueStreamK | 需要 | 单 batch | StreamK Scheduler | 有 | 切 K 场景 Matmul |
-| KernelQbmmStreamK | AIC + AIV 双核 | MX FP4/MX FP8 | ScaleA + ScaleB | BlockEpilogueStreamK（复用） | 需要 | 单 batch | StreamK Scheduler（复用） | 有 | 量化切 K 场景 Matmul |
+| KernelMatmulStreamK | AIC + AIV 双核 | 不支持 | 不支持 | BlockEpilogueMatmulStreamK | 需要 | 单 batch | StreamK Scheduler | 有 | 切 K 场景 Matmul |
+| KernelQbmmStreamK | AIC + AIV 双核 | MX FP4/MX FP8 | ScaleA + ScaleB | BlockEpilogueMatmulStreamK（复用） | 需要 | 单 batch | StreamK Scheduler（复用） | 有 | 量化切 K 场景 Matmul |
 | KernelQbmmPertensorStreamK | AIC + AIV 双核 | int8/FP8/HiFloat8 | X2 per-tensor + 可选 X1 scale | BlockEpilogueQbmmPertensorStreamK | 需要 | 单 batch | StreamK Scheduler | 有 | QBMM per-tensor StreamK |
 | GemmUniversal (Weight Prologue) | AIC + AIV 双核 | FP8 激活 + packed FP4 权重 | ScaleA + ScaleB | `void` | 不需要 | 单 batch | Matmul SWAT | 有（ready/free 标志） | MXA8W4 Weight ND/NZ |
 | GmmWeightQuantMxKernel | AIC + AIV 双核 | FP8 激活 + packed FP4 E2M1/E1M2 权重 | ScaleA + ScaleB | `void` | 不需要 | group list | BlockSchedulerWqgmmNResplit | 有（ready/free 标志） | MX A8W4 Grouped Matmul |

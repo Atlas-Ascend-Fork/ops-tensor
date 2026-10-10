@@ -9,12 +9,12 @@ StreamK 矩阵乘 Kernel，支持 AIC + AIV 双核协同计算。支持 workspac
 ## 特殊约束
 
 ### BlockEpilogue 限制
-仅支持 `BlockEpilogueStreamK` 系列组件，不支持 `BlockEpilogueEmpty`。
+仅支持 `BlockEpilogueMatmulStreamK` 系列组件，不支持 `BlockEpilogueEmpty`。
 
 ### 计算模式
 支持 AIC + AIV 双核协同：
 - **AIC 核**：执行矩阵乘计算（BlockMmadStreamK）
-- **AIV 核**：执行后处理（BlockEpilogueStreamK）
+- **AIV 核**：执行后处理（BlockEpilogueMatmulStreamK）
 
 ### Workspace 必需
 必须提供 workspace 用于存储 K 轴切分的中间结果：
@@ -29,7 +29,7 @@ StreamK 矩阵乘 Kernel，支持 AIC + AIV 双核协同计算。支持 workspac
 可选 HF32 计算模式，通过 scheduler 参数控制。
 
 ### AIC-AIV 同步
-使用 `CrossCoreSetFlag` 和 `CrossCoreWaitFlag` 进行跨核同步：
+使用 `Gemm::Sync::NotifyVector`（AIC 侧）和 `Gemm::Sync::WaitForCube`（AIV 侧）进行跨核同步：
 - AIC 完成后设置同步标志
 - AIV 等待同步标志后执行后处理
 
@@ -154,7 +154,7 @@ __aicore__ inline void operator()(Params const& params)
 1. Block 索引检查：超出处理范围则等待同步并返回
 2. 等待 AIC 同步标志 `AIC_SYNC_AIV_FLAG`
 3. 调用 `SyncAll` 全核同步
-4. BlockEpilogueStreamK 初始化
+4. BlockEpilogueMatmulStreamK 初始化
 5. 执行后处理：
    - 从 workspace 读取中间结果
    - 执行 Add 汇聚（K 轴切分累加）
@@ -219,9 +219,9 @@ using BlockMmad = Blaze::Gemm::Block::BlockMmad<
     BiasType, LayoutBias>;
 
 // ============== 5. BlockEpilogue 组装 ==============
-// StreamK 必须使用 BlockEpilogueStreamK，不支持 Empty
+// StreamK 必须使用 BlockEpilogueMatmulStreamK，不支持 Empty
 // 参数：计算类型，输出类型，调度策略
-using BlockEpilogue = Blaze::Gemm::Block::BlockEpilogueStreamK<CType, OutType, DispatchPolicy>;
+using BlockEpilogue = Blaze::Gemm::Block::BlockEpilogueMatmulStreamK<CType, OutType, DispatchPolicy>;
 
 // ============== 6. Kernel 组装 ==============
 using StreamKKernel = Blaze::Gemm::Kernel::GemmUniversal<
@@ -240,12 +240,12 @@ params.mmadParams.bGmAddr = bGM;                     // B 矩阵 GM 地址
 params.mmadParams.cGmAddr = cGM;                     // C 矩阵 GM 地址
 params.mmadParams.biasGmAddr = biasGM;               // Bias GM 地址（可选，nullptr 表示无 bias）
 params.mmadParams.workspaceGmAddr = workspaceGM;    // Workspace GM 地址（必需，SK 模式使用）
-params.mmadParams.ml1 = 256;                         // L1 M 维度尺寸
-params.mmadParams.nl1 = 256;                         // L1 N 维度尺寸
-params.mmadParams.kl1 = 128;                         // L1 K 维度尺寸
-params.mmadParams.ml0 = 128;                         // L0 M 维度尺寸
-params.mmadParams.nl0 = 128;                         // L0 N 维度尺寸
-params.mmadParams.kl0 = 64;                          // L0 K 维度尺寸
+params.mmadParams.mL1 = 256;                         // L1 M 维度尺寸
+params.mmadParams.nL1 = 256;                         // L1 N 维度尺寸
+params.mmadParams.kL1 = 128;                         // L1 K 维度尺寸
+params.mmadParams.mL0 = 128;                         // L0 M 维度尺寸
+params.mmadParams.nL0 = 128;                         // L0 N 维度尺寸
+params.mmadParams.kL0 = 64;                          // L0 K 维度尺寸
 params.mmadParams.l1Stages = 2;                      // L1 缓冲数量（双缓冲）
 params.mmadParams.l0cStages = 1;                     // L0C 缓冲数量（单缓冲）
 
@@ -355,7 +355,7 @@ SK Tile 循环（K 轴切分）
     ↓
 AIC 计算 → 输出到 Workspace
     ↓
-AIC-AIV 同步（CrossCoreSetFlag）
+AIC-AIV 同步（`Sync::NotifyVector`）
     ↓
 AIV 后处理 → 输出到 GM
 ```
@@ -452,8 +452,8 @@ offsetWorkspace = ((tileIdx % usedCoreNum) / skKTileNum) * skKTileNum + kCntInde
 
 ### AIC-AIV 同步优化
 - **同步机制**：
-  - AIC 完成计算后设置同步标志：`CrossCoreSetFlag`
-  - AIV 等待同步标志后执行后处理：`CrossCoreWaitFlag`
+  - AIC 完成计算后设置同步标志：`Sync::NotifyVector`
+  - AIV 等待同步标志后执行后处理：`Sync::WaitForCube`
   - 全核同步：`SyncAll`
 - **优化建议**：
   - 确保 AIC 和 AIV 任务分配均衡

@@ -283,63 +283,33 @@ blaze/
 │   ├── attention/               # Attention 类算子kernel实现
 │   │   ├── kernel/                  # Kernel 层组件
 │   │   │   ├── kernel_universal.h       # AttentionUniversal 基础模板
-│   │   │   └── kernel_flat_quant.h     # FlatQuant Kernel 特化
+│   │   │   └── ...
 │   │   ├── block/                   # Block 层组件
 │   │   │   ├── block_mmad.h             # BlockMmad 基础模板
-│   │   │   ├── block_mmad_flat_quant.h # FlatQuant BlockMmad 特化
-│   │   │   └── block_scheduler_flat_quant.h
+│   │   │   └── ...
 │   │   └── policy/                  # Policy 层
 │   │       └── dispatch_policy.h
 │   ├── epilogue/            # Epilogue 层组件
 │   │   ├── block_epilogue_empty.h
-│   │   ├── block_epilogue_matmul_streamk.h
-│   │   ├── block_epilogue_qbmm_pertensor_streamk.h
-│   │   ├── block_epilogue_gelu_mx_quant.h
-│   │   ├── block_epilogue_swiglu_mx_quant.h
-│   │   └── block_epilogue_flat_quant.h  # FlatQuant AIV 量化后处理
+│   │   └── ...
 |   └── gemm/
 │       ├── kernel/              # Kernel 层组件
-│       │   ├── kernel_matmul_basic.h
-│       │   ├── kernel_matmul_streamk.h
-│       │   ├── kernel_qbmm_cube.h
-│       │   ├── kernel_qbmm_mx.h
-│       │   ├── kernel_qbmm_mx_without_batch.h
-│       │   ├── kernel_qbmm_mx_activation_quant.h
-│       │   ├── kernel_matmul_mix_weight_prologue.h
-│       │   ├── kernel_wqgmm_mix_weight_prologue.h
-│       │   ├── kernel_qbmm_streamk.h
-│       │   └── kernel_qbmm_pertensor_streamk.h
+│       │   ├── kernel_universal.h
+│       │   └── ...
 │       │
 │       ├── block/               # Block 层组件
 │       │   ├── block_mmad.h          # BlockMmad 基类
-│       │   ├── block_mmad_a8w8_fixpipe_quant.h # Fixpipe Quant BlockMmad
-│       │   ├── block_mmad_matmul_basic.h    # Matmul Basic BlockMmad
-│       │   ├── block_mmad_matmul_streamk.h  # Matmul StreamK BlockMmad
-│       │   ├── block_mmad_qbmm_mx.h         # Qbmm MX BlockMmad
-│       │   ├── block_mmad_qbmm_mx_l0c_pingpong.h # L0C PingPong Qbmm MX BlockMmad
-│       │   ├── block_mmad_weight_prologue_mx.h
-│       │   ├── block_scheduler_matmul_swat_with_tail_split.h
-│       │   ├── block_scheduler_matmul_basic.h
-│       │   ├── block_scheduler_matmul_streamk.h
-│       │   └── block_scheduler_qbmm.h
+│       │   └── ...
 │       │
 │       ├── tile/                # Tile 层组件
-│       │   ├── tile_mmad_mx.h
-│       │   ├── datamove.h       # 数据搬运原语聚合头
-│       │   ├── compute.h        # 计算原语聚合头
-│       │   ├── pad_mx_kl1.h
-│       │   ├── copy_gm_to_l1.h
-│       │   ├── copy_gm_to_ub.h
-│       │   ├── copy_weight_ub_to_l1.h
-│       │   └── shift_w4_to_w8.h
+│       │   ├── tile_trait.h        # Tile Trait 定义（如 MmadTraitMX）
+│       │   └── ...
 │       │
 │       ├── policy/              # Policy 层
 │       │   └── dispatch_policy.h
 │       │
 │       └── utils/               # Utils 层
-│       ├── common_utils.h
-│       ├── layout_utils.h
-│       └── quant_batch_matmul_constant.h
+│       └── ...
 │
 └── docs/API/                # API 文档
     ├── README.md            # 本文档

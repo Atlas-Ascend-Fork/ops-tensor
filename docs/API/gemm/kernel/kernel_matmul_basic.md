@@ -33,11 +33,12 @@ if ASCEND_IS_AIV {
 
 | 常量 | 说明 |
 |------|------|
-| isFp32 | 是否为 FP32 类型 |
-| C0_SIZE | Cube 单元大小（FP32=16, FP16=32） |
-| transA | A 矩阵是否转置 |
-| transB | B 矩阵是否转置 |
-| weightNZFormat | B 矩阵是否为 NZ 格式 |
+| TRANS_A | A 矩阵是否转置 |
+| TRANS_B | B 矩阵是否转置 |
+| NON_CONTIGUOUS_TYPE | 非连续类型：0=连续路径，`NoContiguousType::NON_CONTIGUOUS_TYPE_SLICE`=A 矩阵 ND slice 非连续路径 |
+| IS_A_FULL_LOAD | 是否 A 全载模式（FullLoadMode_ == A_FULL_LOAD_MODE） |
+| C0_SIZE_fp16 | Cube 单元大小（FP16 场景，16） |
+| C0_SIZE_fp32 | Cube 单元大小（FP32 场景，8） |
 
 ## Params 参数结构
 
@@ -184,12 +185,12 @@ params.mmadParams.aGmAddr = aGM;                 // A 矩阵 GM 地址
 params.mmadParams.bGmAddr = bGM;                 // B 矩阵 GM 地址
 params.mmadParams.cGmAddr = cGM;                 // C 矩阵 GM 地址
 params.mmadParams.biasGmAddr = biasGM;           // Bias GM 地址（可选，nullptr 表示无 bias）
-params.mmadParams.ml1 = 256;                     // L1 M 维度尺寸
-params.mmadParams.nl1 = 256;                     // L1 N 维度尺寸
-params.mmadParams.kl1 = 128;                     // L1 K 维度尺寸
-params.mmadParams.ml0 = 128;                     // L0 M 维度尺寸
-params.mmadParams.nl0 = 128;                     // L0 N 维度尺寸
-params.mmadParams.kl0 = 64;                      // L0 K 维度尺寸
+params.mmadParams.mL1 = 256;                     // L1 M 维度尺寸
+params.mmadParams.nL1 = 256;                     // L1 N 维度尺寸
+params.mmadParams.kL1 = 128;                     // L1 K 维度尺寸
+params.mmadParams.mL0 = 128;                     // L0 M 维度尺寸
+params.mmadParams.nL0 = 128;                     // L0 N 维度尺寸
+params.mmadParams.kL0 = 64;                      // L0 K 维度尺寸
 params.mmadParams.l1Stages = 2;                  // L1 缓冲数量（双缓冲）
 params.mmadParams.l0cStages = 1;                 // L0C 缓冲数量（单缓冲）
 

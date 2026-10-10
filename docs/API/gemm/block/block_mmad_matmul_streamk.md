@@ -69,12 +69,12 @@ struct Params {
     GM_ADDR biasGmAddr{nullptr};      // Bias GM 地址
     GM_ADDR groupListGmAddr{nullptr}; // GroupList 地址（预留扩展）
     GM_ADDR workspaceGmAddr{nullptr}; // Workspace GM 地址（SK 模式）
-    uint64_t ml1{0};                  // L1 M 维度尺寸
-    uint64_t nl1{0};                  // L1 N 维度尺寸
-    uint64_t kl1{0};                  // L1 K 维度尺寸
-    uint32_t ml0{0};                  // L0 M 维度尺寸
-    uint32_t nl0{0};                  // L0 N 维度尺寸
-    uint32_t kl0{0};                  // L0 K 维度尺寸
+    uint64_t mL1{0};                  // L1 M 维度尺寸
+    uint64_t nL1{0};                  // L1 N 维度尺寸
+    uint64_t kL1{0};                  // L1 K 维度尺寸
+    uint32_t mL0{0};                  // L0 M 维度尺寸
+    uint32_t nL0{0};                  // L0 N 维度尺寸
+    uint32_t kL0{0};                  // L0 K 维度尺寸
     uint32_t l1Stages{2};             // L1 缓冲数量
     uint16_t l0cStages{1};            // L0C 缓冲数量
 };
@@ -179,14 +179,12 @@ __aicore__ inline ~BlockMmad()
 ### Init函数
 ```
 __aicore__ inline void Init(
-    const TupleShape& shape,     // 问题规模
     const Params& params)        // mmad 参数
 ```
 功能：初始化 BlockMmad 组件。
 参数说明：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| shape | TupleShape | 问题规模 |
 | params | Params | mmad 参数（包含 isBias 判断） |
 
 说明：
@@ -281,8 +279,7 @@ BlockMmad::Params params = {
 ### 组件初始化
 ```
 BlockMmad blockMmad;
-TupleShape problemShape{m, n, k};
-blockMmad.Init(problemShape, params);
+blockMmad.Init(params);
 ```
 
 ### 组件执行

@@ -57,7 +57,7 @@ L1 总空间 (QUADRUPLE_BUFFER_COUNT 等分)
 GM(A) ──(每K批)──→ L1(A) ──→ L0A ──┐               AIC │ AIV
 GM(B) ──(每K批)──→ L1(B) ──→ L0B ──→  Mmad  ──→ L0C ──→ UB ═══→ GM(C)
                                           ↑                     ↑
-                                     CrossCoreSync        BlockEpilogueFixpipe
+                                     AIC-AIV Sync         BlockEpilogueFixpipe
 ```
 
 - AIC 侧：Mmad 计算 → `WaitFlag(AIV→UB_free)` → `CopyL0C2UB` → `SetFlag(UB_data_ready)`
@@ -107,7 +107,7 @@ __aicore__ inline void operator()(TensorA& gmA, TensorB& gmB, TensorBias& gmBias
 1. 按 N 方向迭代（baseN 为单位）
 2. 按 K 方向迭代，每轮同时搬入 A 和 B tile 到 L1
 3. 分割 K→L0，执行 L1→L0 搬运 + Mmad 计算
-4. 每轮 N 迭代结束时：`CrossCoreSync` → `CopyL0C2UB` → `CrossCoreSync`
+4. 每轮 N 迭代结束时：`Sync::WaitForVector`（等 AIV 空闲）→ `CopyOutFromL0C2UB` → `Sync::NotifyVector`（通知 AIV 就绪）
 
 tensorC 应为 UB tensor，AIC 写入后由 AIV epilogue 搬出。
 
@@ -126,8 +126,8 @@ tensorC 应为 UB tensor，AIC 写入后由 AIV epilogue 搬出。
 ```cpp
 // Fixpipe1v1 fp16 场景
 using DispatchPolicy = MatmulMultiBlockFixpipeOpti<ND_FIXPIPE_1_1, 0>;
-using BlockMmadType = BlockMmad<DispatchPolicy, half, RowMajor, half, RowMajor,
-                                 half, RowMajor, half, RowMajor>;
+using BlockMmadType = BlockMmad<DispatchPolicy, half, asc::te::nd_ext_layout_ptn, half, asc::te::nd_ext_layout_ptn,
+                                 half, asc::te::nd_ext_layout_ptn, half, asc::te::nd_ext_layout_ptn>;
 BlockMmadType blockMmad;
 blockMmad.Init({.aGmAddr = aGM, .bGmAddr = bGM, .cGmAddr = cGM,
                 .oriK = k, .mL1 = 128, .nL1 = 256, .kL1 = 512,

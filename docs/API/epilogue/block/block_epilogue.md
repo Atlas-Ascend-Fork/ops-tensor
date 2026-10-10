@@ -44,7 +44,7 @@ __aicore__ inline ~BlockEpilogue()
 __aicore__ inline void Init(Params const& params, ...)
 ```
 功能：初始化 BlockEpilogue 组件，设置 GM 地址、Block 形状等参数。
-说明：参数数量和类型根据实现不同。
+说明：仅部分实现提供（如 StreamK）；Empty 无 Init 方法。参数数量和类型根据实现不同。
 
 ### Run函数
 ```
@@ -86,8 +86,8 @@ __aicore__ inline void operator()(
    - StreamK：在 AIV 核执行
 
 3. **接口一致性**：
-   - 所有实现必须提供 `Init`、`Run`、`operator` 方法
-   - 保持统一的类型别名
+   - 所有实现必须提供 `Run`、`operator` 方法并保持统一的类型别名
+   - `Init` 仅部分实现提供：Empty 无 Init，StreamK 含 Init
 
 ## 公共调用示例
 
@@ -97,17 +97,16 @@ __aicore__ inline void operator()(
 using BlockEpilogue = Blaze::Gemm::Block::BlockEpilogueEmpty;
 
 // StreamK 实现
-using BlockEpilogue = Blaze::Gemm::Block::BlockEpilogueStreamK<float, half, DispatchPolicy>;
+using BlockEpilogue = Blaze::Gemm::Block::BlockEpilogueMatmulStreamK<float, half, DispatchPolicy>;
 ```
 
 ### 在 Kernel 中使用
 ```
-using MatmulKernel = Blaze::Gemm::Kernel::KernelMatmulBasic<
-    ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
-// 或
-using MatmulKernel = Blaze::Gemm::Kernel::KernelMatmulStreamK<
+using MatmulKernel = Blaze::Gemm::Kernel::GemmUniversal<
     ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 ```
+说明：Kernel 统一为 `GemmUniversal` 模板特化，具体调度（Basic / StreamK 等）由
+BlockMmad 的 DispatchPolicy 调度策略（如 `KernelMmadMultiBlockBasic`、`KernelMultiBlockStreamK`）决定。
 
 ### 执行模板
 ```
@@ -143,4 +142,4 @@ Epilogue 层位于矩阵乘计算之后，用于：
 | Epilogue 类型 | 编译时间 | 运行时间 | 内存占用 | 流水线 |
 |--------------|---------|---------|---------|--------|
 | BlockEpilogueEmpty | 极小 | 无影响 | 无 | 不参与 |
-| BlockEpilogueStreamK | 正常 | 有影响 | 有 | 参与计算 |
+| BlockEpilogueMatmulStreamK | 正常 | 有影响 | 有 | 参与计算 |

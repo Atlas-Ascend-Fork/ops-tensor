@@ -55,7 +55,8 @@ SetMMLayoutTransform(false); // 关闭
 | FULL_LOAD_MODE_ | uint64_t | 全载模式：0=非全载, 1=A全载, 2=B全载 |
 | FUSED_OP_TYPE_ | uint64_t | 融合操作类型 |
 | KernelSchedule_ | class | Kernel 调度类型 |
-| NON_CONTIGIOUS_TYPE_ | uint64_t | 非连续类型：0=连续路径，`NON_CONTIGUOUS_TYPE_SLICE`=A 矩阵 ND slice 非连续路径 |
+| NON_CONTIGUOUS_TYPE_ | uint64_t | 非连续类型：0=连续路径，`NoContiguousType::NON_CONTIGUOUS_TYPE_SLICE`=A 矩阵 ND slice 非连续路径 |
+| OutputMode_ | MatmulOutputMode | 输出模式：`MatmulOutputMode::OVERWRITE`=覆盖写（默认），`MatmulOutputMode::INPLACE_ADD`=原地累加输出 |
 | AType_ | class | A 矩阵数据类型 |
 | LayoutA_ | class | A 矩阵布局类型 |
 | BType_ | class | B 矩阵数据类型 |
@@ -70,11 +71,10 @@ SetMMLayoutTransform(false); // 关闭
 
 | 常量 | 说明 |
 |------|------|
-| transA | A 矩阵是否转置（通过 IsTrans trait 判断） |
-| transB | B 矩阵是否转置（通过 IsTrans trait 判断） |
-| weightNZFormat | B 矩阵是否为 NZ 格式（通过 IsWeightNz trait 判断） |
-| NON_CONTIGIOUS_TYPE | 非连续类型，来自 `DispatchPolicy` |
-| MTE1_MTE2_EVENT_ID_NUM | L1 双缓冲事件标志数量（固定 4 个） |
+| TRANS_A | A 矩阵是否转置（通过 IsTrans trait 判断） |
+| TRANS_B | B 矩阵是否转置（通过 IsTrans trait 判断） |
+| WEIGHT_NZ_FORMAT | B 矩阵是否为 NZ 格式（通过 IsWeightNz trait 判断） |
+| NON_CONTIGUOUS_TYPE | 非连续类型，来自 `DispatchPolicy` |
 
 ## Params 参数结构
 
@@ -87,14 +87,16 @@ struct Params {
     GM_ADDR biasGmAddr{nullptr};      // Bias GM 地址
     GM_ADDR groupListGmAddr{nullptr}; // GroupList 地址（预留扩展）
     GM_ADDR workspaceGmAddr{nullptr}; // Workspace 地址（预留扩展）
-    uint64_t ml1{0};                  // L1 M 维度尺寸
-    uint64_t nl1{0};                  // L1 N 维度尺寸
-    uint64_t kl1{0};                  // L1 K 维度尺寸
-    uint32_t ml0{0};                  // L0 M 维度尺寸
-    uint32_t nl0{0};                  // L0 N 维度尺寸
-    uint32_t kl0{0};                  // L0 K 维度尺寸
+    uint64_t mL1{0};                  // L1 M 维度尺寸
+    uint64_t nL1{0};                  // L1 N 维度尺寸
+    uint64_t kL1{0};                  // L1 K 维度尺寸
+    uint32_t mL0{0};                  // L0 M 维度尺寸
+    uint32_t nL0{0};                  // L0 N 维度尺寸
+    uint32_t kL0{0};                  // L0 K 维度尺寸
     uint32_t l1Stages{1};             // L1 缓冲数量
     uint16_t l0cStages{1};            // L0C 缓冲数量
+    GM_ADDR scaleGmAddr{nullptr};     // Scale GM 地址
+    uint64_t rowStride{0};            // 行步长
 };
 ```
 
@@ -147,22 +149,19 @@ __aicore__ inline ~BlockMmad()
 ### Init函数
 ```cpp
 __aicore__ inline void Init(
-    const TupleShape& shape,     // 问题规模
     const Params& params)        // BlockMmad 参数
 ```
 功能：初始化 BlockMmad 组件。
 参数说明：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| shape | TupleShape | 问题规模 `(m, n, k, batch)` |
 | params | Params | BlockMmad 参数 |
 
 执行流程：
-1. 设置问题规模：m_, n_, k_
-2. 设置 L1/L0 形状：mL1_, nL1_, kL1_, baseM_, baseN_, baseK_
-3. 判断 Bias：`isBias_ = params.biasGmAddr != nullptr`
-4. 设置缓冲策略：l1Stages_, enableL0cPingPong_
-5. 计算缓冲偏移：aL1Buffer_[i], bL1Buffer_[i], biasL1Buffer_[i]
+1. 设置 L1/L0 形状：mL1_, nL1_, kL1_, baseM_, baseN_, baseK_
+2. 判断 Bias：`isBias_ = params.biasGmAddr != nullptr`
+3. 设置缓冲策略：l1Stages_, enableL0cPingPong_
+4. 计算缓冲偏移：aL1Buffer_[i], bL1Buffer_[i], biasL1Buffer_[i]
 
 ### operator函数
 ```cpp
@@ -172,7 +171,8 @@ __aicore__ inline void operator()(
     TensorB& gmB,                // B 矩阵 GM Tensor
     TensorBias& gmBias,          // Bias GM Tensor
     TensorC& gmC,                // C 矩阵 GM Tensor
-    TupleL1L0Shape& tileShape)   // Tile 形状
+    TupleShape& blockShape,      // Block 形状
+    __gm__ uint64_t* gmScalePtr = nullptr)  // Scale GM 指针（可选）
 ```
 功能：执行单个 block 的矩阵乘计算。
 参数说明：
@@ -182,7 +182,8 @@ __aicore__ inline void operator()(
 | gmB | TensorB | B 矩阵输入 Tensor（已 Slice 到当前 block） |
 | gmBias | TensorBias | Bias 输入 Tensor（已 Slice） |
 | gmC | TensorC | C 矩阵输出 Tensor（已 Slice 到当前 block） |
-| tileShape | TupleL1L0Shape | Tile 形状 `(mL1, nL1, k, batch, mL0, nL0)` |
+| blockShape | TupleShape | Block 形状 `(m, n, k, batch)` |
+| gmScalePtr | `__gm__ uint64_t*` | Scale GM 指针（可选，默认 nullptr） |
 
 执行流程：
 1. **K 轴外层循环**：按 kL1 切分
@@ -220,7 +221,8 @@ using LayoutBias = LayoutC;
 using DispatchPolicy = Blaze::Gemm::MatmulMultiBlockBasic<0>;  // 非全载
 // A 矩阵 ND slice 非连续场景可使用：
 // using DispatchPolicy = Blaze::Gemm::MatmulMultiBlockBasic<
-//     0, 0, Blaze::Gemm::KernelMmadMultiBlockBasic, Blaze::Gemm::NON_CONTIGUOUS_TYPE_SLICE>;
+//     0, 0, Blaze::Gemm::KernelMmadMultiBlockBasic,
+//     static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_SLICE)>;
 using BlockMmad = Blaze::Gemm::Block::BlockMmad<
     DispatchPolicy, AType, LayoutA, BType, LayoutB, CType, LayoutC, BiasType, LayoutBias>;
 ```
@@ -232,14 +234,16 @@ BlockMmad::Params params = {
     .bGmAddr = bGM,
     .cGmAddr = cGM,
     .biasGmAddr = biasGM,  // nullptr 表示无 bias
-    .ml1 = 256,
-    .nl1 = 256,
-    .kl1 = 128,
-    .ml0 = 128,
-    .nl0 = 128,
-    .kl0 = 64,
-    .l1Stages = 2,         // L1 双缓冲
-    .l0cStages = 1         // L0C 单缓冲
+    .mL1 = 256,
+    .nL1 = 256,
+    .kL1 = 128,
+    .mL0 = 128,
+    .nL0 = 128,
+    .kL0 = 64,
+    .l1Stages = 2,           // L1 双缓冲
+    .l0cStages = 1,          // L0C 单缓冲
+    .scaleGmAddr = nullptr,  // Scale GM 地址（可选）
+    .rowStride = 0           // 行步长（可选）
 };
 ```
 
@@ -250,8 +254,7 @@ BlockMmad blockMmad;
 
 ### 组件初始化
 ```cpp
-TupleShape problemShape{m, n, k, batch};
-blockMmad.Init(problemShape, params);
+blockMmad.Init(params);
 ```
 
 ### 组件执行
@@ -269,8 +272,8 @@ auto gmBlockC = gmC.slice(AscendC::MakeCoord(coordM, coordN), AscendC::MakeShape
 auto gmBlockBias = gmBias.slice(AscendC::MakeCoord(0, coordN), AscendC::MakeShape(1, shapeN));
 
 // 执行矩阵乘
-TupleL1L0Shape tileShape{shapeM, shapeN, shapeK, batch, mL0, nL0};
-blockMmad(gmBlockA, gmBlockB, gmBlockBias, gmBlockC, tileShape);
+TupleShape blockShape{shapeM, shapeN, shapeK, batch};
+blockMmad(gmBlockA, gmBlockB, gmBlockBias, gmBlockC, blockShape);
 ```
 
 ## 数据流

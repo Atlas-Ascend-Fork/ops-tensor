@@ -52,7 +52,7 @@ BlockEpilogue
 | Epilogue 类型 | 计算内容 | 计算位置 | Workspace | 类型转换 | ReLU | 适用场景 |
 |--------------|---------|---------|-----------|---------|-----|---------|
 | BlockEpilogueEmpty | 无（空实现） | 无 | 不支持 | 无 | 不支持 | Basic Kernel |
-| BlockEpilogueStreamK | workspace 汇聚、Add、Cast、ReLU | AIV 核 | 支持 | 支持 float → half/bf16 | 可选支持 | StreamK Kernel |
+| BlockEpilogueMatmulStreamK | workspace 汇聚、Add、Cast、ReLU | AIV 核 | 支持 | 支持 float → half/bf16 | 可选支持 | StreamK Kernel |
 | BlockEpilogueDequant | dequant：int32→fp32 × x2Scale [× x1Scale] + bias | AIV 核 | 不支持 | 支持 fp32 → bf16/fp16/fp32 | 不支持 | QBMM MIX Kernel |
 | BlockEpilogueQbmmPertensorStreamK | workspace 归约 + dequant + bias | AIV 核 | 支持 | 支持 int32/fp32 → bf16/fp16/fp32 | 不支持 | QBMM per-tensor StreamK |
 | BlockEpilogueFmmWithScaleAdd | alpha × (x1@x2) + beta × x3 | AIV 核 | 不支持 | 支持 fp32 → bf16/fp16 | 不支持 | FusedMatMul scale_add Kernel |
@@ -82,7 +82,7 @@ BlockEpilogue
 
 ### BlockEpilogue 在 Kernel 中的作用
 - **Basic Kernel**：使用 BlockEpilogueEmpty，无后处理
-- **StreamK Kernel**：使用 BlockEpilogueStreamK，在 AIV 核执行后处理
+- **StreamK Kernel**：使用 BlockEpilogueMatmulStreamK，在 AIV 核执行后处理
   - 从 workspace 读取 AIC 计算的中间结果
   - 执行 Add 汇聚（K 轴切分）
   - 执行类型转换（float → half/bf16）

@@ -6,7 +6,7 @@
 
 - **聚焦 Kernel 端**：Blaze 只负责矩阵乘类算子的 Kernel 端计算组件（数据搬运、MMAD、调度等），不涉及 aclnn 入口与 Host 端逻辑。
 - **职责分工**：算子的 Tiling 计算、内存规划、解决方案注册等 Host 端工作由各算子自身负责，Blaze 与之配合而非替代。
-- **依赖关系**：Blaze 依赖 [`include/tensor_api/`](../tensor_api/) 提供的张量结构抽象（Layout / Shape / Coord 等），并直接对接 AscendC Kernel 接口。
+- **依赖关系**：Blaze 依赖 `include/tensor_api/`（编译期外部依赖，不在本仓内）提供的张量结构抽象（Layout / Shape / Coord 等），并直接对接 AscendC Kernel 接口。
 - **目标算子**：服务于使用到矩阵乘计算的相关算子，包括 Matmul、GroupedMatmul、MC2 等。
 
 ## 设计理念
