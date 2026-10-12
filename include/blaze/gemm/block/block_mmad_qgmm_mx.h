@@ -816,7 +816,7 @@ private:
                                                  Blaze::Gemm::Tile::CopyL0C2UBTraitMixSplitM{});
             if constexpr (IS_FINALIZE_ROUTING) {
                 auto tensorL0CAligned = tensorL0C.slice(asc::te::make_coord(0L, 0L),
-                                                        asc::te::make_shape(l0cLayoutM, Align32(curN)));
+                                                        asc::te::make_shape(l0cLayoutM, CeilAlign(curN, C0_SIZE_L0C)));
                 asc::te::copy(copyL0C2UB.with(asc::te::l0c_to_ub_params(asc::te::unit_flag_mode::enable_update)),
                               tensorC, tensorL0CAligned);
             } else {

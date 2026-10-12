@@ -477,8 +477,14 @@ private:
     {
         uint64_t singleGroupBSize = static_cast<uint64_t>(n_) * static_cast<uint64_t>(k_);
         if constexpr (IsWeightNz<LayoutB>::value) {
-            singleGroupBSize = CeilAlign(static_cast<uint64_t>(n_), INPUT_C0_SIZE) *
-                               CeilAlign(static_cast<uint64_t>(k_), static_cast<uint64_t>(BLOCK_CUBE));
+            // ZN weight storage swaps the K/N fractal axes relative to NZ.
+            if constexpr (TRANS_B) {
+                singleGroupBSize = CeilAlign(static_cast<uint64_t>(n_), static_cast<uint64_t>(BLOCK_CUBE)) *
+                                   CeilAlign(static_cast<uint64_t>(k_), INPUT_C0_SIZE);
+            } else {
+                singleGroupBSize = CeilAlign(static_cast<uint64_t>(n_), INPUT_C0_SIZE) *
+                                   CeilAlign(static_cast<uint64_t>(k_), static_cast<uint64_t>(BLOCK_CUBE));
+            }
         }
         if constexpr (IsFp4<BType>()) {
             singleGroupBSize >>= 1;
