@@ -573,9 +573,9 @@ private:
             auto tensorBL1 = asc::te::make_tensor(
                 asc::te::make_mem_ptr<asc::te::location::l1, BType>(l1BufferBOffset_[bL1BufId]), layoutBL1);
             auto gmBlockBLeft = gmBLeft.slice(asc::te::make_coord(kL1Offset, 0), asc::te::make_shape(curGmBKL1, curN));
-            if (kL1Offset % WEIGHT_NZ_K_COPY_ALIGN == 0 &&
-                Blaze::Gemm::Tile::CopyConcatGM2L1::CopyWeightNzIfSupported(
-                    tensorBL1, gmBlockBLeft, Blaze::Gemm::Tile::CopyConcatGM2L1Params{n_, k_})) {
+            if (Blaze::Gemm::Tile::CopyConcatGM2L1::Copy(tensorBL1, gmBlockBLeft,
+                                                         Blaze::Gemm::Tile::CopyConcatGM2L1Params{n_, k_},
+                                                         kL1Offset % WEIGHT_NZ_K_COPY_ALIGN == 0)) {
                 return tensorBL1;
             }
             auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});

@@ -79,6 +79,7 @@ public:
     using DataTypeOut = DataTypeOut_;
     using DataTypeIn = DataTypeIn_;
     using DataTypeScale = DataTypeScale_;
+    // Legacy APT also instantiates inactive FP4 combinations. Validate execution dtypes in the upper-layer route.
     static constexpr uint64_t INPUT_UB_TILE_ELEMENTS = Constant::MAX_SINGLE_MN;
     static constexpr uint64_t INPUT_UB_BUFFER_BYTES = INPUT_UB_TILE_ELEMENTS * sizeof(DataTypeIn);
     static constexpr uint64_t OUTPUT_C0_SIZE = asc::te::c0_element<DataTypeIn>;
@@ -104,12 +105,13 @@ public:
         GM_ADDR yScaleGmAddr{nullptr}; //!< Required YScale address; validated by the upper layer.
         uint32_t baseM{0};             //!< Reserved compatibility field; not read by the current implementation.
         uint32_t baseN{0};             //!< Reserved compatibility field; not read by the current implementation.
+        // Keep scaleAlg fifth for legacy five-field aggregate initialization.
+        uint32_t scaleAlg{0}; //!< Quantization algorithm: 0 (OCP) or 1 (cuBLAS).
         // The shared epilogue serves legacy V2 mode 0 and V3 mode 2.
-        int64_t swigluMode{0};
+        uint32_t swigluMode{0};
         float clampLimit{Constant::DEFAULT_CLAMP_LIMIT};
         float gluAlpha{Constant::DEFAULT_GLU_ALPHA};
         float gluBias{Constant::DEFAULT_GLU_BIAS};
-        uint32_t scaleAlg{0};   //!< V3 public contract: 0 (OCP) or 1 (cuBLAS).
         float dstTypeMax{0.0F}; //!< Reserved in this component; V3 requires 0.
         Params() = default;
     };
@@ -215,12 +217,13 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
 
     if constexpr (AscendC::IsSameType<DataTypeOut, fp8_e4m3fn_t>::value) {
         fpEmax_ = Constant::FP8_E4M3_MAX_EXP;
-        invDstTypeMax_ = 1.0f / Constant::FP8_E4M3_MAX_VALUE;
-    }
-    if constexpr (AscendC::IsSameType<DataTypeOut, fp8_e5m2_t>::value) {
+        invDstTypeMax_ = Constant::RECIPROCAL_NUMERATOR / Constant::FP8_E4M3_MAX_VALUE;
+    } else if constexpr (AscendC::IsSameType<DataTypeOut, fp8_e5m2_t>::value) {
         fpEmax_ = Constant::FP8_E5M2_MAX_EXP;
         invDstTypeMax_ = Constant::RECIPROCAL_NUMERATOR / Constant::FP8_E5M2_MAX_VALUE;
     } else {
+        // Preserve initialization for legacy, inactive non-FP8 template combinations.
+        fpEmax_ = Constant::FP8_E4M3_MAX_EXP;
         invDstTypeMax_ = Constant::RECIPROCAL_NUMERATOR / Constant::FP8_E4M3_MAX_VALUE;
     }
     SetupUbLayout();

@@ -90,25 +90,26 @@ private:
 /*! \brief Copies two logical B or ScaleB N halves into one concatenated L1 tensor. */
 struct CopyConcatGM2L1 {
     static constexpr uint64_t ALIGN_MASK_ADJUSTMENT = 1;
-    // Physical FP8 NZ/ZN source: src is the already-offset LEFT slice.
-    // Return false before issuing any DMA when the optimized copy contract is
-    // not satisfied; callers can retain the ordinary tensor-copy path.
     /*!
-     * \brief Copies physical NZ/ZN FP8 weight when the aligned fast path is supported.
+     * \brief Copies physical NZ/ZN FP8 weight through the aligned fast path when supported.
      * \param dst Concatenated L1 destination.
      * \param src Already-offset left-half GM slice for the current K window.
      * \param params Full N/K dimensions.
-     * \return true after issuing the optimized copy, or false before any DMA so the caller can use its fallback.
+     * \param kOffsetAligned Whether the current K window starts at a 128-element boundary.
+     * \return true after issuing the optimized copy; false before any DMA so the caller can use its fallback.
      */
     template <typename T, typename U>
-    __aicore__ inline static bool CopyWeightNzIfSupported(const T& dst, const U& src,
-                                                          const CopyConcatGM2L1Params& params)
+    __aicore__ inline static bool Copy(const T& dst, const U& src, const CopyConcatGM2L1Params& params,
+                                       bool kOffsetAligned)
     {
         using ElementType = asc::te::get_attribute_element_type<typename U::element_type*>;
         using SrcLayoutPtn = asc::te::get_layout_pattern<typename U::layout_type>;
         if constexpr (sizeof(ElementType) != 1 || IsFp4<ElementType>() || !IsWeightNz<SrcLayoutPtn>::value) {
             return false;
         } else {
+            if (!kOffsetAligned) {
+                return false;
+            }
             const uint64_t width = asc::te::get_total_column_shape(src.layout());
             const uint64_t windowK = asc::te::get_total_row_shape(src.layout());
             const uint64_t l1K = asc::te::get_total_row_shape(dst.layout());
