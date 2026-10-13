@@ -52,12 +52,13 @@ template <typename T>
 inline constexpr bool IS_FP4 = std::is_same_v<T, fp4x2_e2m1_t>;
 
 template <typename AType, typename BType, typename OutType>
+// Keep 64-bit arguments before 32-bit arguments so host launch stubs and device entry points agree on alignment.
+// Pass small flags in 32-bit slots, then narrow them when populating the internal tiling structure.
 __global__ __aicore__ void GmmaqMxKernel(GM_ADDR x, GM_ADDR weight, GM_ADDR weightScale, GM_ADDR xScale,
-                                         GM_ADDR groupList, GM_ADDR c, GM_ADDR y, GM_ADDR yScale, uint32_t groupNum,
-                                         int64_t m, int64_t n, int64_t k, uint32_t baseM, uint32_t baseN,
-                                         uint32_t baseK, uint32_t kAL1, uint32_t kBL1, uint32_t scaleKAL1,
-                                         uint32_t scaleKBL1, uint8_t dbL0C, uint8_t l1BufferStage, uint32_t scaleAlg,
-                                         float dstTypeMax)
+                                         GM_ADDR groupList, GM_ADDR c, GM_ADDR y, GM_ADDR yScale, int64_t m, int64_t n,
+                                         int64_t k, uint32_t groupNum, uint32_t baseM, uint32_t baseN, uint32_t baseK,
+                                         uint32_t kAL1, uint32_t kBL1, uint32_t scaleKAL1, uint32_t scaleKBL1,
+                                         uint32_t dbL0C, uint32_t l1BufferStage, uint32_t scaleAlg, float dstTypeMax)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::InitSocState();
@@ -74,10 +75,23 @@ __global__ __aicore__ void GmmaqMxKernel(GM_ADDR x, GM_ADDR weight, GM_ADDR weig
     params.mmadParams = {x, weight, c, nullptr, xScale, weightScale};
     params.epilogueParams = {y, yScale, baseM, baseN, scaleAlg, dstTypeMax};
     params.groupListGmAddr = groupList;
-    params.gmmParams = {
-        groupNum,     m,         n,         k, baseM, baseN,         baseK,        kAL1,
-        kBL1,         scaleKAL1, scaleKBL1, 0, dbL0C, l1BufferStage, GROUP_TYPE_M, GROUP_LIST_TYPE_LENGTH,
-        SINGLE_WEIGHT};
+    params.gmmParams = {groupNum,
+                        m,
+                        n,
+                        k,
+                        baseM,
+                        baseN,
+                        baseK,
+                        kAL1,
+                        kBL1,
+                        scaleKAL1,
+                        scaleKBL1,
+                        0,
+                        static_cast<uint8_t>(dbL0C),
+                        static_cast<uint8_t>(l1BufferStage),
+                        GROUP_TYPE_M,
+                        GROUP_LIST_TYPE_LENGTH,
+                        SINGLE_WEIGHT};
     Kernel kernel;
     kernel(params);
 }
@@ -187,9 +201,10 @@ static void Run(const Config& config)
     aclrtStream stream = nullptr;
     ACL_CHECK(aclrtCreateStream(&stream));
     GmmaqMxKernel<AType, BType, OutType><<<static_cast<uint32_t>(GetAicCoreNum()), 0, stream>>>(
-        x, weight, weightScale, xScale, groupList, c, y, yScale, config.groupNum, config.m, config.n, config.k,
+        x, weight, weightScale, xScale, groupList, c, y, yScale, config.m, config.n, config.k, config.groupNum,
         config.baseM, config.baseN, config.baseK, config.kAL1, config.kBL1, config.scaleKAL1, config.scaleKBL1,
-        config.dbL0C, config.l1BufferStage, config.scaleAlg, config.dstTypeMax);
+        static_cast<uint32_t>(config.dbL0C), static_cast<uint32_t>(config.l1BufferStage), config.scaleAlg,
+        config.dstTypeMax);
     ACL_CHECK(aclrtSynchronizeStream(stream));
 
     std::vector<uint8_t> hostY(yBytes), hostScale(yScaleBytes);

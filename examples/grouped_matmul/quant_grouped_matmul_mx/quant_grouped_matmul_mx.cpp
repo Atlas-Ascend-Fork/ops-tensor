@@ -46,12 +46,14 @@ template <typename T>
 inline constexpr bool IS_FP4_TYPE = std::is_same_v<T, fp4x2_e2m1_t> || std::is_same_v<T, fp4x2_e1m2_t>;
 
 template <typename AType, typename BType, typename CType, typename LayoutA, typename LayoutB, uint64_t FullLoadMode>
+// Keep 64-bit arguments before 32-bit arguments so host launch stubs and device entry points agree on alignment.
+// Pass small flags in 32-bit slots, then narrow them when populating the internal tiling structure.
 __global__ __aicore__ void qgmm_mx_kernel(GM_ADDR a, GM_ADDR b, GM_ADDR scaleA, GM_ADDR scaleB, GM_ADDR c, GM_ADDR bias,
-                                          GM_ADDR groupList, uint32_t groupNum, int64_t m, int64_t n, int64_t k,
+                                          GM_ADDR groupList, int64_t m, int64_t n, int64_t k, uint32_t groupNum,
                                           uint32_t baseM, uint32_t baseN, uint32_t baseK, uint32_t kAL1, uint32_t kBL1,
-                                          uint32_t scaleKAL1, uint32_t scaleKBL1, uint8_t isBias, uint8_t dbL0C,
-                                          uint8_t l1BufferStage, int8_t groupType, uint8_t groupListType,
-                                          uint8_t singleW)
+                                          uint32_t scaleKAL1, uint32_t scaleKBL1, uint32_t isBias, uint32_t dbL0C,
+                                          uint32_t l1BufferStage, int32_t groupType, uint32_t groupListType,
+                                          uint32_t singleW)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::InitSocState();
@@ -70,8 +72,23 @@ __global__ __aicore__ void qgmm_mx_kernel(GM_ADDR a, GM_ADDR b, GM_ADDR scaleA, 
     p.mmadParams.scaleBGmAddr = scaleB;
     p.mmadParams.biasGmAddr = bias;
     p.groupListGmAddr = groupList;
-    p.gmmParams = {groupNum,  m,         n,      k,     baseM,         baseN,     baseK,         kAL1,   kBL1,
-                   scaleKAL1, scaleKBL1, isBias, dbL0C, l1BufferStage, groupType, groupListType, singleW};
+    p.gmmParams = {groupNum,
+                   m,
+                   n,
+                   k,
+                   baseM,
+                   baseN,
+                   baseK,
+                   kAL1,
+                   kBL1,
+                   scaleKAL1,
+                   scaleKBL1,
+                   static_cast<uint8_t>(isBias),
+                   static_cast<uint8_t>(dbL0C),
+                   static_cast<uint8_t>(l1BufferStage),
+                   static_cast<int8_t>(groupType),
+                   static_cast<uint8_t>(groupListType),
+                   static_cast<uint8_t>(singleW)};
     Kernel kernel;
     kernel(p);
 }
@@ -245,10 +262,12 @@ void LaunchKernel(DeviceBuffers& device, const CaseBytes& bytes, const QgmmTilin
     ACL_CHECK(aclrtCreateStream(&stream));
     qgmm_mx_kernel<AType, BType, CType, LayoutA, LayoutB, FullLoadMode>
         <<<static_cast<uint32_t>(GetAicCoreNum()), 0, stream>>>(
-            device.a, device.b, device.scaleA, device.scaleB, device.c, device.bias, device.groupList, tiling.groupNum,
-            tiling.m, tiling.n, tiling.k, tiling.baseM, tiling.baseN, tiling.baseK, tiling.kAL1, tiling.kBL1,
-            tiling.scaleKAL1, tiling.scaleKBL1, tiling.isBias, tiling.dbL0C, tiling.l1BufferStage, tiling.groupType,
-            tiling.groupListType, tiling.singleW);
+            device.a, device.b, device.scaleA, device.scaleB, device.c, device.bias, device.groupList, tiling.m,
+            tiling.n, tiling.k, tiling.groupNum, tiling.baseM, tiling.baseN, tiling.baseK, tiling.kAL1, tiling.kBL1,
+            tiling.scaleKAL1, tiling.scaleKBL1, static_cast<uint32_t>(tiling.isBias),
+            static_cast<uint32_t>(tiling.dbL0C), static_cast<uint32_t>(tiling.l1BufferStage),
+            static_cast<int32_t>(tiling.groupType), static_cast<uint32_t>(tiling.groupListType),
+            static_cast<uint32_t>(tiling.singleW));
     ACL_CHECK(aclrtSynchronizeStream(stream));
     std::vector<uint8_t> output(bytes.c);
     ACL_CHECK(aclrtMemcpy(output.data(), bytes.c, device.c, bytes.c, ACL_MEMCPY_DEVICE_TO_HOST));

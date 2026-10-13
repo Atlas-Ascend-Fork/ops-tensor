@@ -72,6 +72,7 @@ template <typename DataTypeOut_, typename DataTypeIn_ = float>
 class BlockEpilogueGeluTanhMxQuant {
 public:
     static constexpr uint32_t EPILOGUE_UB_DB_COUNT = 2;
+    static constexpr uint32_t EPILOGUE_BASE_N_ALIGNMENT = AscendC::ONE_BLK_SIZE;
     using DataTypeOut = DataTypeOut_;
     using DataTypeIn = DataTypeIn_;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
@@ -94,6 +95,12 @@ public:
 
     __aicore__ inline ~BlockEpilogueGeluTanhMxQuant()
     {
+        if ASCEND_IS_AIC {
+            return;
+        }
+        if (!isValid_) {
+            return;
+        }
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
         if (bufferCount_ == EPILOGUE_UB_DB_COUNT) {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(1);
@@ -115,6 +122,16 @@ public:
     __aicore__ inline void Init(const Params& params)
     {
         if ASCEND_IS_AIC {
+            return;
+        }
+        isValid_ = true;
+        const bool isValidBaseN = params.baseN != 0 && params.baseN % EPILOGUE_BASE_N_ALIGNMENT == 0;
+        ASCENDC_ASSERT(isValidBaseN, {
+            KERNEL_LOG(KERNEL_ERROR, "GMMAQ epilogue baseN must be aligned to %u, got %u.", EPILOGUE_BASE_N_ALIGNMENT,
+                       params.baseN);
+        });
+        if (!isValidBaseN) {
+            isValid_ = false;
             return;
         }
         params_ = &params;
@@ -143,27 +160,42 @@ public:
                                                   static_cast<uint64_t>(Gemm::DOUBLE_BUFFER_COUNT));
         const uint64_t maxBlockCount = mPerVector * params.baseN;
         const uint64_t maxScaleCount = Gemm::CeilDiv(maxBlockCount, static_cast<uint64_t>(AscendC::ONE_BLK_SIZE));
-        const uint64_t afterIn = maxBlockCount * sizeof(DataTypeIn);
+        const uint64_t afterIn = Gemm::Align32(maxBlockCount * sizeof(DataTypeIn));
+        const uint64_t quantOutputBytes = Gemm::Align32(maxBlockCount * sizeof(int8_t));
+        const uint64_t scaleOutputBytes = maxScaleCount * sizeof(int8_t);
+        const uint64_t activationBytes = maxBlockCount * sizeof(bfloat16_t);
+        const uint64_t exponentBytes = maxScaleCount * sizeof(uint16_t);
         const uint64_t scaleBlockBytes = mPerVector * AscendC::ONE_BLK_SIZE * sizeof(int8_t);
-        const uint64_t singleBufferBytes = afterIn + maxBlockCount * sizeof(int8_t) + maxScaleCount * sizeof(int8_t) +
-                                           maxBlockCount * sizeof(bfloat16_t) + maxScaleCount * sizeof(uint16_t) * 2 +
-                                           scaleBlockBytes;
-        const uint64_t doubleBufferBytes = singleBufferBytes + maxBlockCount * sizeof(int8_t) + scaleBlockBytes;
+
+        const uint64_t singleAfterOutput = Gemm::Align32(afterIn + quantOutputBytes);
+        const uint64_t singleAfterIo = Gemm::Align32(singleAfterOutput + scaleOutputBytes);
+        const uint64_t singleAfterActivation = Gemm::Align32(singleAfterIo + activationBytes);
+        const uint64_t singleAfterMaxExp = Gemm::Align32(singleAfterActivation + exponentBytes);
+        const uint64_t singleScaleBlockOffset = Gemm::Align32(singleAfterMaxExp + exponentBytes);
+
+        const uint64_t doubleAfterOutput = Gemm::Align32(afterIn + 2 * quantOutputBytes);
+        const uint64_t doubleAfterIo = Gemm::Align32(doubleAfterOutput + scaleOutputBytes);
+        const uint64_t doubleAfterActivation = Gemm::Align32(doubleAfterIo + activationBytes);
+        const uint64_t doubleAfterMaxExp = Gemm::Align32(doubleAfterActivation + exponentBytes);
+        const uint64_t doubleScaleBlockOffset = Gemm::Align32(doubleAfterMaxExp + exponentBytes);
+        const uint64_t doubleBufferBytes = doubleScaleBlockOffset + 2 * scaleBlockBytes;
         bufferCount_ = doubleBufferBytes <= AscendC::TOTAL_UB_SIZE ? EPILOGUE_UB_DB_COUNT : 1U;
 
         for (uint32_t slot = 0; slot < bufferCount_; ++slot) {
             quantOutput_[slot] = AscendC::LocalTensor<int8_t>(
-                AscendC::TPosition::VECOUT, afterIn + slot * maxBlockCount * sizeof(int8_t), maxBlockCount);
+                AscendC::TPosition::VECOUT, Gemm::Align32(afterIn + slot * quantOutputBytes), maxBlockCount);
         }
-        const uint64_t afterOutput = afterIn + bufferCount_ * maxBlockCount * sizeof(int8_t);
+        const uint64_t afterOutput = bufferCount_ == EPILOGUE_UB_DB_COUNT ? doubleAfterOutput : singleAfterOutput;
         quantScaleOutput_ = AscendC::LocalTensor<int8_t>(AscendC::TPosition::VECOUT, afterOutput, maxScaleCount);
-        const uint64_t afterIo = afterOutput + maxScaleCount * sizeof(int8_t);
+        const uint64_t afterIo = bufferCount_ == EPILOGUE_UB_DB_COUNT ? doubleAfterIo : singleAfterIo;
         activationResult_ = AscendC::LocalTensor<bfloat16_t>(AscendC::TPosition::VECCALC, afterIo, maxBlockCount);
-        const uint64_t afterActivation = afterIo + maxBlockCount * sizeof(bfloat16_t);
+        const uint64_t afterActivation = bufferCount_ == EPILOGUE_UB_DB_COUNT ? doubleAfterActivation :
+                                                                                singleAfterActivation;
         maxExp_ = AscendC::LocalTensor<uint16_t>(AscendC::TPosition::VECCALC, afterActivation, maxScaleCount);
-        const uint64_t afterMaxExp = afterActivation + maxScaleCount * sizeof(uint16_t);
+        const uint64_t afterMaxExp = bufferCount_ == EPILOGUE_UB_DB_COUNT ? doubleAfterMaxExp : singleAfterMaxExp;
         halfScale_ = AscendC::LocalTensor<uint16_t>(AscendC::TPosition::VECCALC, afterMaxExp, maxScaleCount);
-        const uint64_t scaleBlockOffset = afterMaxExp + maxScaleCount * sizeof(uint16_t);
+        const uint64_t scaleBlockOffset = bufferCount_ == EPILOGUE_UB_DB_COUNT ? doubleScaleBlockOffset :
+                                                                                 singleScaleBlockOffset;
         for (uint32_t slot = 0; slot < bufferCount_; ++slot) {
             quantScaleBlockOutput_[slot] = AscendC::LocalTensor<int8_t>(AscendC::TPosition::VECOUT,
                                                                         scaleBlockOffset + slot * scaleBlockBytes,
@@ -201,6 +233,9 @@ public:
 
     __aicore__ inline void operator()(const BlockShape& blockShape, const OutputOffsets& outputOffsets)
     {
+        if (!isValid_) {
+            return;
+        }
         singleM_ = asc::te::get<Gemm::MNK_M>(blockShape);
         singleN_ = asc::te::get<Gemm::MNK_N>(blockShape);
         scaleBlockN_ = Gemm::CeilDiv(static_cast<uint64_t>(singleN_), static_cast<uint64_t>(Gemm::MXFP_DIVISOR_SIZE)) *
@@ -217,7 +252,8 @@ public:
 
         const uint32_t slot = bufferCount_ == EPILOGUE_UB_DB_COUNT ? pingPongId_ : 0U;
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(slot);
-        DoActivationAndQuant(singleMInVector, slot);
+        RunActivation(singleMInVector);
+        RunDynamicMxQuant(singleMInVector, slot);
         const int64_t yOffset = outputOffsets.yOffset + static_cast<int64_t>(mOffset) * n_;
         const int64_t yScaleOffset = outputOffsets.yScaleOffset + static_cast<int64_t>(mOffset) * scaleN_;
         TransScaleLayout(singleMInVector, slot);
@@ -678,11 +714,8 @@ private:
         }
     }
 
-    __aicore__ inline void DoActivationAndQuant(uint16_t mSize, uint32_t slot)
+    __aicore__ inline void RunActivation(uint16_t mSize)
     {
-        __ubuf__ int8_t* quantOutput = reinterpret_cast<__ubuf__ int8_t*>(quantOutput_[slot].GetPhyAddr());
-        __ubuf__ uint16_t* quantScale = reinterpret_cast<__ubuf__ uint16_t*>(quantScaleOutput_.GetPhyAddr());
-        __ubuf__ bfloat16_t* activation = reinterpret_cast<__ubuf__ bfloat16_t*>(activationResult_.GetPhyAddr());
         const uint32_t nAligned = Gemm::Align32(static_cast<uint32_t>(singleN_));
         const uint32_t activationUbOffset = static_cast<uint32_t>(
             reinterpret_cast<uintptr_t>(activationResult_.GetPhyAddr()) - asc_get_phy_buf_addr(0));
@@ -693,6 +726,13 @@ private:
             asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(activationUbOffset), layout);
         Gelu<bfloat16_t, DataTypeIn> gelu;
         gelu.GeluTanh(srcTensor, dstTensor, mSize, static_cast<uint16_t>(singleN_));
+    }
+
+    __aicore__ inline void RunDynamicMxQuant(uint16_t mSize, uint32_t slot)
+    {
+        __ubuf__ int8_t* quantOutput = reinterpret_cast<__ubuf__ int8_t*>(quantOutput_[slot].GetPhyAddr());
+        __ubuf__ uint16_t* quantScale = reinterpret_cast<__ubuf__ uint16_t*>(quantScaleOutput_.GetPhyAddr());
+        __ubuf__ bfloat16_t* activation = reinterpret_cast<__ubuf__ bfloat16_t*>(activationResult_.GetPhyAddr());
 
         const uint32_t alignedN = Gemm::CeilAlign(static_cast<uint32_t>(singleN_),
                                                   static_cast<uint32_t>(AscendC::ONE_BLK_SIZE));
@@ -762,6 +802,7 @@ private:
     AscendC::LocalTensor<uint16_t> halfScale_;
 
     const Params* params_{nullptr};
+    bool isValid_{true};
     int64_t n_{0};
     int64_t scaleN_{0};
     uint32_t subBlockIdx_{0};
