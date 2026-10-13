@@ -36,14 +36,6 @@
 namespace Blaze {
 namespace Gemm {
 namespace Kernel {
-namespace {
-constexpr uint8_t GMM_GROUP_LIST_OFFSET = 0U;
-constexpr uint8_t GMM_GROUP_LIST_LENGTH = 1U;
-constexpr uint8_t GMM_GROUP_LIST_SPARSE = 2U;
-constexpr uint32_t GMM_SPARSE_STRIDE = 2U;
-constexpr uint32_t GMM_SPARSE_VALUE_OFFSET = 1U;
-constexpr int64_t GMM_BLOCK_MASK = BLOCK_CUBE - 1;
-} // namespace
 
 #define GMM_FIXPIPE_CLASS_TEM_PARAMS \
     template <class ProblemShape, class BlockMmad, class BlockEpilogue, class BlockScheduler>
@@ -56,6 +48,14 @@ constexpr int64_t GMM_BLOCK_MASK = BLOCK_CUBE - 1;
 
 GMM_FIXPIPE_CLASS_TEM_PARAMS
 class GemmUniversal<GMM_FIXPIPE_TEM_PARAMS> {
+private:
+    static constexpr uint8_t GMM_GROUP_LIST_OFFSET = 0U;
+    static constexpr uint8_t GMM_GROUP_LIST_LENGTH = 1U;
+    static constexpr uint8_t GMM_GROUP_LIST_SPARSE = 2U;
+    static constexpr uint32_t GMM_SPARSE_STRIDE = 2U;
+    static constexpr uint32_t GMM_SPARSE_VALUE_OFFSET = 1U;
+    static constexpr int64_t GMM_BLOCK_MASK = BLOCK_CUBE - 1;
+
 public:
     using AType = typename BlockMmad::AType;
     using BType = typename BlockMmad::BType;

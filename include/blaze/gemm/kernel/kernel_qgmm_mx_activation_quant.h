@@ -34,35 +34,35 @@ namespace Blaze {
 namespace Gemm {
 
 namespace Kernel {
-namespace {
-constexpr uint64_t GROUP_LIST_TYPE_OFFSET = 0UL;
-constexpr uint64_t GROUP_LIST_TYPE_LENGTH = 1UL;
-constexpr uint64_t GROUP_LIST_TYPE_SPARSE = 2UL;
-constexpr uint64_t SPARSE_GROUP_LIST_ITEM_STRIDE = 2UL;
-constexpr uint64_t SPARSE_GROUP_LIST_SPLIT_VALUE_OFFSET = 1UL;
-constexpr int64_t BLOCK_CUBE_MASK = BLOCK_CUBE - 1;
-constexpr int64_t SCALE_CACHE_MASK = 0xff;
-
-template <typename T_>
-__aicore__ inline __gm__ T_* GetTensorAddrFromTensorList(uint32_t index, __gm__ T_* tensorPtr)
-{
-    auto tensorList = AscendC::GlobalTensor<uint64_t>();
-    tensorList.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t*>(tensorPtr));
-    const int64_t tensorPtrOffset = static_cast<int64_t>(tensorList.GetValue(0));
-    // Tensor-list offsets are byte offsets in the ACL descriptor.  Keep the
-    // unit conversion explicit so the uint64_t table layout is not coupled to
-    // a magic shift literal.
-    const uint64_t tensorAddr = tensorList.GetValue(tensorPtrOffset / static_cast<int64_t>(sizeof(uint64_t)) +
-                                                    static_cast<int64_t>(index));
-    return reinterpret_cast<__gm__ T_*>(tensorAddr);
-}
-} // namespace
 
 template <class ProblemShape_, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_>
 class GemmUniversal<
     ProblemShape_, BlockMmad_, BlockEpilogue_, BlockScheduler_,
     AscendC::Std::enable_if_t<AscendC::Std::is_same_v<KernelGroupedMmadWithScaleMxActivationQuant,
                                                       typename BlockMmad_::DispatchPolicy::ScheduleType>>> {
+private:
+    static constexpr uint64_t GROUP_LIST_TYPE_OFFSET = 0UL;
+    static constexpr uint64_t GROUP_LIST_TYPE_LENGTH = 1UL;
+    static constexpr uint64_t GROUP_LIST_TYPE_SPARSE = 2UL;
+    static constexpr uint64_t SPARSE_GROUP_LIST_ITEM_STRIDE = 2UL;
+    static constexpr uint64_t SPARSE_GROUP_LIST_SPLIT_VALUE_OFFSET = 1UL;
+    static constexpr int64_t BLOCK_CUBE_MASK = BLOCK_CUBE - 1;
+    static constexpr int64_t SCALE_CACHE_MASK = 0xff;
+
+    template <typename T_>
+    __aicore__ inline static __gm__ T_* GetTensorAddrFromTensorList(uint32_t index, __gm__ T_* tensorPtr)
+    {
+        auto tensorList = AscendC::GlobalTensor<uint64_t>();
+        tensorList.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t*>(tensorPtr));
+        const int64_t tensorPtrOffset = static_cast<int64_t>(tensorList.GetValue(0));
+        // Tensor-list offsets are byte offsets in the ACL descriptor.  Keep the
+        // unit conversion explicit so the uint64_t table layout is not coupled to
+        // a magic shift literal.
+        const uint64_t tensorAddr = tensorList.GetValue(tensorPtrOffset / static_cast<int64_t>(sizeof(uint64_t)) +
+                                                        static_cast<int64_t>(index));
+        return reinterpret_cast<__gm__ T_*>(tensorAddr);
+    }
+
 public:
     using AType = typename BlockMmad_::AType;
     using BType = typename BlockMmad_::BType;

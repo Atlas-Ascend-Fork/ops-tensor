@@ -32,25 +32,24 @@ namespace Blaze {
 namespace Epilogue {
 namespace Block {
 
-namespace {
-constexpr uint32_t GELU_MX_BLOCK_SIZE = 32;
-constexpr uint32_t GELU_MX_MAX_SINGLE_MN = 128 * 256;
-constexpr uint16_t GELU_MX_FP8_E4M3_MAX_EXP = 0x0400;
-constexpr uint16_t GELU_MX_FP8_E5M2_MAX_EXP = 0x0780;
-constexpr uint16_t GELU_MX_FP4_E2M1_MAX_EXP = 0x0100;
-constexpr uint16_t GELU_MX_FP4_E1M2_MAX_EXP = 0x0000;
-constexpr uint32_t GELU_MX_SCALE_ALG_OCP = 0;
-constexpr uint32_t GELU_MX_SCALE_ALG_DYNAMIC_DTYPE_RANGE = 2;
-constexpr uint16_t GELU_MX_BF16_ADD_VALUE_MAN1 = 0x003f;
-constexpr uint16_t GELU_MX_BF16_ADD_VALUE_MAN2 = 0x001f;
-constexpr float GELU_MX_DEFAULT_DST_TYPE_MAX = 0.0f;
-constexpr float GELU_MX_FP4_E2M1_DST_TYPE_MAX = 6.0f;
-constexpr float GELU_MX_FP4_E2M1_SPECIAL_DST_TYPE_MAX = 7.0f;
-constexpr float GELU_MX_SCALAR_ONE = 1.0f;
-} // namespace
-
 template <typename DataTypeOut_, typename DataTypeIn_ = float>
 class BlockEpilogueGeluTanhMxQuant {
+private:
+    static constexpr uint32_t GELU_MX_BLOCK_SIZE = 32;
+    static constexpr uint32_t GELU_MX_MAX_SINGLE_MN = 128 * 256;
+    static constexpr uint16_t GELU_MX_FP8_E4M3_MAX_EXP = 0x0400;
+    static constexpr uint16_t GELU_MX_FP8_E5M2_MAX_EXP = 0x0780;
+    static constexpr uint16_t GELU_MX_FP4_E2M1_MAX_EXP = 0x0100;
+    static constexpr uint16_t GELU_MX_FP4_E1M2_MAX_EXP = 0x0000;
+    static constexpr uint32_t GELU_MX_SCALE_ALG_OCP = 0;
+    static constexpr uint32_t GELU_MX_SCALE_ALG_DYNAMIC_DTYPE_RANGE = 2;
+    static constexpr uint16_t GELU_MX_BF16_ADD_VALUE_MAN1 = 0x003f;
+    static constexpr uint16_t GELU_MX_BF16_ADD_VALUE_MAN2 = 0x001f;
+    static constexpr float GELU_MX_DEFAULT_DST_TYPE_MAX = 0.0f;
+    static constexpr float GELU_MX_FP4_E2M1_DST_TYPE_MAX = 6.0f;
+    static constexpr float GELU_MX_FP4_E2M1_SPECIAL_DST_TYPE_MAX = 7.0f;
+    static constexpr float GELU_MX_SCALAR_ONE = 1.0f;
+
 public:
     static constexpr uint32_t EPILOGUE_UB_DB_COUNT = 2;
     static constexpr uint32_t EPILOGUE_BASE_N_ALIGNMENT = AscendC::ONE_BLK_SIZE;

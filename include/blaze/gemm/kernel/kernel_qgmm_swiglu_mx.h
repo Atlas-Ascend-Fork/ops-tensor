@@ -32,20 +32,6 @@ namespace Blaze {
 namespace Gemm {
 namespace Kernel {
 
-namespace {
-constexpr int64_t SCALE_CACHE_MASK = 0xff;
-constexpr uint32_t DEFAULT_TAIL_ALIGNMENT = 1;
-constexpr int64_t GROUP_LIST_ELEMENT_STRIDE = 1;
-constexpr uint32_t SWIGLU_N_SPLIT_SHIFT = 1;
-constexpr uint8_t SINGLE_WEIGHT_TENSOR = 1;
-constexpr int64_t BIAS_ROW_COUNT = 1;
-constexpr uint32_t UINT64_ADDRESS_SHIFT = 3;
-constexpr uint16_t FLAG_ID_MAX = 16;
-constexpr uint8_t SYNC_AIC_AIV_MODE = 4;
-constexpr uint16_t AIC_SYNC_AIV_FLAG = 4;
-constexpr uint16_t AIV_SYNC_AIC_FLAG = 6;
-} // namespace
-
 /*!
  * \brief AIC/AIV fused QGMM MX kernel for paired left/right N halves.
  *
@@ -57,6 +43,19 @@ template <class ProblemShape_, class BlockMmad_, class BlockEpilogue_, class Blo
 class GemmUniversal<ProblemShape_, BlockMmad_, BlockEpilogue_, BlockScheduler_,
                     AscendC::Std::enable_if_t<AscendC::Std::is_same_v<
                         KernelGmmSwiGluMixMx, typename BlockMmad_::DispatchPolicy::ScheduleType>>> {
+private:
+    static constexpr int64_t SCALE_CACHE_MASK = 0xff;
+    static constexpr uint32_t DEFAULT_TAIL_ALIGNMENT = 1;
+    static constexpr int64_t GROUP_LIST_ELEMENT_STRIDE = 1;
+    static constexpr uint32_t SWIGLU_N_SPLIT_SHIFT = 1;
+    static constexpr uint8_t SINGLE_WEIGHT_TENSOR = 1;
+    static constexpr int64_t BIAS_ROW_COUNT = 1;
+    static constexpr uint32_t UINT64_ADDRESS_SHIFT = 3;
+    static constexpr uint16_t FLAG_ID_MAX = 16;
+    static constexpr uint8_t SYNC_AIC_AIV_MODE = 4;
+    static constexpr uint16_t AIC_SYNC_AIV_FLAG = 4;
+    static constexpr uint16_t AIV_SYNC_AIC_FLAG = 6;
+
 public:
     using ProblemShape = ProblemShape_;
     using BlockMmad = BlockMmad_;

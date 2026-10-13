@@ -30,20 +30,6 @@
 namespace Blaze {
 namespace Epilogue {
 namespace Block {
-namespace {
-constexpr int64_t OUT_ELE_NUM_ONE_BLK = 64L;
-constexpr uint32_t DOUBLE_BUFFER_COUNT = 2U;
-constexpr uint32_t L0C_MAX_M = 128;
-constexpr uint32_t L0C_MAX_N = 256;
-constexpr uint32_t BLOCK_BYTES = 256;
-constexpr uint32_t VEC_MAX_M = 32;
-constexpr uint32_t UB_TO_GM_ALIGN_BYTES = 32;
-constexpr uint32_t MAX_SINGLE_MN = L0C_MAX_M * L0C_MAX_N;
-constexpr uint32_t HALF_DB_MAX_SINGLE_MN = VEC_MAX_M * L0C_MAX_N;
-constexpr uint32_t Y_IDX = 0;
-constexpr uint32_t LOGIT_INDEX = 4;
-constexpr uint64_t MAX_OUTPUT_M_UB = VEC_MAX_M;
-} // namespace
 
 static constexpr AscendC::Reg::CastTrait CAST_FR_FP32_TO_BF16 = {
     AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT, AscendC::Reg::MaskMergeMode::ZEROING,
@@ -60,6 +46,19 @@ static constexpr AscendC::Reg::CastTrait CAST_FR_BF16_TO_FP32 = {
 
 BLAZE_GMMFR_BLOCK_EPILOGUE_FINALIZE_ROUTING_CLASS_LOCAL_PARAMS
 class BlockEpilogueFinalizeRouting {
+private:
+    static constexpr int64_t OUT_ELE_NUM_ONE_BLK = 64L;
+    static constexpr uint32_t L0C_MAX_M = 128;
+    static constexpr uint32_t L0C_MAX_N = 256;
+    static constexpr uint32_t BLOCK_BYTES = 256;
+    static constexpr uint32_t VEC_MAX_M = 32;
+    static constexpr uint32_t UB_TO_GM_ALIGN_BYTES = 32;
+    static constexpr uint32_t MAX_SINGLE_MN = L0C_MAX_M * L0C_MAX_N;
+    static constexpr uint32_t HALF_DB_MAX_SINGLE_MN = VEC_MAX_M * L0C_MAX_N;
+    static constexpr uint32_t Y_IDX = 0;
+    static constexpr uint32_t LOGIT_INDEX = 4;
+    static constexpr uint64_t MAX_OUTPUT_M_UB = VEC_MAX_M;
+
 public:
     using DataTypeOut = DataTypeOut_;
     using DataTypeIn = DataTypeIn_;
@@ -166,7 +165,7 @@ __aicore__ inline auto BlockEpilogueFinalizeRouting<
     BLAZE_GMMFR_BLOCK_EPILOGUE_FINALIZE_ROUTING_FUNC_LOCAL_PARAMS>::GetL0c2UbTensor(int64_t rows, int64_t cols)
 {
     constexpr uint64_t outputC0Size = asc::te::c0_element<DataTypeIn>;
-    constexpr uint64_t splitMAlign = DOUBLE_BUFFER_COUNT;
+    constexpr uint64_t splitMAlign = Blaze::Gemm::DOUBLE_BUFFER_COUNT;
     const uint64_t copyRows = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(rows), splitMAlign);
     const uint64_t copyCols = Blaze::Gemm::Align32(static_cast<uint64_t>(cols));
     const auto layoutOutUb = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn, AscendC::Std::Int<outputC0Size>>(

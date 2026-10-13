@@ -31,37 +31,37 @@ namespace Blaze {
 namespace Gemm {
 
 namespace Kernel {
-namespace {
-constexpr uint64_t GROUP_LIST_TYPE_OFFSET = 0UL;
-constexpr uint64_t GROUP_LIST_TYPE_LENGTH = 1UL;
-constexpr uint64_t GROUP_LIST_TYPE_SPARSE = 2UL;
-constexpr uint64_t SPARSE_GROUP_LIST_ITEM_STRIDE = 2UL;
-constexpr uint64_t SPARSE_GROUP_LIST_SPLIT_VALUE_OFFSET = 1UL;
-constexpr uint32_t TENSOR_LIST_BYTE_OFFSET_TO_INDEX_SHIFT = 3U;
-constexpr int64_t BLOCK_CUBE_MASK = BLOCK_CUBE - 1;
-constexpr int64_t SCALE_CACHE_MASK = 0xff;
-
-template <typename T>
-__aicore__ inline __gm__ T* GetTensorAddrFromTensorList(uint32_t index, __gm__ T* tensorPtr)
-{
-    const auto tensorListAddr = reinterpret_cast<__gm__ uint64_t*>(tensorPtr);
-    const auto tensorListHeader = asc::te::make_tensor(
-        asc::te::make_mem_ptr<asc::te::location::gm>(tensorListAddr),
-        asc::te::make_layout(asc::te::make_shape(1L), asc::te::make_stride(1L)));
-    const uint64_t tensorPtrOffset = tensorListHeader[0];
-    const auto tensorList = asc::te::make_tensor(
-        asc::te::make_mem_ptr<asc::te::location::gm>(tensorListAddr +
-                                                     (tensorPtrOffset >> TENSOR_LIST_BYTE_OFFSET_TO_INDEX_SHIFT)),
-        asc::te::make_layout(asc::te::make_shape(static_cast<int64_t>(index) + 1), asc::te::make_stride(1L)));
-    const uint64_t tensorAddr = tensorList[index];
-    return reinterpret_cast<__gm__ T*>(tensorAddr);
-}
-} // namespace
 
 template <class ProblemShape, class BlockMmad, class BlockEpilogue, class BlockScheduler>
 class GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler,
                     AscendC::Std::enable_if_t<AscendC::Std::is_same_v<
                         KernelGroupedMmadWithScaleMx, typename BlockMmad::DispatchPolicy::ScheduleType>>> {
+private:
+    static constexpr uint64_t GROUP_LIST_TYPE_OFFSET = 0UL;
+    static constexpr uint64_t GROUP_LIST_TYPE_LENGTH = 1UL;
+    static constexpr uint64_t GROUP_LIST_TYPE_SPARSE = 2UL;
+    static constexpr uint64_t SPARSE_GROUP_LIST_ITEM_STRIDE = 2UL;
+    static constexpr uint64_t SPARSE_GROUP_LIST_SPLIT_VALUE_OFFSET = 1UL;
+    static constexpr uint32_t TENSOR_LIST_BYTE_OFFSET_TO_INDEX_SHIFT = 3U;
+    static constexpr int64_t BLOCK_CUBE_MASK = BLOCK_CUBE - 1;
+    static constexpr int64_t SCALE_CACHE_MASK = 0xff;
+
+    template <typename T>
+    __aicore__ inline static __gm__ T* GetTensorAddrFromTensorList(uint32_t index, __gm__ T* tensorPtr)
+    {
+        const auto tensorListAddr = reinterpret_cast<__gm__ uint64_t*>(tensorPtr);
+        const auto tensorListHeader = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::gm>(tensorListAddr),
+            asc::te::make_layout(asc::te::make_shape(1L), asc::te::make_stride(1L)));
+        const uint64_t tensorPtrOffset = tensorListHeader[0];
+        const auto tensorList = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::gm>(tensorListAddr +
+                                                         (tensorPtrOffset >> TENSOR_LIST_BYTE_OFFSET_TO_INDEX_SHIFT)),
+            asc::te::make_layout(asc::te::make_shape(static_cast<int64_t>(index) + 1), asc::te::make_stride(1L)));
+        const uint64_t tensorAddr = tensorList[index];
+        return reinterpret_cast<__gm__ T*>(tensorAddr);
+    }
+
 public:
     using AType = typename BlockMmad::AType;
     using BType = typename BlockMmad::BType;

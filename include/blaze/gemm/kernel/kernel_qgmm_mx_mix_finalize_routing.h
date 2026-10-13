@@ -34,11 +34,6 @@
 namespace Blaze {
 namespace Gemm {
 namespace Kernel {
-namespace {
-constexpr uint32_t GMM_FR_UB_DOUBLE_BUFFER_LEN = 1024 * 8;
-constexpr uint32_t GMM_FR_ONE_CORE_ALIGN_LEN = 512;
-constexpr uint32_t GMM_FR_ONE_CORE_ALIGN_LEN_SMALL = 32;
-} // namespace
 
 static constexpr AscendC::Reg::CastTrait CAST_GMM_FR_BF16_TO_FP32 = {
     AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
@@ -59,6 +54,11 @@ __aicore__ inline uint16_t FloatToBf16Bits(float value)
 
 GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS
 class BlockPrologueFinalizeRouting {
+private:
+    static constexpr uint32_t GMM_FR_UB_DOUBLE_BUFFER_LEN = 1024 * 8;
+    static constexpr uint32_t GMM_FR_ONE_CORE_ALIGN_LEN = 512;
+    static constexpr uint32_t GMM_FR_ONE_CORE_ALIGN_LEN_SMALL = 32;
+
 public:
     using DataTypeOut = DataTypeOut_;
     using DataTypeIn = DataTypeIn_;
