@@ -68,6 +68,7 @@ public:
         uint32_t kL0{0};
         uint32_t l1Stages{2};
         uint16_t l0cStages{1};
+        uint64_t splitSingleCoreKBase{1024};
     };
 
 public:
@@ -103,6 +104,7 @@ public:
         baseM_ = params.mL0;
         baseN_ = params.nL0;
         baseK_ = params.kL0;
+        splitSingleCoreK_ = params.splitSingleCoreKBase;
 
         isBias_ = params.biasGmAddr != nullptr;
         l1Stages_ = params.l1Stages;

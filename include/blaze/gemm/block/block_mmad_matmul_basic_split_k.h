@@ -76,6 +76,8 @@ public:
         uint16_t l0cStages{1};
         uint64_t k{0};
         uint64_t rowStride{0};
+        uint64_t splitSingleCoreKBase{1024}; // 核内切k场景切k准线
+        GM_ADDR scaleGmAddr{nullptr};
     };
 
 public:
@@ -133,14 +135,14 @@ public:
             biasL1Buffer_[i] = bL1Buffer_[i] + bL1OneBuffer_;
         }
         // 连续且非全载场景切K
-        splitSingleCoreK_ = k_ > FP32_K_SWITCH_BASE ? FP32_SPLIT_K_BASE2 : FP32_SPLIT_K_BASE1;
+        splitSingleCoreK_ = params.splitSingleCoreKBase;
         splitSingleCoreKRound_ = k_ / splitSingleCoreK_;
         splitSingleCoreKTail_ = k_ % splitSingleCoreK_ + splitSingleCoreK_;
     }
 
     template <typename TensorA, typename TensorB, typename TensorBias, typename TensorC>
     __aicore__ inline void operator()(TensorA& gmA, TensorB& gmB, TensorBias& gmBias, TensorC& gmC,
-                                      TupleShape& tileShape)
+                                      TupleShape& tileShape, __gm__ uint64_t* gmScalePtr = nullptr)
     {
         static constexpr uint64_t HALF_L0C_SIZE = AscendC::TOTAL_L0C_SIZE / DOUBLE_BUFFER_COUNT;
         static constexpr uint64_t HALF_L0_SIZE = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT;
@@ -339,9 +341,6 @@ private:
 
 private:
     static constexpr uint16_t MTE1_MTE2_EVENT_ID_NUM = 4;
-    static constexpr uint64_t FP32_K_SWITCH_BASE = 268435456; // 1024 * 32 * 8192
-    static constexpr uint64_t FP32_SPLIT_K_BASE1 = 1024;
-    static constexpr uint64_t FP32_SPLIT_K_BASE2 = 8192;
 
     uint64_t k_{1};
     uint64_t blkK_{1};
