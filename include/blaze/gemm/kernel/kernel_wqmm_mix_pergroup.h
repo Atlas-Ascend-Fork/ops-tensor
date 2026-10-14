@@ -672,11 +672,12 @@ private:
             asc::te::make_mem_ptr<asc::te::location::ub, xType>((uint64_t)weightOutBase),
             Blaze::Gemm::NzRowPaddingLayout<xType>{}(kLen, nLen, static_cast<uint64_t>(weightOutInterleave)));
 
-        using DequantParams = Blaze::Epilogue::Tile::A8W4TcgDequantParams<GROUP_SIZE_32>;
-        DequantParams dequantParams;
+        using Fp4ToFp8Dequant = Blaze::Epilogue::Tile::Dequant<Blaze::Epilogue::Tile::Fp4ToFp8Tag>;
+        using Gran = Blaze::Epilogue::Tile::DequantMode;
+        Blaze::Epilogue::Tile::A8W4TcgDequantParams dequantParams;
         dequantParams.validK = static_cast<uint32_t>(bubKLen);
         dequantParams.scaleMaskAddr = ScaleMaskAddr();
-        Blaze::Epilogue::Tile::Dequant<DequantParams>::Run(weightIn, scaleTensor, weightOut, dequantParams);
+        Fp4ToFp8Dequant::Run<Gran::PER_GROUP, GROUP_SIZE_32>(weightIn, scaleTensor, weightOut, dequantParams);
     }
 
     // ND-trans path: builds UB tensor views over the existing byte-level patterns (DNExt
@@ -712,11 +713,12 @@ private:
             asc::te::make_mem_ptr<asc::te::location::ub, xType>((uint64_t)weightOutBase),
             Blaze::Gemm::Weight8BitDnToZnUBLayout<xType>{}(kLen, nLen));
 
-        using DequantParams = Blaze::Epilogue::Tile::A8W4TcgDequantParams<GROUP_SIZE_32>;
-        DequantParams dequantParams;
+        using Fp4ToFp8Dequant = Blaze::Epilogue::Tile::Dequant<Blaze::Epilogue::Tile::Fp4ToFp8Tag>;
+        using Gran = Blaze::Epilogue::Tile::DequantMode;
+        Blaze::Epilogue::Tile::A8W4TcgDequantParams dequantParams;
         dequantParams.validK = static_cast<uint32_t>(bubKLen);
         dequantParams.scaleMaskAddr = ScaleMaskAddr();
-        Blaze::Epilogue::Tile::Dequant<DequantParams>::Run(weightIn, scaleTensor, weightOut, dequantParams);
+        Fp4ToFp8Dequant::Run<Gran::PER_GROUP, GROUP_SIZE_32>(weightIn, scaleTensor, weightOut, dequantParams);
     }
 
     __aicore__ inline void DequantCompute(int32_t bubNLen, int32_t bubKLen)

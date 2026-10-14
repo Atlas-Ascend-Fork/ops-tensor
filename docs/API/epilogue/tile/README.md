@@ -6,7 +6,7 @@
 | :----------------------------------------------------------- | :------: |
 | [compute](./compute.md) | Tile 计算组件的架构派发入口，Block 层唯一的 include 路径 |
 | [arch35/gelu](./arch35/gelu.md) | Tile 级 GELU 激活，支持 Tanh 近似与 Erf 精确两种算法 |
-| [arch35/dequant](./arch35/dequant.md) | Tile 级权重反量化 `Dequant<Params>::Run`，per-group W4×scale → FP8 |
+| [arch35/dequant](./arch35/dequant.md) | Tile 级反量化（双轴 API：类模板 tag 选量化对象、Run 模板 `DequantMode` 选粒度）：Fp4ToFp8Tag per-group 权重 → FP8；B32ToFpTag int32/fp32 ×scale + bias → fp32/bf16/fp16 |
 | [arch35/mx_quant](./arch35/mx_quant.md) | Tile 级 MX 动态量化链（eMax → scale → FP8/FP4 量化 → 布局转置） |
 | `arch35/initialize_empty_softmax.h` | BlockAttnResPrepare 空输入场景的 softmax 统计量初始化 |
 | `arch35/reduce_square.h` | Tile 级 V 平方和归约，BlockAttnResPrepare 依赖 |
@@ -19,7 +19,9 @@ BlockEpilogue（Block 层）
     └── #include "blaze/epilogue/tile/compute.h"（架构派发入口）
             └── arch35/（dav-3510 实现）
                     ├── Gelu                     → BlockEpilogueGeluMxQuant / BlockEpilogueGeluTanhMxQuant
-                    ├── Dequant                  → Gemm Kernel Wqmm Mix Pergroup 的 AIV prologue
+                    ├── Dequant<Fp4ToFp8Tag> → Gemm Kernel Wqmm Mix Pergroup 的 AIV prologue
+                    ├── Dequant<B32ToFpTag>      → BlockEpilogueDequant
+                    │                              / BlockEpilogueQbmmPertensorStreamK
                     ├── MxQuant                  → BlockEpilogueGeluMxQuant / BlockEpilogueGeluTanhMxQuant
                     │                              / BlockEpilogueSwigluMxQuant / BlockEpilogueFlatQuant
                     ├── InitializeEmptySoftmax   ┐

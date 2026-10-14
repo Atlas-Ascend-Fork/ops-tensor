@@ -12,7 +12,10 @@ QBMM per-tensor StreamK 的专用 AIV 后处理模板。它拥有完整的 vecto
 5. 应用需要在反量化后相加的 bias；
 6. 转换为输出类型并写回 C GM。
 
-该模板不复用通用 Matmul StreamK epilogue，也不复用非 StreamK dequant epilogue。
+该模板不复用通用 Matmul StreamK epilogue，也不复用非 StreamK dequant epilogue；
+但 scale/bias 数值计算链与它们复用同一个
+[`Tile::Dequant<B32ToFpTag>`](../tile/arch35/dequant.md)，本模板只额外拥有 workspace 归约与
+标量预合并（InitDequant）逻辑。
 
 ## 模板参数
 
@@ -138,9 +141,13 @@ __aicore__ inline void DequantAndStore();
 
 1. 建立 UB workspace、bias 和输出 ping-pong 布局；
 2. 读取 X2 标量和可选 X1 标量；
-3. 将 `WorkspaceType` 扩展为 fp32；
-4. 无 AIV bias 时执行 `raw * masked(x2Scale * x1Scale)`，X1 不存在时退化为
-   `raw * masked(x2Scale)`；有 AIV bias 时执行 `raw * x2Scale [* x1Scale] + bias`；
+3. `DequantCompute` 按运行时 `biasDtype_` 分发到 `DequantComputeTyped<BiasDtype>`，构造
+   acc / dst / bias tensor 及 x2 / x1 的 fp32 占位 tensor（x2 恒为 per-tensor 标量语义，
+   raw scale dtype 已由 `ReadRawX2ScaleScalar` 解析进 `x2ScaleScalar_`）；
+4. 无 AIV bias 时 InitDequant 已把 x2*x1 预合并（并 `0xFFFFE000` 掩码）进
+   `x2ScaleScalar_`，调用 `Tile::Dequant<B32ToFpTag>::Run<PER_TENSOR, NONE, false, BiasDtype>`
+   以单条 Muls 复现 fixpipe 行为；有 AIV bias 时 x2/x1 保持分离，分别按
+   `Run<PER_TENSOR, PER_TENSOR/NONE, true, BiasDtype>` 相乘后再加 bias；
 5. cast 为 `OutType` 并写回 GM。
 
 ## Workspace 和 UB 对齐

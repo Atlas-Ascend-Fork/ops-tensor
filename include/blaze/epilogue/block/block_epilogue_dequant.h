@@ -12,10 +12,10 @@
  * \file block_epilogue_dequant.h
  * \brief MIX template epilogue (AIV side): out = x1@x2(L0C in UB) * x2Scale * x1Scale + bias.
  *        The x1@x2 accumulator is read from UB (L0C->UB by AIC fixpipe, raw NoQuant copy);
- *        x2Scale / x1Scale / bias are read from GM. All scale multiplies + bias add are done
- *        on the vector using the VF (vector-function) AscendC::Reg style (RegTensor / MaskReg /
- *        __VEC_SCOPE__), mirroring VFDoDequant in qbmm_mix_online_dynamic.h.
- *        Dual AIV sub-block split, 4-way M partition, ping-pong output.
+ *        x2Scale / x1Scale / bias are read from GM. All scale multiplies + bias add run in the
+ *        reusable Tile::Dequant chain (blaze/epilogue/tile/arch35/dequant.h); this block keeps
+ *        GM->UB staging, runtime mode dispatch, dual AIV sub-block split, 4-way M partition
+ *        and ping-pong output.
  */
 
 #pragma once
@@ -28,6 +28,7 @@
 #endif
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
+#include "blaze/epilogue/tile/compute.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {
@@ -35,27 +36,8 @@ namespace Epilogue {
 namespace Block {
 
 using AscendC::IsSameType;
-using AscendC::RoundMode;
 using Blaze::Gemm::CeilAlign;
 using Blaze::Gemm::CeilDiv;
-
-// Cast traits for the vector dequant micro-ops.
-// int32->fp32 is a 1:1 width cast (both 4 bytes); the bf16/half->fp32 traits use the
-// ZERO/ONE register-layout split that is recombined with Interleave (1:2 width expansion).
-#ifdef __NPU_ARCH__
-constexpr AscendC::Reg::CastTrait DQ_CT_INT32_2_FP32 = {
-    AscendC::Reg::RegLayout::UNKNOWN, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
-    AscendC::RoundMode::CAST_RINT};
-constexpr AscendC::Reg::CastTrait DQ_CT_FP32_2_HALF = {AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT,
-                                                       AscendC::Reg::MaskMergeMode::ZEROING,
-                                                       AscendC::RoundMode::CAST_RINT};
-constexpr AscendC::Reg::CastTrait DQ_CT_HALF_2_FP32_ZERO = {
-    AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
-    AscendC::RoundMode::UNKNOWN};
-constexpr AscendC::Reg::CastTrait DQ_CT_HALF_2_FP32_ONE = {AscendC::Reg::RegLayout::ONE, AscendC::Reg::SatMode::UNKNOWN,
-                                                           AscendC::Reg::MaskMergeMode::ZEROING,
-                                                           AscendC::RoundMode::UNKNOWN};
-#endif // __NPU_ARCH__
 
 template <class OutType_, class BiasType_, class X2ScaleType_, class X1ScaleType_ = float, class L0CType_ = int32_t>
 class BlockEpilogueDequant {
@@ -255,15 +237,6 @@ private:
         dequantPongOffset_ = offset;
     }
 
-    // Resolve a raw __ubuf__ pointer from a byte offset into UB via the C_API asc_get_phy_buf_addr(0)
-    // (bank 0 base) + byteOffset. This is exactly what make_mem_ptr<location::ub, T>(byteOffset).get() expands to,
-    // but calls the C_API directly (the VF dequant core needs raw __ubuf__ pointers, not Tensor handles).
-    template <class T>
-    __aicore__ inline static __ubuf__ T* GetUbAddr(uint64_t byteOffset)
-    {
-        return reinterpret_cast<__ubuf__ T*>(asc_get_phy_buf_addr(0) + byteOffset);
-    }
-
     // 32B-aligned UB row pitch (in elements of T) for a row of `cols` elements. CopyGmToUbufAlignV2
     // (see arch/vector/gm_to_ub/.../data_copy.h) requires the UB destination region AND its row
     // stride to be 32-byte aligned, otherwise the ND/DN load produces wrong data. sizeof(T) divides
@@ -346,9 +319,9 @@ private:
         asc::te::copy(copyGM2UB, biasUb, biasGm);
     }
 
-    // Dispatch entry for one M-chunk: compute UB addresses for the current ping-pong buffer,
-    // then call the VF dequant routine matching the x1Scale (per-token) mode. Mirrors
-    // DequantCompute -> VFDoDequantWithX1* in qbmm_mix_online_dynamic.h.
+    // Dispatch entry for one M-chunk: compute UB tensors for the current ping-pong buffer,
+    // then call the Tile::Dequant chain with the runtime x1/x2/bias flags translated into
+    // compile-time template arguments.
     __aicore__ inline void DequantCompute(int64_t mSize, int64_t singleCoreN, int64_t nAligned, int64_t l0cOffset,
                                           int64_t ptScaleRowOffset)
     {
@@ -370,243 +343,129 @@ private:
         uint32_t nDstAligned = static_cast<uint32_t>(
             CeilAlign(static_cast<uint64_t>(singleCoreN), static_cast<uint64_t>(OUT_ALIGN)));
         uint64_t dequantOffset = (pingPongId_ == 0) ? dequantPingOffset_ : dequantPongOffset_;
-
-        __ubuf__ L0CType* l0cOutUbAddr = GetUbAddr<L0CType>(static_cast<uint64_t>(l0cOffset) * sizeof(L0CType));
-        __ubuf__ X2ScaleType* x2ScaleUbAddr = isPerChannel_ ? GetUbAddr<X2ScaleType>(x2ScaleUbOffset_) : nullptr;
-        __ubuf__ X1ScaleType* ptScaleUbAddr = isPerToken_ ? GetUbAddr<X1ScaleType>(x1ScaleUbOffset_) : nullptr;
-        __ubuf__ BiasDtype* biasUbAddr = isBias_ ? GetUbAddr<BiasDtype>(biasUbOffset_) : nullptr;
-        __ubuf__ OutType* dequantOutInUbAddr = GetUbAddr<OutType>(dequantOffset);
-
         uint16_t mSize16 = static_cast<uint16_t>(mSize);
         uint16_t nSize16 = static_cast<uint16_t>(singleCoreN);
+
+        // Tensors for the Dequant tile: disabled mode slots receive same-element-type
+        // placeholder tensors (never dereferenced by the tile).
+        auto accTensor = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(static_cast<uint64_t>(l0cOffset) * sizeof(L0CType)),
+            Gemm::MakeNDExtLayout(mSize, singleCoreN, nAligned));
+        auto dstTensor = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::ub, OutType>(dequantOffset),
+            Gemm::MakeNDExtLayout(mSize, singleCoreN, static_cast<int64_t>(nDstAligned)));
+        auto x2ScaleTensor = MakeX2ScaleTensor(singleCoreN);
+        auto x1ScaleTensor = MakeX1ScaleTensor(ptScaleRowOffset, mSize);
+        auto biasTensor = MakeBiasTensor<BiasDtype>(singleCoreN);
+
+        using B32ToFpDequant = Tile::Dequant<Tile::B32ToFpTag>;
+        using DequantMode = Tile::DequantMode;
         if (isPerToken_) {
-            VFDoDequantWithX1Pertoken(dequantOutInUbAddr, l0cOutUbAddr, x2ScaleUbAddr, ptScaleUbAddr + ptScaleRowOffset,
-                                      biasUbAddr, mSize16, nSize16, nSrcAligned, nDstAligned);
+            if (isBias_) {
+                if (isPerChannel_) {
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TOKEN, true, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
+                        nSize16, nSrcAligned, nDstAligned);
+                } else {
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TOKEN, true, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
+                        nSize16, nSrcAligned, nDstAligned);
+                }
+            } else {
+                if (isPerChannel_) {
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TOKEN, false, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
+                        nSize16, nSrcAligned, nDstAligned);
+                } else {
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TOKEN, false, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
+                        nSize16, nSrcAligned, nDstAligned);
+                }
+            }
         } else if (isX1PerTensor_) {
-            VFDoDequantWithX1Pertensor(dequantOutInUbAddr, l0cOutUbAddr, x2ScaleUbAddr, biasUbAddr, mSize16, nSize16,
-                                       nSrcAligned, nDstAligned);
-        } else {
-            VFDoDequantWithoutPertokenScale(dequantOutInUbAddr, l0cOutUbAddr, x2ScaleUbAddr, biasUbAddr, mSize16,
-                                            nSize16, nSrcAligned, nDstAligned);
-        }
-    }
-    // x1Scale = per-token: dispatch to the templated core with PERTOKEN_MODE. The runtime
-    // isPerChannel_ / isBias_ flags are translated into compile-time template
-    // arguments, mirroring VFDoDequantWithX1Pertoken in qbmm_mix_online_dynamic.h.
-    template <class BiasDtype>
-    __aicore__ inline void VFDoDequantWithX1Pertoken(__ubuf__ OutType* dst, __ubuf__ L0CType* l0cOut,
-                                                     __ubuf__ X2ScaleType* x2Scale, __ubuf__ X1ScaleType* ptScale,
-                                                     __ubuf__ BiasDtype* bias, uint16_t mSize, uint16_t nSize,
-                                                     uint32_t nSrcAligned, uint32_t nDstAligned)
-    {
-        if (!isBias_) {
-            if (isPerChannel_) {
-                VFDoDequant<false, QuantMode::PERTOKEN_MODE, false, BiasDtype>(dst, l0cOut, x2Scale, ptScale, bias,
-                                                                               mSize, nSize, nSrcAligned, nDstAligned);
+            if (isBias_) {
+                if (isPerChannel_) {
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TENSOR, true, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_,
+                        mSize16, nSize16, nSrcAligned, nDstAligned);
+                } else {
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, true, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_,
+                        mSize16, nSize16, nSrcAligned, nDstAligned);
+                }
             } else {
-                VFDoDequant<true, QuantMode::PERTOKEN_MODE, false, BiasDtype>(dst, l0cOut, x2Scale, ptScale, bias,
-                                                                              mSize, nSize, nSrcAligned, nDstAligned);
+                if (isPerChannel_) {
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TENSOR, false, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_,
+                        mSize16, nSize16, nSrcAligned, nDstAligned);
+                } else {
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, false, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_,
+                        mSize16, nSize16, nSrcAligned, nDstAligned);
+                }
             }
         } else {
-            if (isPerChannel_) {
-                VFDoDequant<false, QuantMode::PERTOKEN_MODE, true, BiasDtype>(dst, l0cOut, x2Scale, ptScale, bias,
-                                                                              mSize, nSize, nSrcAligned, nDstAligned);
+            if (isBias_) {
+                if (isPerChannel_) {
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::NONE, true, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
+                        nSize16, nSrcAligned, nDstAligned);
+                } else {
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, true, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
+                        nSize16, nSrcAligned, nDstAligned);
+                }
             } else {
-                VFDoDequant<true, QuantMode::PERTOKEN_MODE, true, BiasDtype>(dst, l0cOut, x2Scale, ptScale, bias, mSize,
-                                                                             nSize, nSrcAligned, nDstAligned);
-            }
-        }
-    }
-
-    // x1Scale = per-tensor scalar: dispatch to the templated core with PERTENSOR_MODE.
-    template <class BiasDtype>
-    __aicore__ inline void VFDoDequantWithX1Pertensor(__ubuf__ OutType* dst, __ubuf__ L0CType* l0cOut,
-                                                      __ubuf__ X2ScaleType* x2Scale, __ubuf__ BiasDtype* bias,
-                                                      uint16_t mSize, uint16_t nSize, uint32_t nSrcAligned,
-                                                      uint32_t nDstAligned)
-    {
-        if (!isBias_) {
-            if (isPerChannel_) {
-                VFDoDequant<false, QuantMode::PERTENSOR_MODE, false, BiasDtype>(dst, l0cOut, x2Scale, nullptr, bias,
-                                                                                mSize, nSize, nSrcAligned, nDstAligned);
-            } else {
-                VFDoDequant<true, QuantMode::PERTENSOR_MODE, false, BiasDtype>(dst, l0cOut, x2Scale, nullptr, bias,
-                                                                               mSize, nSize, nSrcAligned, nDstAligned);
-            }
-        } else {
-            if (isPerChannel_) {
-                VFDoDequant<false, QuantMode::PERTENSOR_MODE, true, BiasDtype>(dst, l0cOut, x2Scale, nullptr, bias,
-                                                                               mSize, nSize, nSrcAligned, nDstAligned);
-            } else {
-                VFDoDequant<true, QuantMode::PERTENSOR_MODE, true, BiasDtype>(dst, l0cOut, x2Scale, nullptr, bias,
-                                                                              mSize, nSize, nSrcAligned, nDstAligned);
-            }
-        }
-    }
-
-    // No x1Scale (only x2Scale dequant): dispatch to the templated core with DEFAULT mode.
-    template <class BiasDtype>
-    __aicore__ inline void VFDoDequantWithoutPertokenScale(__ubuf__ OutType* dst, __ubuf__ L0CType* l0cOut,
-                                                           __ubuf__ X2ScaleType* x2Scale, __ubuf__ BiasDtype* bias,
-                                                           uint16_t mSize, uint16_t nSize, uint32_t nSrcAligned,
-                                                           uint32_t nDstAligned)
-    {
-        if (!isBias_) {
-            if (isPerChannel_) {
-                VFDoDequant<false, QuantMode::DEFAULT, false, BiasDtype>(dst, l0cOut, x2Scale, nullptr, bias, mSize,
-                                                                         nSize, nSrcAligned, nDstAligned);
-            } else {
-                VFDoDequant<true, QuantMode::DEFAULT, false, BiasDtype>(dst, l0cOut, x2Scale, nullptr, bias, mSize,
-                                                                        nSize, nSrcAligned, nDstAligned);
-            }
-        } else {
-            if (isPerChannel_) {
-                VFDoDequant<false, QuantMode::DEFAULT, true, BiasDtype>(dst, l0cOut, x2Scale, nullptr, bias, mSize,
-                                                                        nSize, nSrcAligned, nDstAligned);
-            } else {
-                VFDoDequant<true, QuantMode::DEFAULT, true, BiasDtype>(dst, l0cOut, x2Scale, nullptr, bias, mSize,
-                                                                       nSize, nSrcAligned, nDstAligned);
-            }
-        }
-    }
-    // Templated VF (vector-function) dequant core, structurally identical to VFDoDequant in
-    // qbmm_mix_online_dynamic.h. Compile-time params drive all branches via `if constexpr`:
-    //   isPertensor  : x2Scale is a scalar (PERTENSOR) vs a per-channel vector (PERCHANNEL)
-    //   x1QuantMode  : x1Scale mode (PERTENSOR_MODE scalar / PERTOKEN_MODE broadcast / DEFAULT none)
-    //   isBiasEpilogue : whether a float/bf16/fp16 bias is added on the vector
-    // Pipeline per VF block: load L0C -> int32->fp32 cast -> *x2Scale -> *x1Scale -> +bias ->
-    //                        fp32->OutType cast -> store to UB (ping/pong).
-    // Widen a bf16/fp16 scale/bias register to fp32 (Zero/One layout split + Interleave, a 1:2
-    // width expansion); when SrcType is already float this is a plain register copy. Shared by the
-    // x2Scale and bias stages of VFDoDequant.
-    template <class SrcType>
-    __aicore__ inline void WidenOrCopyToF32(AscendC::Reg::RegTensor<float>& dst, AscendC::Reg::RegTensor<SrcType>& src,
-                                            AscendC::Reg::MaskReg& maskN, AscendC::Reg::MaskReg& maskB16)
-    {
-        if constexpr (!IsSameType<SrcType, float>::value) {
-            AscendC::Reg::RegTensor<float> oneReg;
-            AscendC::Reg::Cast<float, SrcType, DQ_CT_HALF_2_FP32_ZERO>(dst, src, maskN);
-            AscendC::Reg::Cast<float, SrcType, DQ_CT_HALF_2_FP32_ONE>(oneReg, src, maskB16);
-            AscendC::Reg::Interleave(dst, oneReg, dst, oneReg);
-        } else {
-            dst = src;
-        }
-    }
-
-    // VFDoDequant stage 1: load one L0C block from UB (addr 32B aligned) and cast int32 -> fp32
-    // (raw copy when the accumulator is already fp32).
-    __aicore__ inline void VfLoadAndCastL0C(AscendC::Reg::RegTensor<float>& castSrcOutReg, __ubuf__ L0CType* l0cOut,
-                                            uint32_t offset, AscendC::Reg::MaskReg& maskN)
-    {
-        AscendC::Reg::RegTensor<L0CType> l0cOutReg;
-        AscendC::Reg::DataCopy(l0cOutReg, l0cOut + offset);
-        if constexpr (IsSameType<L0CType, int32_t>::value) {
-            AscendC::Reg::Cast<float, L0CType, DQ_CT_INT32_2_FP32>(castSrcOutReg, l0cOutReg, maskN);
-        } else {
-            castSrcOutReg = l0cOutReg;
-        }
-    }
-
-    // VFDoDequant stage 2: multiply by x2Scale (per-tensor scalar, or per-channel vector widened
-    // from bf16/fp16 as needed).
-    template <bool isPertensor>
-    __aicore__ inline void VfApplyX2Scale(AscendC::Reg::RegTensor<float>& out, AscendC::Reg::RegTensor<float>& src,
-                                          __ubuf__ X2ScaleType* scale, uint32_t offset, AscendC::Reg::MaskReg& maskN,
-                                          AscendC::Reg::MaskReg& maskB16)
-    {
-        if constexpr (isPertensor) {
-            AscendC::Reg::Muls(out, src, x2ScaleScalar_, maskN);
-        } else {
-            AscendC::Reg::RegTensor<X2ScaleType> scaleReg;
-            AscendC::Reg::DataCopy(scaleReg, scale + offset);
-            AscendC::Reg::RegTensor<float> castScaleReg;
-            WidenOrCopyToF32<X2ScaleType>(castScaleReg, scaleReg, maskN, maskB16);
-            AscendC::Reg::Mul(out, src, castScaleReg, maskN);
-        }
-    }
-
-    // VFDoDequant stage 3: multiply by x1Scale (per-tensor scalar / per-token broadcast / none).
-    template <QuantMode x1QuantMode>
-    __aicore__ inline void VfApplyX1Scale(AscendC::Reg::RegTensor<float>& out, AscendC::Reg::RegTensor<float>& src,
-                                          __ubuf__ X1ScaleType* perTokenScale, uint16_t mIdx,
-                                          AscendC::Reg::MaskReg& maskN)
-    {
-        if constexpr (x1QuantMode == QuantMode::PERTENSOR_MODE) {
-            AscendC::Reg::Muls(out, src, x1ScaleScalar_, maskN);
-        } else if constexpr (x1QuantMode == QuantMode::PERTOKEN_MODE) {
-            AscendC::Reg::RegTensor<X1ScaleType> perTokenScaleReg;
-            AscendC::Reg::DataCopy<X1ScaleType, AscendC::Reg::LoadDist::DIST_BRC_B32>(perTokenScaleReg,
-                                                                                      perTokenScale + mIdx);
-            AscendC::Reg::Mul(out, src, perTokenScaleReg, maskN);
-        } else {
-            out = src;
-        }
-    }
-
-    // VFDoDequant stage 4: add bias (float direct, or bf16/fp16 widened to fp32); a plain copy
-    // when the epilogue has no bias. BiasDtype is the RUNTIME-selected bias type, independent of
-    // the compile-time class BiasType.
-    template <bool isBiasEpilogue, class BiasDtype>
-    __aicore__ inline void VfApplyBias(AscendC::Reg::RegTensor<float>& out, AscendC::Reg::RegTensor<float>& src,
-                                       __ubuf__ BiasDtype* bias, uint32_t offset, AscendC::Reg::MaskReg& maskN,
-                                       AscendC::Reg::MaskReg& maskB16)
-    {
-        if constexpr (isBiasEpilogue) {
-            AscendC::Reg::RegTensor<BiasDtype> biasReg;
-            AscendC::Reg::DataCopy(biasReg, bias + offset);
-            AscendC::Reg::RegTensor<float> castBiasReg;
-            WidenOrCopyToF32<BiasDtype>(castBiasReg, biasReg, maskN, maskB16);
-            AscendC::Reg::Add(out, src, castBiasReg, maskN);
-        } else {
-            out = src;
-        }
-    }
-
-    // VFDoDequant stage 5: cast fp32 -> OutType and store the block to the UB ping/pong buffer.
-    __aicore__ inline void VfCastAndStore(__ubuf__ OutType* dst, uint32_t dstUbOffset,
-                                          AscendC::Reg::RegTensor<float>& addBiasOutReg, AscendC::Reg::MaskReg& maskN)
-    {
-        AscendC::Reg::RegTensor<OutType> castResultOutReg;
-        if constexpr (!IsSameType<OutType, float>::value) {
-            AscendC::Reg::Cast<OutType, float, DQ_CT_FP32_2_HALF>(castResultOutReg, addBiasOutReg, maskN);
-        } else {
-            castResultOutReg = addBiasOutReg;
-        }
-        if constexpr (IsSameType<OutType, float>::value) {
-            AscendC::Reg::DataCopy<OutType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, castResultOutReg,
-                                                                                    maskN);
-        } else {
-            AscendC::Reg::DataCopy<OutType, AscendC::Reg::StoreDist::DIST_PACK_B32>(dst + dstUbOffset, castResultOutReg,
-                                                                                    maskN);
-        }
-    }
-
-    template <bool isPertensor, QuantMode x1QuantMode, bool isBiasEpilogue, class BiasDtype>
-    __aicore__ inline void VFDoDequant(__ubuf__ OutType* dst, __ubuf__ L0CType* l0cOut, __ubuf__ X2ScaleType* scale,
-                                       __ubuf__ X1ScaleType* perTokenScale, __ubuf__ BiasDtype* bias, uint16_t mSize,
-                                       uint16_t nSize, uint32_t nSrcAligned, uint32_t nDstAligned)
-    {
-        uint32_t eleNumPerVf = asc_get_vf_len() / sizeof(L0CType);
-        uint16_t nLoopCnt = static_cast<uint16_t>((nSize + eleNumPerVf - 1) / eleNumPerVf);
-        __VEC_SCOPE__
-        {
-            AscendC::Reg::MaskReg maskB16 = AscendC::Reg::CreateMask<bfloat16_t, AscendC::Reg::MaskPattern::ALL>();
-            for (uint16_t mIdx = 0; mIdx < mSize; mIdx++) {
-                uint32_t elementNum = static_cast<uint32_t>(nSize);
-                for (uint16_t vfBlockIdx = 0; vfBlockIdx < nLoopCnt; vfBlockIdx++) {
-                    AscendC::Reg::RegTensor<float> castSrcOutReg, mulScaleOutReg, mulPtScaleOutReg, addBiasOutReg;
-                    AscendC::Reg::MaskReg maskN = AscendC::Reg::UpdateMask<L0CType>(elementNum);
-                    uint32_t blockOffset = vfBlockIdx * eleNumPerVf;
-
-                    VfLoadAndCastL0C(castSrcOutReg, l0cOut, mIdx * nSrcAligned + blockOffset, maskN);
-                    VfApplyX2Scale<isPertensor>(mulScaleOutReg, castSrcOutReg, scale, blockOffset, maskN, maskB16);
-                    VfApplyX1Scale<x1QuantMode>(mulPtScaleOutReg, mulScaleOutReg, perTokenScale, mIdx, maskN);
-                    VfApplyBias<isBiasEpilogue, BiasDtype>(addBiasOutReg, mulPtScaleOutReg, bias, blockOffset, maskN,
-                                                           maskB16);
-                    VfCastAndStore(dst, mIdx * nDstAligned + blockOffset, addBiasOutReg, maskN);
+                if (isPerChannel_) {
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::NONE, false, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
+                        nSize16, nSrcAligned, nDstAligned);
+                } else {
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, false, BiasDtype>(
+                        accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
+                        nSize16, nSrcAligned, nDstAligned);
                 }
             }
         }
+    }
+
+    // PER_CHANNEL: x2Scale single-row vector at x2ScaleUbOffset_; otherwise a placeholder
+    // tensor (PER_TENSOR mode never dereferences the slot).
+    __aicore__ inline auto MakeX2ScaleTensor(int64_t singleCoreN)
+    {
+        if (isPerChannel_) {
+            return asc::te::make_tensor(
+                asc::te::make_mem_ptr<asc::te::location::ub, X2ScaleType>(x2ScaleUbOffset_),
+                Gemm::MakeNDExtLayout(1, singleCoreN, AlignedUbPitch<X2ScaleType>(singleCoreN)));
+        }
+        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, X2ScaleType>(0),
+                                    Gemm::MakeNDExtLayout(1, 1, 1));
+    }
+
+    // PER_TOKEN: fp32 linear mSize entries with the row offset already applied; otherwise a
+    // placeholder tensor (PER_TENSOR / NONE modes never dereference the slot).
+    __aicore__ inline auto MakeX1ScaleTensor(int64_t ptScaleRowOffset, int64_t mSize)
+    {
+        if (isPerToken_) {
+            return asc::te::make_tensor(
+                asc::te::make_mem_ptr<asc::te::location::ub, X1ScaleType>(
+                    x1ScaleUbOffset_ + static_cast<uint64_t>(ptScaleRowOffset) * sizeof(X1ScaleType)),
+                Gemm::MakeNDExtLayout(mSize, 1, 1));
+        }
+        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, X1ScaleType>(0),
+                                    Gemm::MakeNDExtLayout(1, 1, 1));
+    }
+
+    // Bias single-row vector (runtime dtype) at biasUbOffset_; placeholder when no bias.
+    template <class BiasDtype>
+    __aicore__ inline auto MakeBiasTensor(int64_t singleCoreN)
+    {
+        if (isBias_) {
+            return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, BiasDtype>(biasUbOffset_),
+                                        Gemm::MakeNDExtLayout(1, singleCoreN, AlignedUbPitch<BiasDtype>(singleCoreN)));
+        }
+        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, BiasDtype>(0),
+                                    Gemm::MakeNDExtLayout(1, 1, 1));
     }
 
     __aicore__ inline void CopyResultToGm(int64_t mSize, int64_t singleCoreN, int64_t gmOffset)

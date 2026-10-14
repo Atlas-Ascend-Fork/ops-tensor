@@ -22,6 +22,7 @@
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
+#include "blaze/epilogue/tile/compute.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {
@@ -31,21 +32,6 @@ namespace Block {
 using AscendC::IsSameType;
 using Blaze::Gemm::CeilAlign;
 using Blaze::Gemm::CeilDiv;
-
-#ifdef __NPU_ARCH__
-constexpr AscendC::Reg::CastTrait STREAMK_DQ_CT_INT32_2_FP32 = {
-    AscendC::Reg::RegLayout::UNKNOWN, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
-    AscendC::RoundMode::CAST_RINT};
-constexpr AscendC::Reg::CastTrait STREAMK_DQ_CT_FP32_2_HALF = {
-    AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT, AscendC::Reg::MaskMergeMode::ZEROING,
-    AscendC::RoundMode::CAST_RINT};
-constexpr AscendC::Reg::CastTrait STREAMK_DQ_CT_HALF_2_FP32_ZERO = {
-    AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
-    AscendC::RoundMode::UNKNOWN};
-constexpr AscendC::Reg::CastTrait STREAMK_DQ_CT_HALF_2_FP32_ONE = {
-    AscendC::Reg::RegLayout::ONE, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
-    AscendC::RoundMode::UNKNOWN};
-#endif // __NPU_ARCH__
 
 // The dedicated epilogue owns the complete AIV path: reduce split-K workspace partials,
 // apply per-tensor x2 scale and optional x1 scale/bias, cast, and write the final output.
@@ -369,12 +355,6 @@ private:
     }
 
     template <class T>
-    __aicore__ inline static __ubuf__ T* GetUbAddr(uint64_t byteOffset)
-    {
-        return reinterpret_cast<__ubuf__ T*>(asc_get_phy_buf_addr(0) + byteOffset);
-    }
-
-    template <class T>
     __aicore__ inline static int64_t AlignedUbPitch(int64_t cols)
     {
         return static_cast<int64_t>(
@@ -445,130 +425,54 @@ private:
         uint32_t nDstAligned = static_cast<uint32_t>(
             CeilAlign(static_cast<uint64_t>(localN), static_cast<uint64_t>(OUT_ALIGN)));
         uint64_t dequantOffset = pingPongId_ == 0U ? dequantPingOffset_ : dequantPongOffset_;
-        __ubuf__ WorkspaceType* l0cOut = GetUbAddr<WorkspaceType>(static_cast<uint64_t>(l0cOffset) *
-                                                                  sizeof(WorkspaceType));
-        __ubuf__ BiasDtype* bias = isBias_ ? GetUbAddr<BiasDtype>(biasUbOffset_) : nullptr;
-        __ubuf__ OutType* dst = GetUbAddr<OutType>(dequantOffset);
-
         uint16_t mSize16 = static_cast<uint16_t>(mSize);
         uint16_t nSize16 = static_cast<uint16_t>(localN);
         uint32_t nSrcAligned = static_cast<uint32_t>(rowStride);
+
+        // Tensors for the Tile::Dequant chain. x2 is always PER_TENSOR here (the raw scale
+        // dtype is resolved by ReadRawX2ScaleScalar into x2ScaleScalar_ before the tile runs), so
+        // the x2/x1 vector slots receive fp32 placeholder tensors (never dereferenced).
+        auto accTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, WorkspaceType>(
+                                                  static_cast<uint64_t>(l0cOffset) * sizeof(WorkspaceType)),
+                                              Gemm::MakeNDExtLayout(mSize, localN, rowStride));
+        auto dstTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, OutType>(dequantOffset),
+                                              Gemm::MakeNDExtLayout(mSize, localN, static_cast<int64_t>(nDstAligned)));
+        auto x2DummyTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0),
+                                                  Gemm::MakeNDExtLayout(1, 1, 1));
+        auto x1DummyTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0),
+                                                  Gemm::MakeNDExtLayout(1, 1, 1));
+        auto biasTensor = MakeBiasTensor<BiasDtype>(localN);
+
+        // Dispatch matrix (design doc §5.2): x2/x1 scalars are kept separate when bias runs
+        // on the AIV; without bias InitDequant pre-merges (and 0xFFFFE000-masks) x1 into
+        // x2ScaleScalar_ so a single Muls reproduces the fixpipe behavior.
+        using B32ToFpDequant = Tile::Dequant<Tile::B32ToFpTag>;
+        using DequantMode = Tile::DequantMode;
         if (hasX1Scale_ && isBias_) {
-            DispatchVfDequant<true>(dst, l0cOut, bias, mSize16, nSize16, nSrcAligned, nDstAligned);
+            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, true, BiasDtype>(
+                accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_, mSize16,
+                nSize16, nSrcAligned, nDstAligned);
+        } else if (isBias_) {
+            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, true, BiasDtype>(
+                accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16, nSize16,
+                nSrcAligned, nDstAligned);
         } else {
-            DispatchVfDequant<false>(dst, l0cOut, bias, mSize16, nSize16, nSrcAligned, nDstAligned);
+            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, false, BiasDtype>(
+                accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16, nSize16,
+                nSrcAligned, nDstAligned);
         }
     }
 
-    template <bool hasX1Scale, class BiasDtype>
-    __aicore__ inline void DispatchVfDequant(__ubuf__ OutType* dst, __ubuf__ WorkspaceType* l0cOut,
-                                             __ubuf__ BiasDtype* bias, uint16_t mSize, uint16_t nSize,
-                                             uint32_t nSrcAligned, uint32_t nDstAligned)
+    // Bias single-row vector (runtime dtype) at biasUbOffset_; placeholder when no bias.
+    template <class BiasDtype>
+    __aicore__ inline auto MakeBiasTensor(int64_t localN)
     {
         if (isBias_) {
-            VfDoDequant<hasX1Scale, true>(dst, l0cOut, bias, mSize, nSize, nSrcAligned, nDstAligned);
-        } else {
-            VfDoDequant<hasX1Scale, false>(dst, l0cOut, bias, mSize, nSize, nSrcAligned, nDstAligned);
+            return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, BiasDtype>(biasUbOffset_),
+                                        Gemm::MakeNDExtLayout(1, localN, AlignedUbPitch<BiasDtype>(localN)));
         }
-    }
-
-    template <class SrcType>
-    __aicore__ inline void WidenOrCopyToF32(AscendC::Reg::RegTensor<float>& dst, AscendC::Reg::RegTensor<SrcType>& src,
-                                            AscendC::Reg::MaskReg& maskN, AscendC::Reg::MaskReg& maskB16)
-    {
-        if constexpr (!IsSameType<SrcType, float>::value) {
-            AscendC::Reg::RegTensor<float> oneReg;
-            AscendC::Reg::Cast<float, SrcType, STREAMK_DQ_CT_HALF_2_FP32_ZERO>(dst, src, maskN);
-            AscendC::Reg::Cast<float, SrcType, STREAMK_DQ_CT_HALF_2_FP32_ONE>(oneReg, src, maskB16);
-            AscendC::Reg::Interleave(dst, oneReg, dst, oneReg);
-        } else {
-            dst = src;
-        }
-    }
-
-    __aicore__ inline void VfLoadAndCastL0C(AscendC::Reg::RegTensor<float>& dst, __ubuf__ WorkspaceType* src,
-                                            uint32_t offset, AscendC::Reg::MaskReg& maskN)
-    {
-        AscendC::Reg::RegTensor<WorkspaceType> srcReg;
-        AscendC::Reg::DataCopy(srcReg, src + offset);
-        if constexpr (IsSameType<WorkspaceType, int32_t>::value) {
-            AscendC::Reg::Cast<float, WorkspaceType, STREAMK_DQ_CT_INT32_2_FP32>(dst, srcReg, maskN);
-        } else {
-            dst = srcReg;
-        }
-    }
-
-    template <bool hasX1Scale>
-    __aicore__ inline void VfApplyX1Scale(AscendC::Reg::RegTensor<float>& dst, AscendC::Reg::RegTensor<float>& src,
-                                          AscendC::Reg::MaskReg& maskN)
-    {
-        if constexpr (hasX1Scale) {
-            AscendC::Reg::Muls(dst, src, x1ScaleScalar_, maskN);
-        } else {
-            dst = src;
-        }
-    }
-
-    template <bool isBiasEpilogue, class BiasDtype>
-    __aicore__ inline void VfApplyBias(AscendC::Reg::RegTensor<float>& dst, AscendC::Reg::RegTensor<float>& src,
-                                       __ubuf__ BiasDtype* bias, uint32_t offset, AscendC::Reg::MaskReg& maskN,
-                                       AscendC::Reg::MaskReg& maskB16)
-    {
-        // Bias is defined in the dequantized domain and must stay after both X2 and X1 scale multiplications.
-        if constexpr (isBiasEpilogue) {
-            AscendC::Reg::RegTensor<BiasDtype> biasReg;
-            AscendC::Reg::DataCopy(biasReg, bias + offset);
-            AscendC::Reg::RegTensor<float> castBiasReg;
-            WidenOrCopyToF32<BiasDtype>(castBiasReg, biasReg, maskN, maskB16);
-            AscendC::Reg::Add(dst, src, castBiasReg, maskN);
-        } else {
-            dst = src;
-        }
-    }
-
-    __aicore__ inline void VfCastAndStore(__ubuf__ OutType* dst, uint32_t offset, AscendC::Reg::RegTensor<float>& src,
-                                          AscendC::Reg::MaskReg& maskN)
-    {
-        AscendC::Reg::RegTensor<OutType> outReg;
-        if constexpr (!IsSameType<OutType, float>::value) {
-            AscendC::Reg::Cast<OutType, float, STREAMK_DQ_CT_FP32_2_HALF>(outReg, src, maskN);
-        } else {
-            outReg = src;
-        }
-        if constexpr (IsSameType<OutType, float>::value) {
-            AscendC::Reg::DataCopy<OutType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + offset, outReg, maskN);
-        } else {
-            AscendC::Reg::DataCopy<OutType, AscendC::Reg::StoreDist::DIST_PACK_B32>(dst + offset, outReg, maskN);
-        }
-    }
-
-    template <bool hasX1Scale, bool isBiasEpilogue, class BiasDtype>
-    __aicore__ inline void VfDoDequant(__ubuf__ OutType* dst, __ubuf__ WorkspaceType* l0cOut, __ubuf__ BiasDtype* bias,
-                                       uint16_t mSize, uint16_t nSize, uint32_t nSrcAligned, uint32_t nDstAligned)
-    {
-        uint32_t eleNumPerVf = asc_get_vf_len() / sizeof(WorkspaceType);
-        uint16_t nLoopCnt = static_cast<uint16_t>((nSize + eleNumPerVf - 1U) / eleNumPerVf);
-        __VEC_SCOPE__
-        {
-            AscendC::Reg::MaskReg maskB16 = AscendC::Reg::CreateMask<bfloat16_t, AscendC::Reg::MaskPattern::ALL>();
-            for (uint16_t mIdx = 0; mIdx < mSize; ++mIdx) {
-                uint32_t elementNum = static_cast<uint32_t>(nSize);
-                for (uint16_t vfBlockIdx = 0; vfBlockIdx < nLoopCnt; ++vfBlockIdx) {
-                    AscendC::Reg::RegTensor<float> castReg;
-                    AscendC::Reg::RegTensor<float> x2ScaleReg;
-                    AscendC::Reg::RegTensor<float> x1ScaleReg;
-                    AscendC::Reg::RegTensor<float> biasOutReg;
-                    AscendC::Reg::MaskReg maskN = AscendC::Reg::UpdateMask<WorkspaceType>(elementNum);
-                    uint32_t blockOffset = vfBlockIdx * eleNumPerVf;
-
-                    VfLoadAndCastL0C(castReg, l0cOut, mIdx * nSrcAligned + blockOffset, maskN);
-                    AscendC::Reg::Muls(x2ScaleReg, castReg, x2ScaleScalar_, maskN);
-                    VfApplyX1Scale<hasX1Scale>(x1ScaleReg, x2ScaleReg, maskN);
-                    VfApplyBias<isBiasEpilogue>(biasOutReg, x1ScaleReg, bias, blockOffset, maskN, maskB16);
-                    VfCastAndStore(dst, mIdx * nDstAligned + blockOffset, biasOutReg, maskN);
-                }
-            }
-        }
+        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, BiasDtype>(0),
+                                    Gemm::MakeNDExtLayout(1, 1, 1));
     }
 
     __aicore__ inline void CopyResultToGm(int64_t mSize, int64_t localN, int64_t gmOffset)
