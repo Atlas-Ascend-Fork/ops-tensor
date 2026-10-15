@@ -79,6 +79,7 @@ public:
         uint16_t l0cStages{1};
         GM_ADDR scaleGmAddr{nullptr};
         uint64_t rowStride{0};
+        uint64_t splitKNum{1}; // split-K 分段数（跨调用 L0C 累加），1 表示独立 matmul
     };
 
 public:
@@ -106,6 +107,7 @@ public:
         baseK_ = params.kL0;
         isBias_ = params.biasGmAddr != nullptr;
         l1Stages_ = params.l1Stages;
+        splitKNum_ = params.splitKNum;
         enableL0cPingPong_ = params.l0cStages > 1;
         l0PingPong_ = 0;
         abL1LoopCnt_ = 0;
@@ -131,8 +133,13 @@ public:
 
     template <typename TensorA, typename TensorB, typename TensorBias, typename TensorC>
     __aicore__ inline void operator()(TensorA& gmA, TensorB& gmB, TensorBias& gmBias, TensorC& gmC,
-                                      TupleShape& blockShape, __gm__ uint64_t* gmScalePtr = nullptr)
+                                      TupleShape& blockShape, __gm__ uint64_t* gmScalePtr = nullptr,
+                                      uint64_t splitKIdx = 0)
     {
+        // split-K 语义：多个 operator() 调用在 L0C 上跨调用累加，最后一段触发一次 fixpipe 搬出。
+        // splitKIdx == 0 时负责清零 L0C 并累加 bias，splitKIdx == splitKNum_-1 时触发 CopyL0CToGM。
+        const bool isFirstSplitK = splitKIdx == 0;
+        const bool isLastSplitK = splitKIdx == splitKNum_ - 1;
         static constexpr uint64_t HALF_L0C_SIZE = AscendC::TOTAL_L0C_SIZE / DOUBLE_BUFFER_COUNT;
         // m0 == m1 && n0 == n1
         int64_t curM = Blaze::Gemm::Min(asc::te::get<MNK_M>(blockShape), static_cast<int64_t>(baseM_));
@@ -155,7 +162,7 @@ public:
 
             // GM->L1
             TripleShape l1Shape{curM, curN, static_cast<int64_t>(curKL1)};
-            auto l1TensorTuple = CopyL1FromGM(gmA, gmB, gmBias, l1Shape, l1BufId, iter0);
+            auto l1TensorTuple = CopyL1FromGM(gmA, gmB, gmBias, l1Shape, l1BufId, iter0, isFirstSplitK);
             auto tensorAL1 = asc::te::get<0>(l1TensorTuple);
             auto tensorBL1 = asc::te::get<1>(l1TensorTuple);
             auto tensorBiasL1 = asc::te::get<2>(l1TensorTuple);
@@ -167,17 +174,19 @@ public:
 
                 // A L1->L0
                 TripleShape l0Shape{curM, curN, static_cast<int64_t>(curK0)};
-                bool needBias = NeedProcessBias(iter0, iter1);
+                bool needBias = NeedProcessBias(iter0, iter1, isFirstSplitK);
                 auto l0TensorTuple = CopyL0FromL1(tensorAL1, tensorBL1, tensorBiasL1, l0Shape, l0BufferId,
                                                   baseK_ * iter1, needBias, l1BufId, btBufId);
                 auto tensorAL0 = asc::te::get<0>(l0TensorTuple);
                 auto tensorBL0 = asc::te::get<1>(l0TensorTuple);
                 auto tensorBiasL0 = asc::te::get<2>(l0TensorTuple);
 
-                bool initCmatrix = iter0 == 0 && iter1 == 0 && !isBias_;
-                asc::te::unit_flag_mode unitFlag = ((iter0 + 1 == kL1Iter_ && iter1 + 1 == kL0Iter) ?
-                                                        asc::te::unit_flag_mode::enable_update :
-                                                        asc::te::unit_flag_mode::enable_keep);
+                // 只有首个 split 清零 L0C（bias 场景由 bias 表初始化，不清零）
+                bool initCmatrix = iter0 == 0 && iter1 == 0 && isFirstSplitK && !needBias;
+                // 只有最后一个 split 的最后一拍才 update 单元标志
+                bool isFinalAccumulation = (iter0 + 1 == kL1Iter_ && iter1 + 1 == kL0Iter) && isLastSplitK;
+                asc::te::unit_flag_mode unitFlag = (isFinalAccumulation ? asc::te::unit_flag_mode::enable_update :
+                                                                          asc::te::unit_flag_mode::enable_keep);
 
                 {
                     Gemm::LockM(l0BufferId + L0_BUFFER_ID_BASE);
@@ -189,23 +198,26 @@ public:
             abL1LoopCnt_++;
         }
 
-        // 数据搬出到GM
-        CopyL0CToGM(gmC, tensorL0C);
-
-        if (enableL0cPingPong_) {
-            l0cPingPong_++;
+        // 数据搬出到GM（仅最后一个 split 触发一次）
+        if (isLastSplitK) {
+            CopyL0CToGM(gmC, tensorL0C);
+            if (enableL0cPingPong_) {
+                l0cPingPong_++;
+            }
         }
     }
 
 private:
-    __aicore__ inline bool NeedProcessBias(uint64_t kIter0, uint64_t kIter1)
+    __aicore__ inline bool NeedProcessBias(uint64_t kIter0, uint64_t kIter1, bool isFirstSplitK)
     {
-        return isBias_ && kIter0 == 0 && kIter1 == 0;
+        // bias 只在首个 split 的首次 K 迭代累加，避免跨 split 重复加 bias
+        return isBias_ && kIter0 == 0 && kIter1 == 0 && isFirstSplitK;
     }
 
     template <typename TensorA, typename TensorB, typename TensorBias>
     __aicore__ inline auto CopyL1FromGM(const TensorA& tensorA, const TensorB& tensorB, const TensorBias& tensorBias,
-                                        const TripleShape& l1Shape, uint16_t l1BufferId, uint64_t kIdx)
+                                        const TripleShape& l1Shape, uint16_t l1BufferId, uint64_t kIdx,
+                                        bool isFirstSplitK)
     {
         constexpr bool IS_SLICE_POLICY = NON_CONTIGUOUS_TYPE ==
                                          static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_SLICE);
@@ -250,7 +262,7 @@ private:
         auto layoutBiasL1 = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, curNL1);
         auto tensorBiasL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(biasL1Buffer_[l1BufferId]), layoutBiasL1);
-        if (isBias_ && kIdx == 0) {
+        if (isBias_ && kIdx == 0 && isFirstSplitK) {
             asc::te::copy(copyGM2L1, tensorBiasL1, tensorBias);
         }
 
@@ -416,6 +428,7 @@ private:
     uint64_t baseK_{16};
 
     uint64_t kL1Iter_{0};
+    uint64_t splitKNum_{1};
     uint32_t l1Stages_{1};
     uint64_t abL1LoopCnt_{0};
     uint64_t l0PingPong_{0};
