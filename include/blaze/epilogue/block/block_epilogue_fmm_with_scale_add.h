@@ -16,6 +16,11 @@
 /*!
  * \file block_epilogue_fmm_with_scale_add.h
  * \brief AIV epilogue for out = alpha * acc + beta * x3.
+ *
+ * cuBLAS / torch addmm contract for beta == 0: "If beta == 0, then C does not
+ * have to be a valid input" -- the x3 (C) read and the beta * x3 add are
+ * skipped entirely (NOT computed as 0 * x3), so NaN/Inf in x3 never reaches
+ * the output; out = alpha * acc. This also saves the x3 GM->UB traffic.
  */
 
 #pragma once
@@ -89,6 +94,7 @@ public:
     {
         if ASCEND_IS_AIV {
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(X3_SKIP_EVENT);
         }
     }
 
@@ -96,6 +102,7 @@ public:
     {
         if ASCEND_IS_AIV {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(X3_SKIP_EVENT);
         }
     }
 
@@ -109,6 +116,7 @@ public:
             beta_ = params.beta;
             hasAlphaScale_ = alpha_ != Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE;
             hasBetaScale_ = beta_ != Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE;
+            betaZero_ = beta_ == 0.0F;
             n_ = asc::te::get<Blaze::Gemm::MNK_N>(problemShape);
         }
     }
@@ -161,6 +169,7 @@ private:
     static constexpr uint16_t X3_EVENT = 0;
     static constexpr uint16_t OUTPUT_EVENT = 1;
     static constexpr uint16_t BUFFER_REUSE_EVENT = 2;
+    static constexpr uint16_t X3_SKIP_EVENT = 3;
     static constexpr uint64_t AIC_SYNC_AIV_MODE_4 = 4;
     static constexpr uint16_t AIV_SYNC_AIC_FLAG = 4;
     static constexpr uint16_t AIC_SYNC_AIV_FLAG = 6;
@@ -215,12 +224,16 @@ private:
                 asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(rowsThisStage, n_));
             auto x3Gm = x3GmStorage.slice(origin, validShape);
 
-            // x3 and output share the same UB region. Wait for the previous UB2GM before overwriting it.
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
-            auto copyGmToUb = asc::te::make_copy(asc::te::copy_gm_to_ub{});
-            asc::te::copy(copyGmToUb, x3Ub, x3Gm);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(X3_EVENT);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(X3_EVENT);
+            if (!betaZero_) {
+                // x3 and output share the same UB region. Wait for the previous UB2GM before overwriting it.
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
+                auto copyGmToUb = asc::te::make_copy(asc::te::copy_gm_to_ub{});
+                asc::te::copy(copyGmToUb, x3Ub, x3Gm);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(X3_EVENT);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(X3_EVENT);
+            } else {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(X3_SKIP_EVENT);
+            }
 
             auto accAddr = reinterpret_cast<__ubuf__ float*>(ubTensor.data().get()) + stageOffset * nAlignAcc;
             VfParams vfParams{accAddr,
@@ -233,7 +246,14 @@ private:
                               vfLoops,
                               alpha_,
                               beta_};
-            if (hasAlphaScale_ && hasBetaScale_) {
+            if (betaZero_) {
+                // cuBLAS semantics: out = alpha * acc, the x3 (C) addend is neither loaded nor added.
+                if (hasAlphaScale_) {
+                    asc_vf_call<FmmScaleAddVf<true, false, true>>(vfParams);
+                } else {
+                    asc_vf_call<FmmScaleAddVf<false, false, true>>(vfParams);
+                }
+            } else if (hasAlphaScale_ && hasBetaScale_) {
                 asc_vf_call<FmmScaleAddVf<true, true>>(vfParams);
             } else if (hasAlphaScale_) {
                 asc_vf_call<FmmScaleAddVf<true, false>>(vfParams);
@@ -252,11 +272,17 @@ private:
             auto outputGm = outputGmStorage.slice(origin, validShape);
             auto copyUbToGm = asc::te::make_copy(asc::te::copy_ub_to_gm{});
             asc::te::copy(copyUbToGm, outputGm, x3Ub);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
+            if (betaZero_) {
+                // Release the staging region for the next vector write (no MTE2
+                // load in between, so the MTE3 -> V event carries the ordering).
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(X3_SKIP_EVENT);
+            } else {
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
+            }
         }
     }
 
-    template <bool hasAlphaScale, bool hasBetaScale>
+    template <bool hasAlphaScale, bool hasBetaScale, bool skipX3 = false>
     static __simd_vf__ inline void FmmScaleAddVf(const VfParams params)
     {
         AscendC::Reg::MaskReg allB16 = AscendC::Reg::CreateMask<ElementType_, AscendC::Reg::MaskPattern::ALL>();
@@ -279,18 +305,26 @@ private:
                 AscendC::Reg::RegTensor<ElementType_> outB16;
 
                 AscendC::Reg::DataCopy(acc, accRow + col);
-                if constexpr (AscendC::IsSameType<ElementType_, float>::value) {
-                    AscendC::Reg::DataCopy(x3Zero, x3Row + col);
-                } else {
-                    AscendC::Reg::DataCopy(x3Packed, x3Row + col);
-                    AscendC::Reg::Cast<float, ElementType_, Detail::FMM_WITH_SCALE_ADD_B16_TO_FP32_ZERO>(
-                        x3Zero, x3Packed, maskF32);
-                    AscendC::Reg::Cast<float, ElementType_, Detail::FMM_WITH_SCALE_ADD_B16_TO_FP32_ONE>(x3One, x3Packed,
-                                                                                                        allB16);
-                    AscendC::Reg::Interleave(x3Zero, x3One, x3Zero, x3One);
+                if constexpr (!skipX3) {
+                    if constexpr (AscendC::IsSameType<ElementType_, float>::value) {
+                        AscendC::Reg::DataCopy(x3Zero, x3Row + col);
+                    } else {
+                        AscendC::Reg::DataCopy(x3Packed, x3Row + col);
+                        AscendC::Reg::Cast<float, ElementType_, Detail::FMM_WITH_SCALE_ADD_B16_TO_FP32_ZERO>(
+                            x3Zero, x3Packed, maskF32);
+                        AscendC::Reg::Cast<float, ElementType_, Detail::FMM_WITH_SCALE_ADD_B16_TO_FP32_ONE>(
+                            x3One, x3Packed, allB16);
+                        AscendC::Reg::Interleave(x3Zero, x3One, x3Zero, x3One);
+                    }
                 }
 
-                if constexpr (hasAlphaScale && hasBetaScale) {
+                if constexpr (skipX3) {
+                    if constexpr (hasAlphaScale) {
+                        AscendC::Reg::Muls(outF32, acc, params.alpha, maskF32);
+                    } else {
+                        AscendC::Reg::Muls(outF32, acc, 1.0F, maskF32);
+                    }
+                } else if constexpr (hasAlphaScale && hasBetaScale) {
                     AscendC::Reg::RegTensor<float> accScaled;
                     AscendC::Reg::RegTensor<float> x3Scaled;
                     AscendC::Reg::Muls(accScaled, acc, params.alpha, maskF32);
@@ -328,6 +362,7 @@ private:
     float beta_{Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
     bool hasAlphaScale_{false};
     bool hasBetaScale_{false};
+    bool betaZero_{false};
 };
 
 } // namespace Block

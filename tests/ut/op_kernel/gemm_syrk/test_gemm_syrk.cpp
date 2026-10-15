@@ -282,6 +282,19 @@ TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_BetaOnly)
     RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, half>({2, 3, 8, 1, 1.0F, 2.0F});
 }
 
+TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_BetaZero)
+{
+    // cuBLAS contract: beta == 0 -> the C addend is not read and not added;
+    // output = alpha * (A @ A^T) regardless of the (possibly NaN/Inf) C input.
+    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, half>({1, 32, 16, 1, 1.5F, 0.0F});
+}
+
+TEST_F(GemmSyrkTest, Test_BF16_SyrkSingleFetch_BetaZero)
+{
+    // bf16 beta == 0 skip-x3 path (b16 cast of alpha * acc only).
+    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, bfloat16_t>({2, 32, 16, 1, 2.0F, 0.0F});
+}
+
 TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_M1Sync)
 {
     // m == 1: the second AIV of the MIX pair has no valid rows and only keeps
