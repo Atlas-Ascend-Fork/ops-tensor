@@ -89,9 +89,11 @@ public:
                                               0L;
                 const uint16_t slot = UB_BUFFER_DEPTH > 1U ? static_cast<uint16_t>(blockCnt_ & 1UL) : 0U;
 
+                // Consume each slot's READY on PIPE_V, including an empty split-M half.
+                // Later groups can give this AIV rows, so the counter must not switch pipelines.
+                Gemm::Sync::WaitForCube<Gemm::Sync::SYNC_MODE_INTRA, PIPE_V>(Gemm::Sync::FIXPIPE_AIC_READY_FLAG_BASE +
+                                                                             slot);
                 if (localRows > 0) {
-                    Gemm::Sync::WaitForCube<Gemm::Sync::SYNC_MODE_INTRA, PIPE_V>(
-                        Gemm::Sync::FIXPIPE_AIC_READY_FLAG_BASE + slot);
                     const int64_t slotBaseBytes = static_cast<int64_t>(slot) * ubSlotBytes;
                     // Fixpipe pads an odd M before DUAL_DST_SPLIT_M, so reserve all physical rows in
                     // two-AIV mode. A single AIV receives an exact M-stage and needs no extra row.
@@ -123,9 +125,9 @@ public:
                         asc::te::make_mem_ptr<asc::te::location::ub, DataTypeOut>(dstOffsetBytes), ubCopyLayout);
                     asc::te::copy(copyUbToGm, gmTile, ubCopy);
                 } else {
-                    // Keep the wait and ack on one pipeline when this AIV owns no row (for example M == 1).
-                    Gemm::Sync::WaitForCube<Gemm::Sync::SYNC_MODE_INTRA, PIPE_MTE3>(
-                        Gemm::Sync::FIXPIPE_AIC_READY_FLAG_BASE + slot);
+                    // Order the MTE3 ACK after the V-side READY wait even when no data is consumed.
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(GELU_V_MTE3_EVENT_ID);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(GELU_V_MTE3_EVENT_ID);
                 }
                 Gemm::Sync::NotifyCube<Gemm::Sync::SYNC_MODE_INTRA, PIPE_MTE3>(Gemm::Sync::FIXPIPE_AIV_ACK_FLAG_BASE +
                                                                                slot);

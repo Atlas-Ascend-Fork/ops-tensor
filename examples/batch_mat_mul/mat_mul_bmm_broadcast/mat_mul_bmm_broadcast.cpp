@@ -170,8 +170,8 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
     if (argc >= 12)
         args.bias = std::atoll(argv[11]);
 
-    if (args.m <= 0 || args.k <= 0 || args.n <= 0 || args.batch <= 0) {
-        std::cerr << "Error: M, K, N, batch must be positive integers.\n";
+    if (args.m <= 0 || args.k <= 0 || args.n <= 0 || args.batch <= 0 || args.batchA <= 0 || args.batchB <= 0) {
+        std::cerr << "Error: M, K, N, batch, batchA, batchB must be positive integers.\n";
         return false;
     }
     if (args.dtype != "float16" && args.dtype != "bfloat16" && args.dtype != "float32") {
