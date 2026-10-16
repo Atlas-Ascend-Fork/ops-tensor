@@ -1,6 +1,6 @@
 # Blaze
 
-**Blaze**（**B**asic **L**inear **A**lgebra **O**ptimized **E**ngine）基础线性代数加速引擎，构建 NPU 高性能 CUBE 底座, 为算子开发提供 CUBE 公共能力。
+**Blaze**（**B**asic **L**inear **A**lgebra optimi**Z**ed **E**ngine）基础线性代数加速引擎，构建 NPU 高性能 CUBE 底座, 为算子开发提供 CUBE 公共能力。
 
 ## 定位与边界
 
