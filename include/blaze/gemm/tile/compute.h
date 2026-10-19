@@ -14,7 +14,7 @@
  */
 #pragma once
 
-#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__)
 #include "blaze/gemm/tile/arch35/fill_ub.h"
 #include "blaze/gemm/tile/arch35/pad_mx_kl1.h"
 #include "blaze/gemm/tile/arch35/scale_mx_bias.h"

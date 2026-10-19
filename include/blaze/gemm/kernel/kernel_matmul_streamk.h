@@ -147,8 +147,10 @@ private:
 
             // 切K场景使用blockSchedulerParams的singleCoreK
             int64_t kSingleCore = bs.CheckIsSkScene(tmpBlockIdx) ? params.schParams.singleCoreK : k_;
+            int64_t alignedBaseN = Blaze::Gemm::CeilAlign(params.schParams.baseN,
+                                                          static_cast<int64_t>(BLOCK_BYTE_SIZE));
             int64_t offsetWorkspace = (((tmpBlockIdx % usedCoreNum) / skBlockNums_) * skBlockNums_ + coordK) *
-                                      BLOCK_BASE_M * BLOCK_BASE_N;
+                                      params.schParams.baseM * alignedBaseN;
             // when fixpipe 1v2, dstStride should align to 32
             auto workspaceStrideColumn0 = BlockMmad::DispatchPolicy::FIXP_OPTI == MatMulL0C2Out::ND_FIXPIPE_1_2 ?
                                               Blaze::Gemm::CeilAlign(shapeN, static_cast<int64_t>(BLOCK_BYTE_SIZE)) :
@@ -205,8 +207,11 @@ private:
         BlockEpilogue epilogueOp;
         // size of m in L1 & L0 & singlecore, per core use L1 once in stream k
         BlockShape l1Block = {params.schParams.baseM, params.schParams.baseN, params.schParams.kL1, 1};
-        epilogueOp.Init(params.epilogueParams, params.problemShape, l1Block,
-                        {mBlockNums_, nBlockNums_, skBlockNums_, batch_}, usedCoreNum, bs.CheckIsSkScene(0));
+        BlockShape l0Block = {params.schParams.baseM, params.schParams.baseN, params.schParams.baseK, 1};
+        auto epParams = params.epilogueParams;
+        epParams.windowLen = params.schParams.windowLen;
+        epilogueOp.Init(epParams, params.problemShape, l1Block, {mBlockNums_, nBlockNums_, skBlockNums_, batch_},
+                        usedCoreNum, bs.CheckIsSkScene(0), l0Block);
         epilogueOp();
     }
 
@@ -231,8 +236,6 @@ private:
     static constexpr uint16_t AIV_SYNC_AIC_FLAG = 6;
     static constexpr uint16_t AIC_SYNC_AIV_FLAG = 8;
     static constexpr uint16_t FLAG_ID_MAX = 16;
-    static constexpr uint16_t BLOCK_BASE_M = 256;
-    static constexpr uint16_t BLOCK_BASE_N = 256;
 
     __gm__ AType* aGmAddr_;
     __gm__ BType* bGmAddr_;

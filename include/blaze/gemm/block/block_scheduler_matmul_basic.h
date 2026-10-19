@@ -47,6 +47,7 @@ public:
         uint32_t sliceM = 0;      // 非连续场景m轴
         uint32_t srcNdStride = 1; // 非连续场景m轴stride
         uint32_t innerBatch = 1;  // 非连续transpose场景内轴batch值
+        uint32_t windowLen = 4;   // ASW滑窗长度，由tiling自适应下发
     };
 
 public:
@@ -95,7 +96,9 @@ public:
             tailCnt_ = mTailCnt_ * nTailCnt_;
             blockNums_ += (tailCnt_ - 1) * tailBlockNums;
         }
-        mainWindow_ = WINDOW_LEN < mBlockNums_ ? WINDOW_LEN : mBlockNums_;
+        // windowLen为0视为未下发，回退默认4防除零
+        uint32_t windowLen = params.windowLen == 0 ? 4 : params.windowLen;
+        mainWindow_ = windowLen < mBlockNums_ ? windowLen : mBlockNums_;
         mainRow_ = mBlockNums_ / mainWindow_ - 1;
         tailWindow_ = mBlockNums_ - mainRow_ * mainWindow_;
     }

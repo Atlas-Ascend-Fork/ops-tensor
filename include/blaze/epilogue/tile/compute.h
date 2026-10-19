@@ -14,7 +14,7 @@
  */
 #pragma once
 
-#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510
+#if defined(__NPU_ARCH__)
 #include "blaze/epilogue/tile/arch35/dequant.h"
 #include "blaze/epilogue/tile/arch35/gelu.h"
 #include "blaze/epilogue/tile/arch35/initialize_empty_softmax.h"

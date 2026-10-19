@@ -203,7 +203,9 @@ private:
         BlockShape singleCoreCoord = bs.GetBlockCoord(blockIdx);
         bool isSkBlock = bs.CheckIsSkScene(blockIdx);
         int64_t kSingleCore = isSkBlock ? params.schParams.singleCoreK : k_;
-        int64_t offsetWorkspace = (isSkBlock ? (blockIdx - totalMNBlockNumsInDP) : 0) * BLOCK_BASE_M * BLOCK_BASE_N;
+        int64_t alignedBaseN = Blaze::Gemm::CeilAlign(params.schParams.baseN, static_cast<int64_t>(BLOCK_BYTE_SIZE));
+        int64_t offsetWorkspace = (isSkBlock ? (blockIdx - totalMNBlockNumsInDP) : 0) * params.schParams.baseM *
+                                  alignedBaseN;
         auto gmWorkSpace = MakeWorkspaceTensor(singleCoreShape, offsetWorkspace);
 
         auto gmBlockA = gmA.slice(
@@ -237,8 +239,11 @@ private:
 
         BlockEpilogue epilogueOp;
         BlockShape l1Block = {params.schParams.baseM, params.schParams.baseN, params.schParams.kL1, 1};
-        epilogueOp.Init(params.epilogueParams, params.problemShape, l1Block,
-                        {mBlockNums_, nBlockNums_, skBlockNums_, 1}, usedCoreNum, bs.CheckIsSkScene(0));
+        BlockShape l0Block = {params.schParams.baseM, params.schParams.baseN, params.schParams.baseK, 1};
+        auto epParams = params.epilogueParams;
+        epParams.windowLen = params.schParams.windowLen;
+        epilogueOp.Init(epParams, params.problemShape, l1Block, {mBlockNums_, nBlockNums_, skBlockNums_, 1},
+                        usedCoreNum, bs.CheckIsSkScene(0), l0Block);
         epilogueOp();
     }
 
@@ -321,8 +326,6 @@ private:
     static constexpr uint16_t AIC_ONLY_SYNC_FLAG = 7;
     static constexpr uint16_t AIC_SYNC_AIV_FLAG = 8;
     static constexpr uint16_t FLAG_ID_MAX = 16;
-    static constexpr uint16_t BLOCK_BASE_M = 256;
-    static constexpr uint16_t BLOCK_BASE_N = 256;
     static constexpr uint32_t BF16_SHIFT = 16U;
     static constexpr uint32_t DEQ_SCALE_MUL_MASK = 0xFFFFE000U;
 

@@ -50,6 +50,7 @@ public:
         GM_ADDR biasGmAddr{nullptr};
         bool isBias{false};
         uint32_t biasDtype{0};
+        uint64_t windowLen = 4; // ASW滑窗长度，0视为未下发回退默认4
     };
 
     __aicore__ inline BlockEpilogueQbmmPertensorStreamK()
@@ -129,7 +130,8 @@ private:
 
 public:
     __aicore__ inline void Init(Params const& params, BlockShape blockShapeInAiv, BlockShape tileL1ShapeInAiv,
-                                BlockCoord coordInAiv, uint64_t usedCoreNum, bool checkIsSkScene)
+                                BlockCoord coordInAiv, uint64_t usedCoreNum, bool checkIsSkScene,
+                                BlockShape tileL0Shape)
     {
         m_ = asc::te::get<Blaze::Gemm::MNK_M>(blockShapeInAiv);
         n_ = asc::te::get<Blaze::Gemm::MNK_N>(blockShapeInAiv);
@@ -138,6 +140,10 @@ public:
         mCnt_ = asc::te::get<Blaze::Gemm::MNK_M>(coordInAiv);
         nCnt_ = asc::te::get<Blaze::Gemm::MNK_N>(coordInAiv);
         kCnt_ = asc::te::get<Blaze::Gemm::MNK_K>(coordInAiv);
+        baseM_ = asc::te::get<Blaze::Gemm::MNK_M>(tileL0Shape);
+        baseN_ = asc::te::get<Blaze::Gemm::MNK_N>(tileL0Shape);
+        alignBaseN_ = Blaze::Gemm::CeilAlign(baseN_, Blaze::Gemm::BLOCK_BYTE_SIZE);
+        windowLen_ = params.windowLen == 0 ? 4 : params.windowLen; // 0视为未下发，回退默认4，与scheduler约定一致
         usedCoreNum_ = usedCoreNum;
         cGmAddr_ = params.cGmAddr;
         scaleGmAddr_ = params.scaleGmAddr;
@@ -191,7 +197,7 @@ public:
 
         aivParams_.indexParams = newBlockIdx;
         uint64_t cGmIndex = aivParams_.indexParams + (mCnt_ * nCnt_ - mCnt_ * nCnt_ % usedCoreNum_);
-        uint64_t mainWindow = AscendC::Std::min(MAIN_WINDOW, mCnt_);
+        uint64_t mainWindow = AscendC::Std::min(windowLen_, mCnt_);
         uint64_t mainRow = mCnt_ / mainWindow - 1UL;
         uint64_t tailWindow = mCnt_ - mainRow * mainWindow;
         uint64_t rowIdx = cGmIndex / nCnt_ / mainWindow;
@@ -231,7 +237,7 @@ public:
 
         reductionTileParams_.validRows = assignedRows;
         // Calculate the workspace tile origin used by the split-K reduction.
-        reductionTileParams_.workspaceOffset = (aivParams_.indexParams) * kCnt_ * BLOCK_BASE_M * BLOCK_BASE_N +
+        reductionTileParams_.workspaceOffset = (aivParams_.indexParams) * kCnt_ * baseM_ * alignBaseN_ +
                                                aivParams_.kCntIndex * rowsPerTaskGroup * aivParams_.curAlignedNInAiv;
         // Calculate the corresponding output tile origin in C GM.
         cGmOffset_ = aivParams_.nCntIndex * nL1_ + aivParams_.mCntIndex * mL1_ * n_ +
@@ -343,7 +349,7 @@ private:
         const int64_t cols = static_cast<int64_t>(reductionTileParams_.packedElements);
         // Each split-K partial occupies one fixed-size GM tile; pack its valid prefix contiguously in UB.
         auto ubLayout = Gemm::MakeNDExtLayout(rows, cols, cols);
-        auto gmLayout = Gemm::MakeNDExtLayout(rows, cols, static_cast<int64_t>(BLOCK_BASE_M * BLOCK_BASE_N));
+        auto gmLayout = Gemm::MakeNDExtLayout(rows, cols, static_cast<int64_t>(baseM_ * alignBaseN_));
         auto workspaceUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, WorkspaceType>(0),
                                                 ubLayout);
         auto workspaceGm = asc::te::make_tensor(
@@ -496,10 +502,11 @@ private:
         }
     }
 
-    static constexpr uint64_t BLOCK_BASE_M = 256UL;
-    static constexpr uint64_t BLOCK_BASE_N = 256UL;
+    uint64_t baseM_ = 0;
+    uint64_t baseN_ = 0;
+    uint64_t alignBaseN_ = 0;
+    uint64_t windowLen_ = 4;
     static constexpr uint64_t NUM_TWO = 2UL;
-    static constexpr uint64_t MAIN_WINDOW = 4UL;
     static constexpr uint64_t UB2GM_SRCGAP_UNIT = 32UL;
     static constexpr uint64_t DEQUANT_SPLIT_COUNT = 4UL;
 

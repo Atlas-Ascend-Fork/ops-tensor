@@ -76,14 +76,22 @@ private:
         if ASCEND_IS_AIV {
             return;
         }
-        if constexpr (asc::te::current_arch_version == asc::te::arch_version::v3510) {
-            uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
-            mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
-            mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
-            mte2NzPara |= static_cast<uint64_t>(ndNum);                        // MTE2_NZ_PARA[15:0]
-            asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for ND2NZ DMA instructions
-            asc_copy_gm2l1_nd2nz(dst, src, loop1SrcStride, cacheMode, nValue, dValue, loop4SrcStride, enableSmallC0);
-        }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
+        mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
+        mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
+        mte2NzPara |= static_cast<uint64_t>(ndNum);                        // MTE2_NZ_PARA[15:0]
+        asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for ND2NZ DMA instructions
+        asc_copy_gm2l1_nd2nz(dst, src, loop1SrcStride, cacheMode, nValue, dValue, loop4SrcStride, enableSmallC0);
+#elif defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+        uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
+        mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
+        mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
+        mte2NzPara |= static_cast<uint64_t>(ndNum);                        // MTE2_NZ_PARA[15:0]
+        asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for ND2NZ DMA instructions
+        asc_copy_gm2l1_nd2nz(dst, src, loop1SrcStride, static_cast<asc_load_l2_cache_mode>(cacheMode), nValue, dValue,
+                             loop4SrcStride, enableSmallC0, false);
+#endif
     }
 };
 
@@ -295,14 +303,14 @@ private:
         if ASCEND_IS_AIV {
             return;
         }
-        if constexpr (asc::te::current_arch_version == asc::te::arch_version::v3510) {
-            uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
-            mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
-            mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
-            mte2NzPara |= static_cast<uint64_t>(ndNum);                        // MTE2_NZ_PARA[15:0]
-            asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for ND2NZ DMA instructions
-            asc_copy_gm2l1_nd2nz(dst, src, loop1SrcStride, cacheMode, nValue, dValue, loop4SrcStride, enableSmallC0);
-        }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
+        mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
+        mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
+        mte2NzPara |= static_cast<uint64_t>(ndNum);                        // MTE2_NZ_PARA[15:0]
+        asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for ND2NZ DMA instructions
+        asc_copy_gm2l1_nd2nz(dst, src, loop1SrcStride, cacheMode, nValue, dValue, loop4SrcStride, enableSmallC0);
+#endif
     }
 
     template <typename T>
@@ -315,14 +323,14 @@ private:
         if ASCEND_IS_AIV {
             return;
         }
-        if constexpr (asc::te::current_arch_version == asc::te::arch_version::v3510) {
-            uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
-            mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
-            mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
-            mte2NzPara |= static_cast<uint64_t>(dnNum);                        // MTE2_NZ_PARA[15:0]
-            asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for DN2NZ DMA instructions
-            asc_copy_gm2l1_dn2nz(dst, src, loop1SrcStride, cacheMode, nValue, dValue, loop4SrcStride, enableSmallC0);
-        }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
+        mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
+        mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
+        mte2NzPara |= static_cast<uint64_t>(dnNum);                        // MTE2_NZ_PARA[15:0]
+        asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for DN2NZ DMA instructions
+        asc_copy_gm2l1_dn2nz(dst, src, loop1SrcStride, cacheMode, nValue, dValue, loop4SrcStride, enableSmallC0);
+#endif
     }
 };
 

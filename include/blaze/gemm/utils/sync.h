@@ -55,9 +55,6 @@ constexpr uint16_t FIXPIPE_AIV_ACK_FLAG_BASE = 4;   // AIV -> AIC: the UB slot c
 constexpr uint16_t FIXPIPE_AIC_READY_FLAG_BASE = 6; // AIC -> AIV: the UB slot contains valid data.
 constexpr uint16_t FIXPIPE_MAX_SLOT_COUNT = 2;
 
-constexpr uint16_t NPU_ARCH_950 = 950;
-constexpr uint16_t NPU_ARCH_960 = 960;
-
 namespace detail {
 
 template <uint16_t Mode, pipe_t Pipe>
@@ -86,26 +83,26 @@ __aicore__ inline void Wait(uint16_t id)
 
 } // namespace detail
 
-template <uint16_t Mode = SYNC_MODE_INTRA, pipe_t Pipe = PIPE_FIX, uint16_t NpuArch = NPU_ARCH_950>
+template <uint16_t Mode = SYNC_MODE_INTRA, pipe_t Pipe = PIPE_FIX>
 __aicore__ inline void NotifyVector(uint16_t id = MIX_AIC_SYNC_AIV_FLAG, bool isMixCV1V2 = false)
 {
     detail::Arrive<Mode, Pipe>(id);
-    if constexpr (NpuArch == NPU_ARCH_950) {
-        if (isMixCV1V2) {
-            detail::Arrive<Mode, Pipe>(id + MIX_FLAG_ID_MAX);
-        }
+#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
+    if (isMixCV1V2) {
+        detail::Arrive<Mode, Pipe>(id + MIX_FLAG_ID_MAX);
     }
+#endif
 }
 
-template <uint16_t Mode = SYNC_MODE_INTRA, pipe_t Pipe = PIPE_FIX, uint16_t NpuArch = NPU_ARCH_950>
+template <uint16_t Mode = SYNC_MODE_INTRA, pipe_t Pipe = PIPE_FIX>
 __aicore__ inline void WaitForVector(uint16_t id = MIX_AIV_SYNC_AIC_FLAG, bool isMixCV1V2 = false)
 {
     detail::Wait<Mode, Pipe>(id);
-    if constexpr (NpuArch == NPU_ARCH_950) {
-        if (isMixCV1V2) {
-            detail::Wait<Mode, Pipe>(id + MIX_FLAG_ID_MAX);
-        }
+#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
+    if (isMixCV1V2) {
+        detail::Wait<Mode, Pipe>(id + MIX_FLAG_ID_MAX);
     }
+#endif
 }
 
 template <uint16_t Mode = SYNC_MODE_INTRA, pipe_t Pipe = PIPE_V>

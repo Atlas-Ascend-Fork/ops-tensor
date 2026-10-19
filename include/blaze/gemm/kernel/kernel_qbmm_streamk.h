@@ -222,9 +222,10 @@ private:
         SetBL2Cache(params, singleCoreShape, gmB);
         bool isSkScene = bs.CheckIsSkScene(tmpBlockIdx);
         int64_t kSingleCore = isSkScene ? params.schParams.singleCoreK : asc::te::get<MNK_K>(problemShape_);
+        int64_t alignedBaseN = Blaze::Gemm::CeilAlign(params.schParams.baseN, static_cast<int64_t>(BLOCK_BYTE_SIZE));
         int64_t offsetWorkspace = (((tmpBlockIdx % usedCoreNums_) / skBlockNums_) * skBlockNums_ +
                                    asc::te::get<MNK_K>(singleCoreCoord)) *
-                                  BLOCK_BASE_M * BLOCK_BASE_N;
+                                  params.schParams.baseM * alignedBaseN;
         auto gmWorkSpace = MakeWorkspaceTensor(singleCoreShape, offsetWorkspace);
         auto scaleKL1LenSingleCore = CeilDiv(kSingleCore, static_cast<int64_t>(MXFP_DIVISOR_SIZE)) *
                                      MXFP_MULTI_BASE_SIZE;
@@ -309,9 +310,12 @@ private:
         }
 
         ProblemShape l1BlockShape = {params.schParams.baseM, params.schParams.baseN, params.schParams.kL1, 1};
+        ProblemShape l0BlockShape = {params.schParams.baseM, params.schParams.baseN, params.schParams.baseK, 1};
         BlockEpilogue epilogueOp;
-        epilogueOp.Init(params.epilogueParams, problemShape_, l1BlockShape, {mBlockNums_, nBlockNums_, skBlockNums_, 1},
-                        usedCoreNums_, bs.CheckIsSkScene(0));
+        auto epParams = params.epilogueParams;
+        epParams.windowLen = params.schParams.windowLen;
+        epilogueOp.Init(epParams, problemShape_, l1BlockShape, {mBlockNums_, nBlockNums_, skBlockNums_, 1},
+                        usedCoreNums_, bs.CheckIsSkScene(0), l0BlockShape);
         epilogueOp();
     }
 
@@ -320,8 +324,6 @@ private:
     static constexpr uint16_t AIC_ONLY_SYNC_FLAG = 7;
     static constexpr uint16_t AIC_SYNC_AIV_FLAG = 8;
     static constexpr uint16_t FLAG_ID_MAX = 16;
-    static constexpr uint16_t BLOCK_BASE_M = 256;
-    static constexpr uint16_t BLOCK_BASE_N = 256;
 
     ProblemShape problemShape_{};
     int64_t usedCoreNums_{0};

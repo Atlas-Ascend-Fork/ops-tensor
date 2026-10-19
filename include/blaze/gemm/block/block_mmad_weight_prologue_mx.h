@@ -34,7 +34,7 @@ namespace Blaze {
 namespace Gemm {
 namespace Block {
 
-#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__)
 template <class ATypeTuple_, class LayoutATuple_, class BTypeTuple_, class LayoutBTuple_, class CType_, class LayoutC_,
           class BiasType_, class LayoutBias_>
 class BlockMmad<MatmulWithWeightQuantMx, ATypeTuple_, LayoutATuple_, BTypeTuple_, LayoutBTuple_, CType_, LayoutC_,

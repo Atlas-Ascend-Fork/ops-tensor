@@ -38,12 +38,14 @@ public:
         int64_t kL1{0};
         uint8_t isHf32{0};
         uint32_t l2CacheMode = L2_CACHE_DEFAULT;
+        uint32_t windowLen = 4; // ASW滑窗长度，由tiling自适应下发
     };
 
 public:
     __aicore__ inline BlockSchedulerMatmulStreamK(const ProblemShape& shape, const Params& params)
     {
         usedCoreNums_ = params.usedCoreNum;
+        windowLen_ = params.windowLen == 0 ? 4 : params.windowLen; // 0视为未下发，回退默认4防除零
         if (usedCoreNums_ <= 0) {
             return;
         }
@@ -125,7 +127,7 @@ private:
             kBlockIdx_ = 0;
             mnIdxInCurLoop = mnkBlockIdx / curKBlockNums_;
         }
-        int64_t mainWindow = AscendC::Std::min(WINDOW_LEN, mBlockNums_);
+        int64_t mainWindow = AscendC::Std::min(windowLen_, mBlockNums_);
         int64_t mainRow = mBlockNums_ / mainWindow - 1UL;
         int64_t tailWindow = mBlockNums_ - mainRow * mainWindow;
         int64_t rowIdx = mnIdxInCurLoop / nBlockNums_ / mainWindow;
@@ -151,6 +153,7 @@ private:
     int64_t skBlockNums_{0};
     int64_t blockNums_{1};
     int64_t totalMNBlockNumsInDP_{0};
+    int64_t windowLen_{4};
 
     int64_t batch_{0};
     int64_t m_{0};

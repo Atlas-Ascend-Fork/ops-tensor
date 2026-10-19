@@ -37,6 +37,7 @@ public:
     struct Params {
         GM_ADDR cGmAddr{nullptr};
         GM_ADDR workspaceGmAddr{nullptr};
+        uint64_t windowLen = 4; // ASW滑窗长度，0视为未下发回退默认4
     };
 
     __aicore__ inline BlockEpilogueMatmulStreamK() {}
@@ -96,7 +97,8 @@ public:
     CopyUb2GmParams copyUb2GmParams_;
 
     __aicore__ inline void Init(Params const& params, BlockShape blockShapeInAiv, BlockShape tileL1ShapeInAiv,
-                                BlockCoord coordInAiv, uint64_t usedCoreNum, bool checkIsSkScene)
+                                BlockCoord coordInAiv, uint64_t usedCoreNum, bool checkIsSkScene,
+                                BlockShape tileL0Shape)
     {
         m_ = asc::te::get<Blaze::Gemm::MNK_M>(blockShapeInAiv);
         n_ = asc::te::get<Blaze::Gemm::MNK_N>(blockShapeInAiv);
@@ -106,6 +108,10 @@ public:
         nCnt_ = asc::te::get<Blaze::Gemm::MNK_N>(coordInAiv);
         kCnt_ = asc::te::get<Blaze::Gemm::MNK_K>(coordInAiv);
         bCnt_ = asc::te::get<Blaze::Gemm::MNK_B>(coordInAiv);
+        baseM_ = asc::te::get<Blaze::Gemm::MNK_M>(tileL0Shape);
+        baseN_ = asc::te::get<Blaze::Gemm::MNK_N>(tileL0Shape);
+        alignBaseN_ = Blaze::Gemm::CeilAlign(baseN_, Blaze::Gemm::BLOCK_BYTE_SIZE);
+        windowLen_ = params.windowLen == 0 ? 4 : params.windowLen; // 0视为未下发，回退默认4，与scheduler约定一致
         usedCoreNum_ = usedCoreNum;
         // Decrease tile size of per vector core to prevent data race of cube and vector
         aivMte2Num_ = checkIsSkScene ? AscendC::GetTaskRation() : AscendC::BLOCK_CUBE;
@@ -190,7 +196,7 @@ public:
         aivParams_.indexParams = newBlockIdx;
         uint64_t cGmIndex = (aivParams_.indexParams + (bCnt_ * mCnt_ * nCnt_ - bCnt_ * mCnt_ * nCnt_ % usedCoreNum_)) %
                             (mCnt_ * nCnt_);
-        uint64_t mainWindow = AscendC::Std::min(MAIN_WINDOW, mCnt_);
+        uint64_t mainWindow = AscendC::Std::min(windowLen_, mCnt_);
         uint64_t mainRow = mCnt_ / mainWindow - 1UL;
         uint64_t tailWindow = mCnt_ - mainRow * mainWindow;
         uint64_t rowIdx = cGmIndex / nCnt_ / mainWindow;
@@ -239,7 +245,7 @@ public:
         copyGm2UbParams_.kCnt = kCnt_;
         copyGm2UbParams_.mBurst = Blaze::Gemm::CeilDiv(copyGm2UbParams_.mBurstOri, aivMte2Num_);
         // Calculate init address of workspace for moving into UB.
-        copyGm2UbParams_.offsetWorkspaceGM = (aivParams_.indexParams) * kCnt_ * BLOCK_BASE_M * BLOCK_BASE_N +
+        copyGm2UbParams_.offsetWorkspaceGM = (aivParams_.indexParams) * kCnt_ * baseM_ * alignBaseN_ +
                                              (aivParams_.kCntIndex * mBurstBase_ + copyGm2UbParams_.mBurst * index) *
                                                  aivParams_.curAlignedNInAiv;
         // Calculate init address of GM for moving out to GM.
@@ -256,7 +262,7 @@ public:
         copyGm2UbParams_.burstLen = Blaze::Gemm::CeilAlign(copyGm2UbParams_.mBurst * aivParams_.curAlignedNInAiv,
                                                            Blaze::Gemm::BLOCK_BYTE_SIZE);
         // gap of src between cur burst and next burst
-        copyGm2UbParams_.srcGap = BLOCK_BASE_M * BLOCK_BASE_N - copyGm2UbParams_.burstLen;
+        copyGm2UbParams_.srcGap = baseM_ * alignBaseN_ - copyGm2UbParams_.burstLen;
 
         // args for ub2gm
         copyUb2GmParams_.mLength = copyGm2UbParams_.mBurst;
@@ -268,10 +274,11 @@ public:
     __aicore__ inline void operator()() { Run(); }
 
 private:
-    static constexpr uint64_t BLOCK_BASE_M = 256UL;
-    static constexpr uint64_t BLOCK_BASE_N = 256UL;
+    uint64_t baseM_ = 0;
+    uint64_t baseN_ = 0;
+    uint64_t alignBaseN_ = 0;
+    uint64_t windowLen_ = 4;
     static constexpr uint64_t NUM_TWO = 2UL;
-    static constexpr uint64_t MAIN_WINDOW = 4UL;
     static constexpr uint64_t UB2GM_SRCGAP_UNIT = 32UL;
 };
 } // namespace Block

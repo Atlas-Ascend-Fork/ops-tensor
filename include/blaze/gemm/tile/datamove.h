@@ -14,7 +14,7 @@
  */
 #pragma once
 
-#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__)
 #include "blaze/gemm/tile/arch35/copy_gm_to_l1.h"
 #include "blaze/gemm/tile/arch35/copy_gm_to_ub.h"
 #include "blaze/gemm/tile/arch35/copy_ub_to_l1.h"
