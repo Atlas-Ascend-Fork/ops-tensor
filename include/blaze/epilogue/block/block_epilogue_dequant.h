@@ -52,7 +52,7 @@ public:
     static constexpr uint32_t FLOAT_ALIGN = DATA_BLOCK / sizeof(float);
     static constexpr uint32_t L0C_ALIGN = DATA_BLOCK / sizeof(L0CType);
     static constexpr uint32_t OUT_ALIGN = DATA_BLOCK / sizeof(OutType);
-    static constexpr uint32_t CV_RATIO = 2;
+    static constexpr uint32_t CV_RATIO = Blaze::Gemm::MIX_CV_RATIO;
     static constexpr uint32_t FP32_OUTPUT_TIMES = IsSameType<OutType, float>::value ? 4 : 2;
     static constexpr uint16_t BIAS_EVENT_ID = 2U;
 

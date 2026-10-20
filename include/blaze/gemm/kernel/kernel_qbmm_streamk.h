@@ -90,13 +90,15 @@ private:
     using BType = typename BlockMmadOp::BType;
     using CType = typename BlockMmadOp::CType;
     using BiasType = typename BlockMmadOp::BiasType;
+    using ScaleType = MxScaleType<AType>;
     using LayoutA = typename BlockMmadOp::LayoutA;
     using LayoutB = typename BlockMmadOp::LayoutB;
     using LayoutC = typename BlockMmadOp::LayoutC;
 
-    static_assert(
-        (IsFp8<AType>() && IsFp8<BType>()) || (IsFp4<AType>() && IsFp4<BType>()),
-        "QBMM MX StreamK: AType/BType must each be fp8_e4m3fn_t/fp8_e5m2_t, or each be fp4x2_e2m1_t/fp4x2_e1m2_t.");
+    static_assert((IsFp8<AType>() && IsFp8<BType>()) || (IsFp4<AType>() && IsFp4<BType>()) ||
+                      (IsHif4<AType>() && IsHif4<BType>()),
+                  "QBMM MX StreamK: AType/BType must each be fp8_e4m3fn_t/fp8_e5m2_t, or each be "
+                  "fp4x2_e2m1_t/fp4x2_e1m2_t/hifloat4x2_t.");
     static_assert(AscendC::Std::is_one_of_v<CType, half, bfloat16_t, float>,
                   "QBMM MX StreamK: BlockMmad::CType must be half/bfloat16_t/float.");
     static_assert(AscendC::Std::is_same_v<typename BlockEpilogue::OutType, CType>,
@@ -115,16 +117,17 @@ private:
 
     static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
+    static constexpr bool IS_HIF4 = IsHif4<AType>();
     static constexpr int32_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
     using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE>>;
     using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE>>;
     using MakeLayoutC = asc::te::frame_layout_format<LayoutC, AscendC::Std::Int<asc::te::c0_element<CType>>>;
     using MakeLayoutScaleA = AscendC::Std::conditional_t<
-        TRANS_A, asc::te::frame_layout_format<asc::te::scalea_dn_layout_ptn, AscendC::Std::Int<SCALE_C0>>,
-        asc::te::frame_layout_format<asc::te::scalea_nd_layout_ptn, AscendC::Std::Int<SCALE_C0>>>;
+        TRANS_A, asc::te::frame_layout_format<asc::te::scalea_dn_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>,
+        asc::te::frame_layout_format<asc::te::scalea_nd_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>>;
     using MakeLayoutScaleB = AscendC::Std::conditional_t<
-        TRANS_B, asc::te::frame_layout_format<asc::te::scaleb_dn_layout_ptn, AscendC::Std::Int<SCALE_C0>>,
-        asc::te::frame_layout_format<asc::te::scaleb_nd_layout_ptn, AscendC::Std::Int<SCALE_C0>>>;
+        TRANS_B, asc::te::frame_layout_format<asc::te::scaleb_dn_layout_ptn, AscendC::Std::Int<GetScaleC0<BType>()>>,
+        asc::te::frame_layout_format<asc::te::scaleb_nd_layout_ptn, AscendC::Std::Int<GetScaleC0<BType>()>>>;
 
     __aicore__ inline void Init(Params const& params)
     {
@@ -143,8 +146,8 @@ private:
         aGmAddr_ = reinterpret_cast<__gm__ AType*>(blockMmadParams_.aGmAddr);
         bGmAddr_ = reinterpret_cast<__gm__ BType*>(blockMmadParams_.bGmAddr);
         cGmAddr_ = reinterpret_cast<__gm__ CType*>(blockMmadParams_.cGmAddr);
-        scaleAGmAddr_ = reinterpret_cast<__gm__ fp8_e8m0_t*>(blockMmadParams_.scaleAGmAddr);
-        scaleBGmAddr_ = reinterpret_cast<__gm__ fp8_e8m0_t*>(blockMmadParams_.scaleBGmAddr);
+        scaleAGmAddr_ = reinterpret_cast<__gm__ ScaleType*>(blockMmadParams_.scaleAGmAddr);
+        scaleBGmAddr_ = reinterpret_cast<__gm__ ScaleType*>(blockMmadParams_.scaleBGmAddr);
         workspaceGmAddr_ = reinterpret_cast<__gm__ float*>(params.epilogueParams.workspaceGmAddr);
         biasGmAddr_ = reinterpret_cast<__gm__ BiasType*>(blockMmadParams_.biasGmAddr);
     }
@@ -227,23 +230,28 @@ private:
                                    asc::te::get<MNK_K>(singleCoreCoord)) *
                                   params.schParams.baseM * alignedBaseN;
         auto gmWorkSpace = MakeWorkspaceTensor(singleCoreShape, offsetWorkspace);
-        auto scaleKL1LenSingleCore = CeilDiv(kSingleCore, static_cast<int64_t>(MXFP_DIVISOR_SIZE)) *
-                                     MXFP_MULTI_BASE_SIZE;
+        auto scaleKL1LenSingleCore = static_cast<int64_t>(MxScaleKLen<AType>(static_cast<uint64_t>(kSingleCore)));
+        int64_t scaleAPos = asc::te::get<MNK_M>(singleCoreCoord) * mL1;
+        if constexpr (IS_HIF4 && TRANS_A) {
+            scaleAPos = scaleAPos >> 1;
+        }
+        int64_t scaleBPos = asc::te::get<MNK_N>(singleCoreCoord) * nL1;
+        if constexpr (IS_HIF4 && !TRANS_B) {
+            scaleBPos = scaleBPos >> 1;
+        }
         auto gmBlockA = gmA.slice(
             asc::te::make_coord(asc::te::get<MNK_M>(singleCoreCoord) * mL1,
                                 asc::te::get<MNK_K>(singleCoreCoord) * kSingleCore),
             asc::te::make_shape(asc::te::get<MNK_M>(singleCoreShape), asc::te::get<MNK_K>(singleCoreShape)));
         auto gmBlockScaleA = gmScaleA.slice(
-            asc::te::make_coord(asc::te::get<MNK_M>(singleCoreCoord) * mL1,
-                                asc::te::get<MNK_K>(singleCoreCoord) * scaleKL1LenSingleCore),
+            asc::te::make_coord(scaleAPos, asc::te::get<MNK_K>(singleCoreCoord) * scaleKL1LenSingleCore),
             asc::te::make_shape(asc::te::get<MNK_M>(singleCoreShape), scaleKL1LenSingleCore));
         auto gmBlockB = gmB.slice(
             asc::te::make_coord(asc::te::get<MNK_K>(singleCoreCoord) * kSingleCore,
                                 asc::te::get<MNK_N>(singleCoreCoord) * nL1),
             asc::te::make_shape(asc::te::get<MNK_K>(singleCoreShape), asc::te::get<MNK_N>(singleCoreShape)));
         auto gmBlockScaleB = gmScaleB.slice(
-            asc::te::make_coord(asc::te::get<MNK_K>(singleCoreCoord) * scaleKL1LenSingleCore,
-                                asc::te::get<MNK_N>(singleCoreCoord) * nL1),
+            asc::te::make_coord(asc::te::get<MNK_K>(singleCoreCoord) * scaleKL1LenSingleCore, scaleBPos),
             asc::te::make_shape(scaleKL1LenSingleCore, asc::te::get<MNK_N>(singleCoreShape)));
         auto gmBlockBias = gmBias.slice(asc::te::make_coord(0L, asc::te::get<MNK_N>(singleCoreCoord) * nL1),
                                         asc::te::make_shape(1L, asc::te::get<MNK_N>(singleCoreShape)));
@@ -270,7 +278,7 @@ private:
         int64_t mnBlockNums = mBlockNums_ * nBlockNums_;
         int64_t tailSKTotalBlockNums = static_cast<int64_t>((mnBlockNums % usedCoreNums_) * skBlockNums_);
         int64_t blockNums = bs.GetBlockNums();
-        auto scaleKLen = CeilDiv(k, static_cast<int64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
+        auto scaleKLen = MxScaleKLen<AType>(k);
         auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aGmAddr_), MakeLayoutA{}(m, k));
         auto gmScaleA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(scaleAGmAddr_),
                                              MakeLayoutScaleA{}(m, scaleKLen));
@@ -336,8 +344,8 @@ private:
     __gm__ BType* bGmAddr_{nullptr};
     __gm__ CType* cGmAddr_{nullptr};
     __gm__ BiasType* biasGmAddr_{nullptr};
-    __gm__ fp8_e8m0_t* scaleAGmAddr_{nullptr};
-    __gm__ fp8_e8m0_t* scaleBGmAddr_{nullptr};
+    __gm__ ScaleType* scaleAGmAddr_{nullptr};
+    __gm__ ScaleType* scaleBGmAddr_{nullptr};
     __gm__ float* workspaceGmAddr_{nullptr};
 };
 

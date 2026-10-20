@@ -203,7 +203,8 @@ private:
         BlockShape singleCoreCoord = bs.GetBlockCoord(blockIdx);
         bool isSkBlock = bs.CheckIsSkScene(blockIdx);
         int64_t kSingleCore = isSkBlock ? params.schParams.singleCoreK : k_;
-        int64_t alignedBaseN = Blaze::Gemm::CeilAlign(params.schParams.baseN, static_cast<int64_t>(BLOCK_BYTE_SIZE));
+        int64_t alignedBaseN = Blaze::Gemm::CeilAlign(
+            params.schParams.baseN, static_cast<int64_t>(AscendC::GetVecLen() / sizeof(WorkspaceType)));
         int64_t offsetWorkspace = (isSkBlock ? (blockIdx - totalMNBlockNumsInDP) : 0) * params.schParams.baseM *
                                   alignedBaseN;
         auto gmWorkSpace = MakeWorkspaceTensor(singleCoreShape, offsetWorkspace);

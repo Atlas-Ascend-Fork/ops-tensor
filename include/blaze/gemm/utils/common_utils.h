@@ -88,6 +88,9 @@ constexpr uint16_t ALIGN_32_BYTES_SHIFT = 5;
 constexpr uint16_t MXFP_DIVISOR_SHIFT = 6;
 constexpr uint16_t MXFP_MULTI_BASE_SHIFT = 1;
 constexpr uint64_t SCALE_C0 = 2UL;
+constexpr uint64_t HIF4_SCALE_C0 = 1UL;
+constexpr uint64_t SCALE_DIVISOR = 16UL;
+constexpr uint64_t HIF4_SCALE_DIVISOR = 8UL;
 constexpr uint64_t SCALE_BUFFER_NUM = 2UL;
 
 // FusedMatMul OpType
@@ -126,6 +129,12 @@ constexpr uint16_t MIX_AIC_SYNC_AIV_FLAG = 0;
 constexpr uint16_t MIX_AIV_SYNC_AIC_FLAG = 1;
 constexpr uint16_t MIX_FLAG_ID_MAX = 16;
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
+constexpr uint32_t MIX_CV_RATIO = 1U;
+#else
+constexpr uint32_t MIX_CV_RATIO = 2U;
+#endif
+
 // (kernel_qbmm_mx_activation_quant.h).
 constexpr int64_t BLOCK_SIZE = 32;
 constexpr int64_t ALIGN_NUM_2 = 2;
@@ -157,15 +166,37 @@ template <typename... Tp>
 constexpr bool always_false_v = always_false<Tp...>::value;
 
 template <typename T>
+__aicore__ inline constexpr bool IsHif4()
+{
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+    return AscendC::IsSameType<T, hifloat4x2_t>::value;
+#else
+    return false;
+#endif
+}
+
+template <typename T>
 __aicore__ inline constexpr bool IsFp4()
 {
-    return AscendC::IsSameType<T, fp4x2_e2m1_t>::value || AscendC::IsSameType<T, fp4x2_e1m2_t>::value;
+    return AscendC::IsSameType<T, fp4x2_e2m1_t>::value || AscendC::IsSameType<T, fp4x2_e1m2_t>::value || IsHif4<T>();
 }
+
+template <typename T>
+using MxScaleType = typename AscendC::Std::conditional_t<IsHif4<T>(), AscendC::hif4_scale, AscendC::fp8_e8m0_t>;
 
 template <typename T>
 __aicore__ inline constexpr bool IsFp8()
 {
     return AscendC::IsSameType<T, fp8_e4m3fn_t>::value || AscendC::IsSameType<T, fp8_e5m2_t>::value;
+}
+
+template <typename T>
+__aicore__ inline constexpr uint64_t GetScaleC0()
+{
+    if constexpr (IsHif4<T>()) {
+        return HIF4_SCALE_C0;
+    }
+    return SCALE_C0;
 }
 
 template <typename T>
@@ -202,6 +233,33 @@ template <typename T>
 __aicore__ inline T Min(T a, T b)
 {
     return a > b ? b : a;
+}
+
+template <typename T>
+__aicore__ inline constexpr uint64_t MxScaleKLen(uint64_t k)
+{
+    if constexpr (IsHif4<T>()) {
+        return CeilDiv(k, static_cast<uint64_t>(64));
+    }
+    return (Align64(k) >> ALIGN_64_BYTES_SHIFT) * MXFP_MULTI_BASE_SIZE;
+}
+
+template <typename T>
+__aicore__ inline constexpr uint64_t MxScaleKE8m0Len(uint64_t k)
+{
+    if constexpr (IsHif4<T>()) {
+        return MxScaleKLen<T>(k) * 4UL;
+    }
+    return MxScaleKLen<T>(k);
+}
+
+template <typename T>
+__aicore__ inline constexpr uint64_t GetScaleDivisor()
+{
+    if constexpr (IsHif4<T>()) {
+        return HIF4_SCALE_DIVISOR;
+    }
+    return SCALE_DIVISOR;
 }
 
 __aicore__ inline int64_t GetPerBlockNum(int64_t coreNum, int64_t mTileNum, int64_t nTileNum, int64_t b = 1)

@@ -142,7 +142,8 @@ public:
         kCnt_ = asc::te::get<Blaze::Gemm::MNK_K>(coordInAiv);
         baseM_ = asc::te::get<Blaze::Gemm::MNK_M>(tileL0Shape);
         baseN_ = asc::te::get<Blaze::Gemm::MNK_N>(tileL0Shape);
-        alignBaseN_ = Blaze::Gemm::CeilAlign(baseN_, Blaze::Gemm::BLOCK_BYTE_SIZE);
+        alignBaseN_ = Blaze::Gemm::CeilAlign(baseN_,
+                                             static_cast<uint64_t>(AscendC::GetVecLen() / sizeof(WorkspaceType)));
         windowLen_ = params.windowLen == 0 ? 4 : params.windowLen; // 0视为未下发，回退默认4，与scheduler约定一致
         usedCoreNum_ = usedCoreNum;
         cGmAddr_ = params.cGmAddr;

@@ -28,6 +28,7 @@
 #include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {
@@ -162,13 +163,18 @@ public:
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using BlockCoord = asc::te::coord<int64_t, int64_t, int64_t, int64_t>;
     using BlockSchedulerParams = typename BlockScheduler::Params;
+    using ScaleAType = MxScaleType<AType>;
+    using ScaleBType = MxScaleType<BType>;
 
-    static_assert(AscendC::Std::is_one_of_v<AscendC::Std::tuple<AType, BType, CType>,
-                                            AscendC::Std::tuple<fp8_e4m3fn_t, fp8_e4m3fn_t, bfloat16_t>,
-                                            AscendC::Std::tuple<fp8_e4m3fn_t, fp8_e4m3fn_t, half>,
-                                            AscendC::Std::tuple<fp4x2_e2m1_t, fp4x2_e2m1_t, bfloat16_t>,
-                                            AscendC::Std::tuple<fp4x2_e2m1_t, fp4x2_e2m1_t, half>>,
+    static constexpr bool IS_HIF4_TYPE = IsHif4<AType>() && IsHif4<BType>();
+    static_assert(IS_HIF4_TYPE || AscendC::Std::is_one_of_v<AscendC::Std::tuple<AType, BType, CType>,
+                                                            AscendC::Std::tuple<fp8_e4m3fn_t, fp8_e4m3fn_t, bfloat16_t>,
+                                                            AscendC::Std::tuple<fp8_e4m3fn_t, fp8_e4m3fn_t, half>,
+                                                            AscendC::Std::tuple<fp4x2_e2m1_t, fp4x2_e2m1_t, bfloat16_t>,
+                                                            AscendC::Std::tuple<fp4x2_e2m1_t, fp4x2_e2m1_t, half>>,
                   "Unsupported (AType, BType, CType, BiasType) combination");
+    static_assert(!IS_HIF4_TYPE || AscendC::Std::is_one_of_v<CType, bfloat16_t, half>,
+                  "HIF4 only supports bfloat16/float16 output");
     static_assert(!AscendC::Std::is_one_of_v<LayoutA, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn> &&
                       !AscendC::Std::is_one_of_v<LayoutC, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn>,
                   "LayoutA and LayoutC cannot be NZLayoutPtn or ZNLayoutPtn");
@@ -229,9 +235,8 @@ public:
 
         const uint64_t scaleABatchStride = isPermX1_ ? scaleKLen_ : m_ * scaleKLen_;
         const uint64_t scaleAMStride = isPermX1_ ? batch_ * scaleKLen_ : scaleKLen_;
-        auto layoutScaleA = TqbmmDetail::MakeBatchLayout<ScaleALayoutPtn, AscendC::fp8_e8m0_t,
-                                                         AscendC::Std::Int<SCALE_C0>>(batch_, m_, scaleKLen_,
-                                                                                      scaleABatchStride, scaleAMStride);
+        auto layoutScaleA = TqbmmDetail::MakeBatchLayout<ScaleALayoutPtn, ScaleAType, AscendC::Std::Int<SCALE_C0>>(
+            batch_, m_, scaleKLen_, scaleABatchStride, scaleAMStride);
         auto layoutScaleB = MakeLayoutScaleB{}(batch_, scaleKLen_, n_);
         auto layoutBias = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1L, static_cast<int64_t>(n_));
 
@@ -276,8 +281,12 @@ public:
                                     asc::te::make_shape(1L, asc::te::make_shape(static_cast<int64_t>(k_), task.baseN)));
         auto gmBlockB = asc::te::squeeze<0>(subTensorB);
 
+        int64_t scaleBPos = task.nPos;
+        if constexpr (IS_HIF4_TYPE && !TRANS_B) {
+            scaleBPos = scaleBPos >> 1;
+        }
         auto subScaleB = gmScaleB.slice(
-            asc::te::make_coord(task.batchIdx, asc::te::make_coord(kPos, task.nPos)),
+            asc::te::make_coord(task.batchIdx, asc::te::make_coord(kPos, scaleBPos)),
             asc::te::make_shape(1L, asc::te::make_shape(static_cast<int64_t>(scaleKLen_), task.baseN)));
         auto gmBlockScaleB = asc::te::squeeze<0>(subScaleB);
 
@@ -295,6 +304,7 @@ private:
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool IS_ATOMIC_ADD = BlockMmad::DispatchPolicy::IS_ATOMIC_ADD;
     static constexpr int64_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
+    static constexpr uint64_t SCALE_C0 = GetScaleC0<AType>();
 
     using ScaleALayoutPtn = asc::te::scalea_nd_layout_ptn;
     using MakeLayoutScaleB = AscendC::Std::conditional_t<
@@ -311,20 +321,20 @@ private:
         isBias_ = false;
         isPermX1_ = TqbmmDetail::IsPermX1<BlockMmad>();
         bMustHitL2_ = params.tqbmmParams.bMustHitL2;
-        scaleKLen_ = Blaze::Gemm::CeilDiv(k_, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
+        scaleKLen_ = MxScaleKLen<AType>(k_);
         aGmAddr_ = reinterpret_cast<__gm__ AType*>(params.mmadParams.aGmAddr);
         bGmAddr_ = reinterpret_cast<__gm__ BType*>(params.mmadParams.bGmAddr);
         cGmAddr_ = reinterpret_cast<__gm__ CType*>(params.mmadParams.cGmAddr);
-        scaleAGmAddr_ = reinterpret_cast<__gm__ AscendC::fp8_e8m0_t*>(params.mmadParams.scaleAGmAddr);
-        scaleBGmAddr_ = reinterpret_cast<__gm__ AscendC::fp8_e8m0_t*>(params.mmadParams.scaleBGmAddr);
+        scaleAGmAddr_ = reinterpret_cast<__gm__ ScaleAType*>(params.mmadParams.scaleAGmAddr);
+        scaleBGmAddr_ = reinterpret_cast<__gm__ ScaleBType*>(params.mmadParams.scaleBGmAddr);
     }
 
     __gm__ AType* aGmAddr_;
     __gm__ BType* bGmAddr_;
     __gm__ CType* cGmAddr_;
     __gm__ BiasType* biasGmAddr_ = nullptr;
-    __gm__ AscendC::fp8_e8m0_t* scaleAGmAddr_;
-    __gm__ AscendC::fp8_e8m0_t* scaleBGmAddr_;
+    __gm__ ScaleAType* scaleAGmAddr_;
+    __gm__ ScaleBType* scaleBGmAddr_;
 
     BlockMmad mmadOp_;
     uint64_t m_{1};
@@ -653,7 +663,7 @@ public:
 
         if ASCEND_IS_AIC {
             if (!isFirstBlock_) {
-                WaitForVector();
+                Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
             }
         }
     }
@@ -693,7 +703,7 @@ private:
         constexpr int64_t l0cUbBaseOffset = 0;
         if ASCEND_IS_AIC {
             if (!isFirstBlock_) {
-                WaitForVector();
+                Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
             }
             constexpr int64_t l0cAlign = BLOCK_BYTE_SIZE / sizeof(L0CType);
             const int64_t curNAligned = Blaze::Gemm::CeilAlign(curN, l0cAlign);
@@ -702,18 +712,18 @@ private:
             auto ubC = asc::te::make_tensor(
                 asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(l0cUbBaseOffset * sizeof(L0CType)), layoutUbC);
             mmadOp_(gmA, gmB, ubC, singleShape);
-            NotifyVector();
+            Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
             isFirstBlock_ = false;
         }
         if ASCEND_IS_AIV {
-            WaitForCube();
+            Sync::WaitForCube();
             int64_t offsetScale = nPos;
             int64_t offsetPtScale = mPos;
             int64_t offsetBias = nPos;
             int64_t offsetC = mPos * static_cast<int64_t>(batch_) * static_cast<int64_t>(n_) +
                               static_cast<int64_t>(batchIdx) * static_cast<int64_t>(n_) + nPos;
             epilogueOp_(curM, curN, offsetScale, offsetPtScale, offsetBias, offsetC, l0cUbBaseOffset);
-            NotifyCube();
+            Sync::NotifyCube();
         }
     }
 

@@ -174,7 +174,7 @@ public:
             IterateBL1AL1(gmA, gmB, mmadParams, c1Local, curML1, curNL1);
         }
 
-        auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Blaze::Gemm::Tile::CopyL0C2UBTraitMixSplitM{});
+        auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Blaze::Gemm::Tile::CopyL0C2UBTraitMix{});
         asc::te::copy(copyL0C2UB.with(asc::te::l0c_to_ub_params(asc::te::unit_flag_mode::enable_update)), ubC, c1Local);
 
         if (hasIntegerBias_) {

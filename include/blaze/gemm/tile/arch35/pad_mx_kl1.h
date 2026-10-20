@@ -35,7 +35,11 @@ struct PadMxKL1Base {
     template <typename type>
     __aicore__ inline static constexpr bool IsMxFp4()
     {
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+        return AscendC::Std::is_one_of_v<type, __cbuf__ fp4x2_e1m2_t, __cbuf__ fp4x2_e2m1_t, __cbuf__ hifloat4x2_t>;
+#else
         return AscendC::Std::is_one_of_v<type, __cbuf__ fp4x2_e1m2_t, __cbuf__ fp4x2_e2m1_t>;
+#endif
     }
 
     template <typename type>
