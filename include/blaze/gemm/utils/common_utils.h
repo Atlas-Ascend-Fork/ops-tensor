@@ -181,8 +181,13 @@ __aicore__ inline constexpr bool IsFp4()
     return AscendC::IsSameType<T, fp4x2_e2m1_t>::value || AscendC::IsSameType<T, fp4x2_e1m2_t>::value || IsHif4<T>();
 }
 
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
 template <typename T>
 using MxScaleType = typename AscendC::Std::conditional_t<IsHif4<T>(), AscendC::hif4_scale, AscendC::fp8_e8m0_t>;
+#else
+template <typename T>
+using MxScaleType = AscendC::fp8_e8m0_t;
+#endif
 
 template <typename T>
 __aicore__ inline constexpr bool IsFp8()
@@ -200,7 +205,7 @@ __aicore__ inline constexpr uint64_t GetScaleC0()
 }
 
 template <typename T>
-__aicore__ inline T CeilDiv(T a, T b)
+__aicore__ inline constexpr T CeilDiv(T a, T b)
 {
     if (b == 0) {
         return a;
@@ -217,7 +222,7 @@ __aicore__ inline T CeilAlign(T a, T b)
     return (a + b - 1) / b * b;
 }
 
-__aicore__ inline uint64_t Align64(uint64_t x) { return (x + ALIGN_MASK_64) & ~ALIGN_MASK_64; }
+__aicore__ inline constexpr uint64_t Align64(uint64_t x) { return (x + ALIGN_MASK_64) & ~ALIGN_MASK_64; }
 
 __aicore__ inline uint64_t Align32(uint64_t x) { return (x + ALIGN_MASK_32) & ~ALIGN_MASK_32; }
 
