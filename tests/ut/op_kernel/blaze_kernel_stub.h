@@ -53,16 +53,19 @@ inline void copy_gm_to_cbuf_v2(void* dst, void* src, uint8_t sid, uint32_t n_bur
 {}
 #endif
 
-// ============================================================================
-// HIF4 (Ascend960) 缺失符号占位
-// ============================================================================
-
+#ifndef ASCENDC_HIF4_H
 // hifloat4x2_t 占位类型（真实类型见 960 工具链 bisheng __clang_cce_types.h / tikicpulib kernel_hif4.h）
 struct hifloat4x2_t {};
+#endif
 
+// AscendC::hif4_scale 仅在 Ascend960 (__NPU_ARCH__ 9201/9202) 的 HIF4 路径被引用
+// （见 common_utils.h 的 MxScaleType）；CANN 9.2.0+ 的 kernel_utils_constants.h 已提供
+// 真实定义，无条件占位会与其冲突，故仅 960 HIF4 路径需要占位
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
 namespace AscendC {
 
 // AscendC::hif4_scale 占位类型（真实定义见 960 tensor_api），HIF4 关闭时不会被选用
 struct hif4_scale {};
 
 } // namespace AscendC
+#endif

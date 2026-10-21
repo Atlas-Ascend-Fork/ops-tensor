@@ -68,6 +68,26 @@ list(APPEND CMAKE_PREFIX_PATH
 
 find_package(tikicpulib REQUIRED)
 
+option(KERNEL_UT_TENSOR_API_DEBUG_CHECK "Enable tensor_api CPU-sim strict checks (ASCENDC_DEBUG)" OFF)
+if(NOT KERNEL_UT_TENSOR_API_DEBUG_CHECK)
+    set(_TIKICPULIB_SOC_TARGETS
+        tikicpulib_ascend950pr_9599
+        tikicpulib_ascend960DT_96887)
+    foreach(_t IN LISTS _TIKICPULIB_SOC_TARGETS)
+        if(TARGET ${_t})
+            get_target_property(_defs ${_t} INTERFACE_COMPILE_DEFINITIONS)
+            if(_defs)
+                string(REPLACE "ASCENDC_DEBUG=1;" "" _defs "${_defs}")
+                string(REPLACE ";ASCENDC_DEBUG=1" "" _defs "${_defs}")
+                string(REPLACE "ASCENDC_DEBUG=1" "" _defs "${_defs}")
+                set_target_properties(${_t} PROPERTIES INTERFACE_COMPILE_DEFINITIONS "${_defs}")
+            endif()
+        endif()
+    endforeach()
+    unset(_defs)
+    unset(_t)
+endif()
+
 # gcov 覆盖率 INTERFACE 库
 if(ENABLE_GCOV)
     add_library(kernel_ut_gcov INTERFACE)
