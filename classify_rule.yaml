@@ -43,6 +43,7 @@ matmul@ops-tensor:
         - ops/ops-tensor/include/blaze/gemm/kernel/kernel_matmul_streamk.h
         - ops/ops-tensor/include/blaze/gemm/kernel/kernel_grouped_matmul.h
         - ops/ops-tensor/include/blaze/gemm/kernel/kernel_tbmm_basic.h
+        - ops/ops-tensor/include/blaze/gemm/kernel/kernel_tqbmm.h
         - ops/ops-tensor/include/blaze/gemm/kernel/kernel_universal.h
         - ops/ops-tensor/include/blaze/gemm/policy/
         - ops/ops-tensor/include/blaze/gemm/tile/
@@ -79,7 +80,6 @@ matmul-quant@ops-tensor:
         - ops/ops-tensor/include/blaze/gemm/kernel/kernel_qbmm_mx_without_batch.h
         - ops/ops-tensor/include/blaze/gemm/kernel/kernel_qbmm_pertensor_streamk.h
         - ops/ops-tensor/include/blaze/gemm/kernel/kernel_qbmm_streamk.h
-        - ops/ops-tensor/include/blaze/gemm/kernel/kernel_tqbmm.h
       opensource_style: null
       kernel_style: null
     unrelease:
