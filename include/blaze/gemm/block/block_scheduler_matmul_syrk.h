@@ -112,7 +112,20 @@ private:
             return;
         }
         lastSlot_ = blockIdx;
-        const int64_t slot = batch_ > 1 ? blockIdx % slotsPerBatch_ : blockIdx;
+        // Anti-orbit-collapse: rotate the within-batch slot order by the batch
+        // index. When blockDim is a multiple of slotsPerBatch_ the plain
+        // "slot = blockIdx % slotsPerBatch_" locks every core onto ONE fixed
+        // (i, j) position for all batches (observed with blockDim ==
+        // slotsPerBatch_ == 28): each core then repeats an identical
+        // lock/flag operation sequence for the whole kernel, which wedges the
+        // on-core sync semaphores (MTE1 L1->L0 copy stops retiring on the 7
+        // diagonal-position cores, AIV vector op stalls 7 slots later). The
+        // per-batch rotation keeps the slot map a bijection, preserves the
+        // snake adjacency inside a batch, and spreads the diagonal slots
+        // across all cores; a constant orbit now requires slotsPerBatch_^2 to
+        // divide blockDim, which cannot happen for realistic core counts.
+        const int64_t batchIdx = batch_ > 1 ? blockIdx / slotsPerBatch_ : 0;
+        const int64_t slot = batch_ > 1 ? (blockIdx + batchIdx) % slotsPerBatch_ : blockIdx;
         int64_t low = 0;
         int64_t high = effRows_ - 1;
         while (low < high) {

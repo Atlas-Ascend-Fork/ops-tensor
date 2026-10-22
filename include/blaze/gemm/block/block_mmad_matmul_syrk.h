@@ -281,8 +281,7 @@ private:
     __aicore__ inline void CopyOutFromL0C2UB(TensorUB& tensorC, TensorL0C& tensorL0C, uint64_t tileN, uint64_t curM,
                                              bool isDiagonal)
     {
-        asc::te::l0c_to_ub_params fixpParams{
-            isDiagonal ? asc::te::unit_flag_mode::enable_update : asc::te::unit_flag_mode::enable_keep, 0};
+        asc::te::l0c_to_ub_params fixpParams{asc::te::unit_flag_mode::enable_keep, 0};
         uint64_t tileNAlign = Blaze::Gemm::CeilAlign(tileN, static_cast<uint64_t>(asc::te::c0_element<CType>));
         auto layoutUB = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(curM, tileNAlign);
         auto ubTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub>(tensorC.data().get()),
@@ -290,10 +289,6 @@ private:
         auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{});
         Gemm::LockFix(L0C_BUFFER_ID_BASE);
         asc::te::copy(copyL0C2UB.with(fixpParams), ubTensor, tensorL0C);
-        if (isDiagonal) {
-            Gemm::UnLockFix(L0C_BUFFER_ID_BASE);
-            return;
-        }
         // L0C2UB NZ2DN: the same L0C accumulator fixpiped a second time with
         // the hardware transposed (DN-layout) destination for the (j, i)
         // mirror tile consumed by AIV sub-block 1.

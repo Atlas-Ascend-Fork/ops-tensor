@@ -176,13 +176,10 @@ private:
                 if (AscendC::GetSubBlockIdx() == 0) {
                     epilogueOp(ubTensorC, tileShape, offsetC, false, params.schParams.block, params.schParams.block,
                                staging0Base, staging0Bytes);
-                } else if (isDiagonal) {
-                    Sync::WaitForCube<MIX_SYNC_MODE, PIPE_V>(AIC_SYNC_AIV_FLAG);
-                    Sync::NotifyCube<MIX_SYNC_MODE, PIPE_MTE3>(AIV_SYNC_AIC_FLAG);
                 } else {
                     TupleShape tileShapeT{shapeN, shapeMA, shapeK, 1};
                     epilogueOp(ubTensorCT, tileShapeT, offsetCTransposed, false, params.schParams.block,
-                               params.schParams.block, staging1Base, staging1Bytes);
+                               params.schParams.block, staging1Base, staging1Bytes, isDiagonal);
                 }
             }
         }

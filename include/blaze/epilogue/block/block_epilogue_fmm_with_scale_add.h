@@ -124,7 +124,7 @@ public:
     template <typename TensorC>
     __aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShape, int64_t dstOffset, bool splitM,
                                       int64_t baseM, int64_t baseN, int64_t stagingBaseOffset = -1,
-                                      int64_t stagingBytes = -1)
+                                      int64_t stagingBytes = -1, bool isDiagonal = false)
     {
         int64_t curM = asc::te::get<Blaze::Gemm::MNK_M>(blockShape);
         if (baseM != 0) {
@@ -156,7 +156,7 @@ public:
             }
             Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG);
             ProcessTile(ubTensor, localRows, accumulatorRows, tileN, dstOffset + nIdx * curBaseN + localRowOffset * n_,
-                        stagingBaseOffset, stagingBytes);
+                        stagingBaseOffset, stagingBytes, isDiagonal);
             Gemm::Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG);
         }
     }
@@ -177,7 +177,8 @@ private:
 
     template <typename TensorC>
     __aicore__ inline void ProcessTile(TensorC& ubTensor, int64_t localRows, int64_t accumulatorRows, int64_t tileN,
-                                       int64_t tileGmOffset, int64_t stagingBaseOffset, int64_t stagingBytes)
+                                       int64_t tileGmOffset, int64_t stagingBaseOffset, int64_t stagingBytes,
+                                       bool isDiagonal = false)
     {
         if (localRows <= 0 || tileN <= 0) {
             return;
@@ -271,7 +272,9 @@ private:
                 asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(rowsThisStage, n_));
             auto outputGm = outputGmStorage.slice(origin, validShape);
             auto copyUbToGm = asc::te::make_copy(asc::te::copy_ub_to_gm{});
-            asc::te::copy(copyUbToGm, outputGm, x3Ub);
+            if (!isDiagonal) {
+                asc::te::copy(copyUbToGm, outputGm, x3Ub);
+            }
             if (betaZero_) {
                 // Release the staging region for the next vector write (no MTE2
                 // load in between, so the MTE3 -> V event carries the ordering).
