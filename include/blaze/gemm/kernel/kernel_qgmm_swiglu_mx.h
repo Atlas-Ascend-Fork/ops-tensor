@@ -69,7 +69,8 @@ public:
     using LayoutB = typename BlockMmad::LayoutB;
     using LayoutC = typename BlockMmad::LayoutC;
     using LayoutBias = typename BlockMmad::LayoutBias;
-    static_assert(IsFp8<AType>() && IsFp8<BType>(), "QGMM SwiGLU MX only supports MXFP8 AType and BType.");
+    static_assert((IsFp4<AType>() && IsFp4<BType>()) || (IsFp8<AType>() && IsFp8<BType>()),
+                  "QGMM SwiGLU MX only supports same bit-width MXFP4/MXFP8 AType and BType.");
     static_assert(AscendC::Std::is_same_v<CType, float> && AscendC::Std::is_same_v<BiasType, float>,
                   "QGMM SwiGLU MX only supports float CType and BiasType.");
     static_assert(AscendC::Std::is_same_v<LayoutA, asc::te::nd_ext_layout_ptn>,
@@ -131,7 +132,7 @@ public:
     __aicore__ inline void operator()(const Params& params) { Run(params); }
 
 private:
-    static constexpr uint64_t INPUT_C0_SIZE = Blaze::Gemm::C0_SIZE_B8;
+    static constexpr uint64_t INPUT_C0_SIZE = IsFp4<AType>() ? Blaze::Gemm::C0_SIZE_B4 : Blaze::Gemm::C0_SIZE_B8;
     using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<INPUT_C0_SIZE>>;
     using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<INPUT_C0_SIZE>>;
     using MakeLayoutScaleA = AscendC::Std::conditional_t<
@@ -342,8 +343,11 @@ private:
         auto layoutScaleB = MakeLayoutScaleB{}(groupInfo.inputScaleK, problemN);
         auto layoutBias = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(BIAS_ROW_COUNT, problemN);
 
-        auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aBasePtr_ + groupInfo.aOffset),
-                                        layoutA);
+        int64_t aOffset = groupInfo.aOffset;
+        if constexpr (IsFp4<AType>()) {
+            aOffset >>= 1;
+        }
+        auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aBasePtr_ + aOffset), layoutA);
         auto gmScaleA = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::gm>(scaleABasePtr_ + groupInfo.scaleAOffset), layoutScaleA);
         int64_t weightOffset = groupInfo.bOffset;
@@ -352,14 +356,17 @@ private:
                 // Only a single batched FRACTAL_NZ tensor needs a physical per-group stride.
                 // TensorList entries already point to each group and retain the scheduler's zero offset.
                 const uint64_t weightGroupElements = TRANS_B ?
-                                                         CeilDiv(static_cast<uint64_t>(problemK), C0_SIZE_B8) *
+                                                         CeilDiv(static_cast<uint64_t>(problemK), INPUT_C0_SIZE) *
                                                              CeilDiv(static_cast<uint64_t>(problemN), C0_SIZE_fp16) *
-                                                             C0_SIZE_fp16 * C0_SIZE_B8 :
+                                                             C0_SIZE_fp16 * INPUT_C0_SIZE :
                                                          CeilDiv(static_cast<uint64_t>(problemK), C0_SIZE_fp16) *
-                                                             CeilDiv(static_cast<uint64_t>(problemN), C0_SIZE_B8) *
-                                                             C0_SIZE_fp16 * C0_SIZE_B8;
+                                                             CeilDiv(static_cast<uint64_t>(problemN), INPUT_C0_SIZE) *
+                                                             C0_SIZE_fp16 * INPUT_C0_SIZE;
                 weightOffset = static_cast<int64_t>(groupIdx * weightGroupElements);
             }
+        }
+        if constexpr (IsFp4<BType>()) {
+            weightOffset >>= 1;
         }
         auto gmB = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::gm>(

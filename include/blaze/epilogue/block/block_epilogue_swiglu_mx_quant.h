@@ -72,14 +72,21 @@ constexpr AscendC::Reg::DivSpecificMode DIV_MODE = {
  * \tparam DataTypeOut_ Quantized output type.
  * \tparam DataTypeIn_ MMAD result type, currently float for the fused QGMM kernel.
  * \tparam DataTypeScale_ Output scale type, normally fp8_e8m0_t.
+ * \tparam DirectBf16Output_ Enables V3 A4W4 direct
+ * BF16 output. It is opt-in
+ *         so existing BF16 instantiations preserve their MX quant behavior.
  */
-template <typename DataTypeOut_, typename DataTypeIn_ = float, typename DataTypeScale_ = fp8_e8m0_t>
+template <typename DataTypeOut_, typename DataTypeIn_ = float, typename DataTypeScale_ = fp8_e8m0_t,
+          bool DirectBf16Output_ = false>
 class BlockEpilogueSwigluMxQuant {
 public:
     using DataTypeOut = DataTypeOut_;
     using DataTypeIn = DataTypeIn_;
     using DataTypeScale = DataTypeScale_;
     // Legacy APT also instantiates inactive FP4 combinations. Validate execution dtypes in the upper-layer route.
+    static constexpr bool DIRECT_BF16_OUTPUT = DirectBf16Output_;
+    static_assert(!DIRECT_BF16_OUTPUT || AscendC::IsSameType<DataTypeOut, bfloat16_t>::value,
+                  "Direct BF16 output requires bfloat16_t DataTypeOut.");
     static constexpr uint64_t INPUT_UB_TILE_ELEMENTS = Constant::MAX_SINGLE_MN;
     static constexpr uint64_t INPUT_UB_BUFFER_BYTES = INPUT_UB_TILE_ELEMENTS * sizeof(DataTypeIn);
     static constexpr uint64_t OUTPUT_C0_SIZE = asc::te::c0_element<DataTypeIn>;
@@ -102,7 +109,7 @@ public:
     /*! \brief Runtime output addresses, tile sizes, and fused-operation attributes. */
     struct Params {
         GM_ADDR yGmAddr{nullptr};      //!< Required Y address; validated by the upper layer.
-        GM_ADDR yScaleGmAddr{nullptr}; //!< Required YScale address; validated by the upper layer.
+        GM_ADDR yScaleGmAddr{nullptr}; //!< Required for MX-quantized Y; unused for direct BF16 Y.
         uint32_t baseM{0};             //!< Reserved compatibility field; not read by the current implementation.
         uint32_t baseN{0};             //!< Reserved compatibility field; not read by the current implementation.
         // Keep scaleAlg fifth for legacy five-field aggregate initialization.
@@ -182,7 +189,7 @@ private:
     const Params* params_{nullptr};
 
     // ---- GM base pointers (set via UpdateGlobalAddr) ----
-    __gm__ int8_t* quantOutputGmAddr_{nullptr};
+    __gm__ DataTypeOut* outputGmAddr_{nullptr};
     __gm__ int8_t* quantScaleGmAddr_{nullptr};
 
     // ---- UB byte offsets (set in SetupUbLayout) ----
@@ -205,8 +212,9 @@ private:
     float invDstTypeMax_{Constant::RECIPROCAL_NUMERATOR / Constant::FP8_E4M3_MAX_VALUE};
 };
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::Init(Params const& params)
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16Output_>::Init(
+    Params const& params)
 {
     if ASCEND_IS_AIC {
         return;
@@ -229,10 +237,16 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
     SetupUbLayout();
 }
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::SetupUbLayout()
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void
+BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16Output_>::SetupUbLayout()
 {
     constexpr uint32_t afterIn = Constant::SWIGLU_HALF_COUNT * Constant::MAX_SINGLE_MN * sizeof(DataTypeIn);
+    if constexpr (DIRECT_BF16_OUTPUT) {
+        gluResUbOffset_ = afterIn;
+        return;
+    }
+
     quantOutputUbOffset_ = afterIn;
     quantScaleOutputUbOffset_ = afterIn + Constant::MAX_SINGLE_MN * sizeof(int8_t);
     constexpr uint32_t afterIO = afterIn + Constant::MAX_SINGLE_MN * sizeof(int8_t) +
@@ -247,18 +261,21 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
                                      Constant::MAX_SINGLE_MN / AscendC::ONE_BLK_SIZE * sizeof(uint16_t);
 }
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::UpdateGlobalAddr(
-    const OutputOffsets& baseOffsets)
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_,
+                                                  DirectBf16Output_>::UpdateGlobalAddr(const OutputOffsets& baseOffsets)
 {
     if ASCEND_IS_AIV {
-        quantOutputGmAddr_ = reinterpret_cast<__gm__ int8_t*>(params_->yGmAddr) + baseOffsets.yOffset;
-        quantScaleGmAddr_ = reinterpret_cast<__gm__ int8_t*>(params_->yScaleGmAddr) + baseOffsets.yScaleOffset;
+        outputGmAddr_ = reinterpret_cast<__gm__ DataTypeOut*>(params_->yGmAddr) + baseOffsets.yOffset;
+        if constexpr (!DIRECT_BF16_OUTPUT) {
+            quantScaleGmAddr_ = reinterpret_cast<__gm__ int8_t*>(params_->yScaleGmAddr) + baseOffsets.yScaleOffset;
+        }
     }
 }
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::UpdateNextProblem(
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void
+BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16Output_>::UpdateNextProblem(
     const ProblemShape& problemShape)
 {
     n_ = asc::te::get<Blaze::Gemm::MNK_N>(problemShape);
@@ -266,9 +283,10 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
               Blaze::Gemm::MXFP_MULTI_BASE_SIZE;
 }
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::operator()(
-    const BlockShape& blockShape, const OutputOffsets& outputOffsets)
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_,
+                                                  DirectBf16Output_>::operator()(const BlockShape& blockShape,
+                                                                                 const OutputOffsets& outputOffsets)
 {
     if ASCEND_IS_AIC {
         return;
@@ -289,23 +307,29 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
 
     ComputeSwiglu(static_cast<uint16_t>(singleMInVec));
-    ComputeMxQuant(static_cast<uint16_t>(singleMInVec));
 
     int64_t yOffset = outputOffsets.yOffset + static_cast<int64_t>(mOffset) * n_;
-    int64_t yScaleOffset = outputOffsets.yScaleOffset + static_cast<int64_t>(mOffset) * scaleN_;
-
-    TransMxScaleLayout(static_cast<uint16_t>(singleMInVec), static_cast<uint16_t>(scaleBlockN_));
+    int64_t yScaleOffset{0};
+    if constexpr (!DIRECT_BF16_OUTPUT) {
+        ComputeMxQuant(static_cast<uint16_t>(singleMInVec));
+        yScaleOffset = outputOffsets.yScaleOffset + static_cast<int64_t>(mOffset) * scaleN_;
+        TransMxScaleLayout(static_cast<uint16_t>(singleMInVec), static_cast<uint16_t>(scaleBlockN_));
+    }
 
     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
     CopyOutputFromUb2Gm(static_cast<uint64_t>(singleMInVec), yOffset);
-    CopyScaleFromUb2Gm(static_cast<uint64_t>(singleMInVec), yScaleOffset);
+    if constexpr (!DIRECT_BF16_OUTPUT) {
+        CopyScaleFromUb2Gm(static_cast<uint64_t>(singleMInVec), yScaleOffset);
+    }
+
     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
 }
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::CopyOutputFromUb2Gm(
-    uint64_t blockCount, int64_t gmOffset)
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_,
+                                                  DirectBf16Output_>::CopyOutputFromUb2Gm(uint64_t blockCount,
+                                                                                          int64_t gmOffset)
 {
     int64_t nValid;
     int64_t nUbAligned;
@@ -317,18 +341,28 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
 
     auto ubLayout = Gemm::MakeNDExtLayout(static_cast<int64_t>(blockCount), nValid, nUbAligned);
     auto gmLayout = Gemm::MakeNDExtLayout(static_cast<int64_t>(blockCount), nValid, gmRowPitch);
-    auto outUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(quantOutputUbOffset_),
-                                      ubLayout);
-    auto outGm = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(quantOutputGmAddr_ + gmOffset),
-                                      gmLayout);
-
     auto copyUB2GM = asc::te::make_copy(asc::te::copy_ub_to_gm{});
-    asc::te::copy(copyUB2GM, outGm, outUb);
+    if constexpr (DIRECT_BF16_OUTPUT) {
+        auto outUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, DataTypeOut>(gluResUbOffset_),
+                                          ubLayout);
+        auto outGm = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(outputGmAddr_ + gmOffset),
+                                          gmLayout);
+        asc::te::copy(copyUB2GM, outGm, outUb);
+    } else {
+        // Keep the legacy MXFP8 copy type unchanged. Quantized output is stored as raw bytes.
+        auto outUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(quantOutputUbOffset_),
+                                          ubLayout);
+        auto outGm = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ int8_t*>(outputGmAddr_) + gmOffset),
+            gmLayout);
+        asc::te::copy(copyUB2GM, outGm, outUb);
+    }
 }
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::CopyScaleFromUb2Gm(
-    uint64_t blockCount, int64_t gmOffset)
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_,
+                                                  DirectBf16Output_>::CopyScaleFromUb2Gm(uint64_t blockCount,
+                                                                                         int64_t gmOffset)
 {
     int64_t blockScaleN = static_cast<int64_t>(
         Blaze::Gemm::CeilDiv(static_cast<uint64_t>(singleN_), Blaze::Gemm::MXFP_DIVISOR_SIZE) *
@@ -346,9 +380,10 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
     asc::te::copy(copyUB2GM, outGm, outUb);
 }
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::TransMxScaleLayout(
-    uint16_t mSize, uint16_t scaleBlockN)
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_,
+                                                  DirectBf16Output_>::TransMxScaleLayout(uint16_t mSize,
+                                                                                         uint16_t scaleBlockN)
 {
     auto srcLayout = Gemm::MakeNDExtLayout<int8_t>(static_cast<int64_t>(mSize), static_cast<int64_t>(scaleBlockN),
                                                    static_cast<int64_t>(scaleBlockN));
@@ -363,9 +398,9 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
     mx.TransScaleLayout(srcTensor, dstTensor, mSize, scaleBlockN);
 }
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::ComputeSwiglu(
-    uint16_t mSize)
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void
+BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16Output_>::ComputeSwiglu(uint16_t mSize)
 {
     __ubuf__ DataTypeIn* swishInputUbAddr = GetUbAddr<DataTypeIn>(0);
     __ubuf__ bfloat16_t* gluResAddr = GetUbAddr<bfloat16_t>(gluResUbOffset_);
@@ -449,9 +484,9 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
     }
 }
 
-template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_>
-__aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_>::ComputeMxQuant(
-    uint16_t mSize)
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline void
+BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16Output_>::ComputeMxQuant(uint16_t mSize)
 {
     const uint32_t nDstUbAligned64 = Blaze::Gemm::Align64(static_cast<uint64_t>(singleN_));
     const uint32_t totalDataInUb = mSize * nDstUbAligned64;
