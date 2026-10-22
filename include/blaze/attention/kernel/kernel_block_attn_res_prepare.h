@@ -23,7 +23,6 @@ namespace Kernel {
 template <class ProblemShape_, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, typename Enable_>
 class AttentionUniversal;
 
-namespace {
 namespace BlockAttnResPrepareDetail {
 constexpr uint32_t MMAD_BLOCK_NUM = 2U;
 constexpr uint32_t MM1_INDEX = 0U;
@@ -107,7 +106,6 @@ public:
 };
 
 } // namespace BlockAttnResPrepareDetail
-} // namespace
 
 template <class ProblemShape_, class BlockMmadTuple_, class BlockEpilogue_, class BlockScheduler_>
 class AttentionUniversal<

@@ -42,9 +42,8 @@
 #include "blaze/gemm/utils/layout_struct.h"
 #include "blaze/gemm/utils/layout_utils.h"
 
-namespace Reg = AscendC::Reg;
-
 namespace Blaze::Epilogue::Tile {
+namespace Reg = AscendC::Reg;
 using AscendC::IsSameType;
 
 // Quantization granularity (Run template parameter): the second dispatch axis. Each family
@@ -337,9 +336,8 @@ private:
 
         DequantW4Pergroup32NKParams<XType, WType, SType> vfParams;
         vfParams.outerExtend = static_cast<uint16_t>(nLen);
-        vfParams.innerExtend = static_cast<uint16_t>(
-            Blaze::Gemm::CeilDiv<int64_t>(Blaze::Gemm::CeilAlign<int64_t>(kLen, UB_ALIGN_SIZE_FOR_4_BITS),
-                                          static_cast<int64_t>(AscendC::VECTOR_REG_WIDTH)));
+        vfParams.innerExtend = static_cast<uint16_t>(Blaze::Gemm::CeilDiv<int64_t>(
+            Blaze::Gemm::CeilAlign<int64_t>(kLen, UB_ALIGN_SIZE_FOR_4_BITS), static_cast<int64_t>(asc_get_vf_len())));
         vfParams.dataBlockStride = static_cast<uint32_t>(dataBlockStride);
         vfParams.repeatStride = vfParams.dataBlockStride * static_cast<uint32_t>(OFFSET_8);
         vfParams.outDimOffset = static_cast<int32_t>(static_cast<int64_t>(AscendC::ONE_BLK_SIZE) -
@@ -389,7 +387,7 @@ private:
         DequantW4PergroupKNParams<XType, WType, SType> vfParams;
         vfParams.groupNumUb = groupNumUb;
         vfParams.vLLoopNumInGroup = static_cast<uint32_t>(static_cast<int64_t>(GroupSize) * C0_SIZE_B8 /
-                                                          static_cast<int64_t>(AscendC::VECTOR_REG_WIDTH));
+                                                          static_cast<int64_t>(asc_get_vf_len()));
         vfParams.n1LoopNum = static_cast<uint32_t>(n1LoopNum);
         vfParams.bubNLen = static_cast<uint32_t>(n1LoopNum * C0_SIZE_B8);
         vfParams.scaleN1Stride = static_cast<uint32_t>(scaleRowPitch / n1LoopNum);

@@ -95,9 +95,9 @@ public:
     __aicore__ inline AivRowRange GetAivRowRange(const BlockShape& blockShape) const
     {
         const uint32_t blockS = static_cast<uint32_t>(asc::te::get<S_DIM_INDEX>(blockShape));
-        const uint32_t taskRatio = AscendC::GetTaskRation();
+        const uint32_t taskRatio = asc_get_sub_block_num();
         const uint32_t rowsPerAiv = blockS / taskRatio + (blockS % taskRatio == 0U ? 0U : 1U);
-        const uint32_t rowStart = AscendC::GetSubBlockIdx() * rowsPerAiv;
+        const uint32_t rowStart = asc_get_sub_block_id() * rowsPerAiv;
         const uint32_t remainingRows = rowStart < blockS ? blockS - rowStart : 0U;
         const uint32_t rowCount = rowsPerAiv < remainingRows ? rowsPerAiv : remainingRows;
         return {rowStart, rowCount};

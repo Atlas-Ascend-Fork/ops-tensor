@@ -75,12 +75,12 @@ public:
     struct Params {
         GM_ADDR yGmAddr{nullptr};
         GM_ADDR yScaleGmAddr{nullptr};
-        uint32_t baseM;
-        uint32_t baseN;
-        GeluAlg geluAlg;
-        QuantAlg quantAlg;
-        ROUND_MODE_FP4 fp4RoundMode;
-        float dtypeMax = 0.0;
+        uint32_t baseM{0};
+        uint32_t baseN{0};
+        GeluAlg geluAlg{GeluAlg::TANH};
+        QuantAlg quantAlg{QuantAlg::OCP};
+        ROUND_MODE_FP4 fp4RoundMode{ROUND_MODE_FP4::RINT};
+        float dtypeMax{0.0F};
         Params() = default;
     };
 
@@ -281,7 +281,7 @@ __aicore__ inline void BlockEpilogueGeluMxQuant<DataTypeOut_, DataTypeIn_>::VFDo
         {
             AscendC::Reg::RegTensor<bfloat16_t> zeroReg;
             AscendC::Reg::Duplicate(zeroReg, static_cast<bfloat16_t>(0.0));
-            constexpr uint32_t bf16Vl = AscendC::VECTOR_REG_WIDTH / sizeof(bfloat16_t);
+            constexpr uint32_t bf16Vl = asc_get_vf_len() / sizeof(bfloat16_t);
             uint32_t remainingElements = mSize * nAligned;
             uint32_t zeroOffset = 0;
             while (remainingElements > 0) {

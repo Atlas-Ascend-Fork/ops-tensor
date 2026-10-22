@@ -28,7 +28,8 @@ namespace Kernel {
 template <class ProblemShape_, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, typename Enable_ = void>
 class GemmUniversal {
     static_assert(always_false_v<BlockEpilogue_> && always_false_v<BlockMmad_>,
-                  "KernelStreamk is not implemented for this BlockEpilogue or BlockMmad");
+                  "GemmUniversal is not implemented for this combination of BlockMmad, BlockEpilogue and "
+                  "BlockScheduler");
 };
 
 } // namespace Kernel

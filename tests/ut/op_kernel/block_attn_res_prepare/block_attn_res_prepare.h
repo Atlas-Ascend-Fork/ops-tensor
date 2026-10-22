@@ -20,6 +20,35 @@
 #if defined(ASCENDC_CPU_DEBUG)
 #include "lib/matmul_intf.h"
 #endif
+
+#if defined(ASCENDC_CPU_DEBUG)
+// asc_get_sub_block_num()/asc_get_sub_block_id() 直调 get_subblockdim()/get_subblockid()，
+// 缺少 C++ 封装 GetTaskRation()/GetSubBlockIdx() 的 CPU 仿真分支（g_taskRation/sub_block_idx），
+// UT 仿真下返回错误值会导致 AIV 行分配异常、跨核死锁。引入 blaze 头之前重定向到模拟器全局量，
+// 语义与 C++ 封装对齐。必须先包含 tensor_api 内置的 c_api/sys_var/sys_var.h（与 blaze 链同源），
+// 让真实定义完成解析，再做宏替换。
+#include "c_api/sys_var/sys_var.h"
+namespace BlazeUtStub {
+inline int64_t AscGetSubBlockNum()
+{
+    if ASCEND_IS_AIC {
+        return 1;
+    }
+    return g_taskRation;
+}
+
+inline int64_t AscGetSubBlockId()
+{
+    if ASCEND_IS_AIV {
+        return sub_block_idx;
+    }
+    return 0;
+}
+} // namespace BlazeUtStub
+#define asc_get_sub_block_num() (::BlazeUtStub::AscGetSubBlockNum())
+#define asc_get_sub_block_id() (::BlazeUtStub::AscGetSubBlockId())
+#endif
+
 #include "blaze/attention/kernel/kernel_block_attn_res_prepare.h"
 
 // Keep the UT launch payload plain and mirror the host tiling data contract. Generic Tensor API

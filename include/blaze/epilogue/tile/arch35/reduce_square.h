@@ -43,6 +43,8 @@ public:
         const uint32_t validElements = static_cast<uint32_t>(asc::te::get_total_column_shape(inputTensor.layout()));
         const uint32_t rowPitch = static_cast<uint32_t>(
             asc::te::get<1>(asc::te::get<0>(inputTensor.layout().stride())));
+        // asc_get_vf_len() is a device C API and may only be referenced inside function bodies.
+        constexpr uint32_t FP32_REG_ELEMS = asc_get_vf_len() / sizeof(float);
         const uint16_t loopCount = static_cast<uint16_t>((validElements + FP32_REG_ELEMS - 1U) / FP32_REG_ELEMS);
         auto inputAddr = reinterpret_cast<__ubuf__ float*>(inputTensor.data().get());
         auto sumSquareAddr = reinterpret_cast<__ubuf__ float*>(sumSquareTensor.data().get());
@@ -50,11 +52,10 @@ public:
     }
 
 private:
-    static constexpr uint32_t FP32_REG_ELEMS = AscendC::VECTOR_REG_WIDTH / sizeof(float);
-
     static __simd_vf__ inline void AccumulateSquareVf(__ubuf__ float* inputAddr, __ubuf__ float* sumSquareAddr,
                                                       uint32_t validElements, uint16_t loopCount, uint32_t rowIndex)
     {
+        constexpr uint32_t FP32_REG_ELEMS = asc_get_vf_len() / sizeof(float);
         AscendC::Reg::RegTensor<float> inputReg;
         AscendC::Reg::RegTensor<float> squareReg;
         AscendC::Reg::RegTensor<float> squareAccReg;

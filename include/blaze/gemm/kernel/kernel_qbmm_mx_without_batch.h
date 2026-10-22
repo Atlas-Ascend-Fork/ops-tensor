@@ -15,7 +15,7 @@
 
 #pragma once
 
-#include "kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 #if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
 #else

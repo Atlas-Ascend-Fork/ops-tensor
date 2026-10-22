@@ -17,10 +17,9 @@
 #include "tensor_api/tensor.h"
 #include "c_api/asc_simd.h"
 
+namespace Blaze::Gemm::Tile {
 using asc::te::c0_element;
 using asc::te::c0_size;
-
-namespace Blaze::Gemm::Tile {
 struct PadMxKL1Base {
     template <typename T>
     __aicore__ inline static void PadZero(const T& tensorL1, uint64_t repeatTimes, uint64_t blockNum, uint64_t dstGap)

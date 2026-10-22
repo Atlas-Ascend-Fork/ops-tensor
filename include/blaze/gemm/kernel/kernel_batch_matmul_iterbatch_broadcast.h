@@ -32,7 +32,7 @@
 #include "blaze/gemm/block/block_mmad_iterbatch_broadcast.h"
 #include "blaze/gemm/block/block_scheduler_iterbatch_broadcast.h"
 #include "blaze/gemm/utils/common_utils.h"
-#include "kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {

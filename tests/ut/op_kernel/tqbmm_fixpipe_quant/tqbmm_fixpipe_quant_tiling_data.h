@@ -17,9 +17,7 @@
 
 #include "blaze_kernel_stub.h"
 
-#ifndef __CCE_AICORE__
 #include <cstdint>
-#endif
 
 #pragma pack(push, 8)
 struct TqbmmFixpipeQuantTilingData {

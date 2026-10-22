@@ -22,7 +22,7 @@
 #include "blaze/gemm/block/block_mmad_matmul_fixpipe_opti.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/sync.h"
-#include "kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {

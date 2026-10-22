@@ -392,7 +392,7 @@ __aicore__ inline void Gelu<DataTypeOut_, DataTypeIn_, kPreciseDiv_>::GeluTanh(c
     if ASCEND_IS_AIC {
         return;
     }
-    uint16_t sizePerRepeat = static_cast<uint16_t>(AscendC::VECTOR_REG_WIDTH / sizeof(float));
+    constexpr uint16_t sizePerRepeat = static_cast<uint16_t>(asc_get_vf_len() / sizeof(float));
     uint16_t oneRowRepeatTimes = Gemm::CeilDiv(static_cast<uint32_t>(nSize), static_cast<uint32_t>(sizePerRepeat));
     uint32_t nAligned = Gemm::Align32(static_cast<uint32_t>(nSize));
     GeluVfParams<DataTypeOut, DataTypeIn> params{reinterpret_cast<__ubuf__ DataTypeOut*>(dstTensor.data().get()),
@@ -440,7 +440,7 @@ __aicore__ inline void Gelu<DataTypeOut_, DataTypeIn_, kPreciseDiv_>::GeluErf(co
     if ASCEND_IS_AIC {
         return;
     }
-    uint16_t sizePerRepeat = static_cast<uint16_t>(AscendC::VECTOR_REG_WIDTH / sizeof(float));
+    constexpr uint16_t sizePerRepeat = static_cast<uint16_t>(asc_get_vf_len() / sizeof(float));
     uint16_t oneRowRepeatTimes = Gemm::CeilDiv(static_cast<uint32_t>(nSize), static_cast<uint32_t>(sizePerRepeat));
     uint32_t nAligned = Gemm::Align32(static_cast<uint32_t>(nSize));
     GeluVfParams<DataTypeOut, DataTypeIn> params{reinterpret_cast<__ubuf__ DataTypeOut*>(dstTensor.data().get()),

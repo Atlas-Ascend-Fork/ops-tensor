@@ -161,9 +161,6 @@ private:
     static constexpr uint32_t BLOCK_SIZE = 32;          // MX group size
     static constexpr uint32_t OUT_ELE_NUM_ONE_BLK = 64; // PACK4_B32 elements per block
 
-    static constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(AscendC::VECTOR_REG_WIDTH / sizeof(bfloat16_t));
-    static constexpr uint16_t ELEMENT_AFTER_REDUCE = static_cast<uint16_t>(AscendC::VECTOR_REG_WIDTH / BLOCK_SIZE);
-
     // ---- Cast traits (named by bit-width; RoundMode lives in AscendC, not AscendC::Reg) ----
     // Narrowing fp32 -> FP8 with saturation (clamps instead of inf).
     static constexpr AscendC::Reg::CastTrait CT_32F_TO_FP8_SAT = {
@@ -226,12 +223,14 @@ private:
     // ---- Loop count derivation ----
     __aicore__ inline static uint16_t DataLoopCount(uint32_t totalCount)
     {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
         return static_cast<uint16_t>(
             Gemm::CeilDiv(totalCount, static_cast<uint32_t>(VL_FOR_16F) * INTERLEAVED_REG_FACTOR));
     }
 
     __aicore__ inline static uint16_t ScaleLoopCount(uint32_t totalScale, MxScaleAlg alg)
     {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
         const uint32_t lanes = alg == MxScaleAlg::CUBLAS ? static_cast<uint32_t>(VL_FOR_16F) / HALF_REG_FACTOR :
                                                            static_cast<uint32_t>(VL_FOR_16F);
         return static_cast<uint16_t>(Gemm::CeilDiv(totalScale, lanes));
@@ -264,6 +263,8 @@ private:
     // ---- Vf implementations (static __simd_vf__ inline, defined in-class) ----
     static __simd_vf__ inline void MaxExpVf(MxMaxExpVfParams params)
     {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
+        constexpr uint16_t ELEMENT_AFTER_REDUCE = static_cast<uint16_t>(asc_get_vf_len() / BLOCK_SIZE);
         AscendC::Reg::RegTensor<bfloat16_t> value0;
         AscendC::Reg::RegTensor<bfloat16_t> value1;
         AscendC::Reg::RegTensor<uint16_t> exp0;
@@ -311,6 +312,7 @@ private:
 
     static __simd_vf__ inline void ScaleOcpVf(MxScaleVfParams params)
     {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
         AscendC::Reg::RegTensor<uint16_t> expMask;
         AscendC::Reg::RegTensor<uint16_t> sharedExp;
         AscendC::Reg::RegTensor<uint16_t> scaleValue;
@@ -364,6 +366,7 @@ private:
 
     static __simd_vf__ inline void ScaleCublasVf(MxScaleVfParams params)
     {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
         AscendC::Reg::RegTensor<uint16_t> max16;
         AscendC::Reg::RegTensor<uint32_t> max32;
         AscendC::Reg::RegTensor<uint32_t> exp32;
@@ -450,6 +453,7 @@ private:
 
     static __simd_vf__ inline void ScaleDynVf(MxScaleVfParams params)
     {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
         AscendC::Reg::RegTensor<uint16_t> maxValue;
         AscendC::Reg::RegTensor<uint16_t> maxExpOnly;
         AscendC::Reg::RegTensor<uint16_t> roundedMaxExp;
@@ -504,6 +508,8 @@ private:
 
     static __simd_vf__ inline void QuantizeFp8Vf(MxQuantizeVfParams params)
     {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
+        constexpr uint16_t ELEMENT_AFTER_REDUCE = static_cast<uint16_t>(asc_get_vf_len() / BLOCK_SIZE);
         uint32_t remainingData = params.totalCount;
         AscendC::Reg::MaskReg mask0;
         AscendC::Reg::MaskReg mask1;
@@ -571,6 +577,8 @@ private:
     template <AscendC::RoundMode ROUND_MODE>
     static __simd_vf__ inline void QuantizeFp4Vf(MxQuantizeVfParams params)
     {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
+        constexpr uint16_t ELEMENT_AFTER_REDUCE = static_cast<uint16_t>(asc_get_vf_len() / BLOCK_SIZE);
         uint32_t remainingData = params.totalCount;
         AscendC::Reg::MaskReg mask0;
         AscendC::Reg::MaskReg mask1;

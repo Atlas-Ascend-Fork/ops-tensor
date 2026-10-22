@@ -72,6 +72,7 @@ public:
         aL1OneBuffer_ = Gemm::CeilAlign(iterBatch_ * m_, Gemm::BLOCK_CUBE) * Gemm::CeilAlign(kL1_, Gemm::BLOCK_CUBE);
         aL1OneBufferBytes_ = aL1OneBuffer_ * sizeof(A_T);
         uint64_t nl1Align = Gemm::CeilAlign(static_cast<uint64_t>(nL1_), Gemm::BLOCK_CUBE);
+        // 第一次矩阵乘为 (K, N) @ (N, N)，B 操作数 K/N 两轴长度均为 N，故 kl1Align 与 nl1Align 同取 nL1_
         uint64_t kl1Align = Gemm::CeilAlign(static_cast<uint64_t>(nL1_), Gemm::BLOCK_CUBE);
         bl1OffsetP2_ = nl1Align * kl1Align;
         l0PingPong_ = 0;

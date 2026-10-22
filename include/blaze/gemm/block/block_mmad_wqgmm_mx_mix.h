@@ -21,16 +21,16 @@
 #include "blaze/gemm/tile/tile_trait.h"
 #include "blaze/gemm/utils/common_utils.h"
 
-using AscendC::BLOCK_CUBE;
+namespace Blaze {
+namespace Gemm {
+namespace Block {
+
 using AscendC::CrossCoreSetFlag;
 using AscendC::CrossCoreWaitFlag;
 using AscendC::HardEvent;
 using AscendC::SetFlag;
 using AscendC::TEventID;
 using AscendC::WaitFlag;
-namespace Blaze {
-namespace Gemm {
-namespace Block {
 
 static constexpr uint64_t WQGMM_MX_GROUP_SIZE = MXFP_DIVISOR_SIZE / MXFP_MULTI_BASE_SIZE;
 static constexpr uint64_t WQGMM_MX_SYNC_MODE = 4;

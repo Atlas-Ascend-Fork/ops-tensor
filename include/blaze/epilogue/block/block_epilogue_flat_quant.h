@@ -29,33 +29,6 @@ namespace Blaze {
 namespace Epilogue {
 namespace Block {
 
-namespace Constant {
-constexpr uint8_t GATHER_PATTERN = 7;
-constexpr int32_t CEIL_SIZE = 16;
-constexpr int32_t GROUP_SIZE = 32;
-constexpr int32_t VEC_N_LEN = 64;
-constexpr int32_t MN_SIZE = 64 * 1024;
-constexpr int32_t OUT_SIZE = 32 * 1024;
-constexpr int32_t EMAX_SIZE = 2 * 1024;
-constexpr uint16_t FP4_E2M1_MAX_EXP = 0x0100; // MxQuantConfig fpEmax（沿用 flat 实现的硬编码上界）
-constexpr uint16_t BLOCK_SCALE = 2;
-constexpr float ZERO_FLOAT = 0.0f;
-constexpr float SIX_FLOAT = 6.0f;
-constexpr float SEVEN_FLOAT = 7.0f;
-constexpr float TWELVE_FLOAT = 12.0f;
-constexpr uint32_t STORE_UNALIGN_STRIDE_BYTES = 8;
-constexpr uint16_t ADD_VALUE_FOR_BF16_MAN1 = 0x003f;
-constexpr uint16_t ADD_VALUE_FOR_BF16_MAN2 = 0x001f;
-} // namespace Constant
-
-struct FlatQuantShapeInfo {
-    int64_t k{0};
-    int64_t m{0};
-    int64_t n{0};
-    int64_t mCeil{0};
-    int64_t nCeil{0};
-};
-
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_,
           typename FusionOp_ = Fusion::DefaultFusion<DataTypeOut_, DataTypeIn_>>
 class BlockEpilogueFlatQuant {
@@ -81,17 +54,36 @@ public:
     __aicore__ inline void operator()(uint64_t startBatchIdx, uint64_t iterBatch);
 
 private:
+    static constexpr uint8_t GATHER_PATTERN = 7;
+    static constexpr int32_t CEIL_SIZE = 16;
+    static constexpr int32_t GROUP_SIZE = 32;
+    static constexpr int32_t VEC_N_LEN = 64;
+    static constexpr int32_t MN_SIZE = 64 * 1024;
+    static constexpr int32_t OUT_SIZE = 32 * 1024;
+    static constexpr int32_t EMAX_SIZE = 2 * 1024;
+    static constexpr uint16_t FP4_E2M1_MAX_EXP = 0x0100; // MxQuantConfig fpEmax（沿用 flat 实现的硬编码上界）
+    static constexpr uint16_t BLOCK_SCALE = 2;
+    static constexpr float ZERO_FLOAT = 0.0f;
+    static constexpr float SIX_FLOAT = 6.0f;
+    static constexpr float SEVEN_FLOAT = 7.0f;
+    static constexpr float TWELVE_FLOAT = 12.0f;
+    static constexpr uint32_t STORE_UNALIGN_STRIDE_BYTES = 8;
+    static constexpr uint16_t ADD_VALUE_FOR_BF16_MAN1 = 0x003f;
+    static constexpr uint16_t ADD_VALUE_FOR_BF16_MAN2 = 0x001f;
+
     __aicore__ inline void Quant(uint64_t batchIdx, uint64_t iterIdx);
     __aicore__ inline void ClearDirtyData();
     __aicore__ inline void ClearScaleTensor();
     __aicore__ inline void CopyOutputFromUbToGm(uint64_t offset, AscendC::LocalTensor<int8_t>& src);
     __aicore__ inline void CopyScaleFromUbToGm(uint64_t offset, AscendC::LocalTensor<int8_t>& src);
-    __aicore__ inline void ComputeMxQuant(LocalTensor<bfloat16_t>& xTensor, LocalTensor<int8_t>& yTensor,
-                                          LocalTensor<uint16_t>& eMaxTensor, LocalTensor<int8_t>& scaleTensor,
-                                          LocalTensor<uint16_t>& deQuantScaleTensor, uint32_t totalDataInUB,
+    __aicore__ inline void ComputeMxQuant(AscendC::LocalTensor<bfloat16_t>& xTensor,
+                                          AscendC::LocalTensor<int8_t>& yTensor,
+                                          AscendC::LocalTensor<uint16_t>& eMaxTensor,
+                                          AscendC::LocalTensor<int8_t>& scaleTensor,
+                                          AscendC::LocalTensor<uint16_t>& deQuantScaleTensor, uint32_t totalDataInUB,
                                           uint64_t inputOffset);
-    __aicore__ inline void ComputeTransLayout(LocalTensor<int8_t>& scaleTensor, LocalTensor<int8_t>& scaleBlockTensor,
-                                              uint16_t m, uint16_t n);
+    __aicore__ inline void ComputeTransLayout(AscendC::LocalTensor<int8_t>& scaleTensor,
+                                              AscendC::LocalTensor<int8_t>& scaleBlockTensor, uint16_t m, uint16_t n);
 
     static __simd_vf__ inline void SaveTailVf(__ubuf__ uint16_t* dstPtr, __ubuf__ uint16_t* srcPtr, uint32_t count);
     static __simd_vf__ inline void ClearTailVf(__ubuf__ uint16_t* dstPtr, uint32_t count);
@@ -104,11 +96,19 @@ private:
     }
 
     // ---- Shape ----
+    struct FlatQuantShapeInfo {
+        int64_t k{0};
+        int64_t m{0};
+        int64_t n{0};
+        int64_t mCeil{0};
+        int64_t nCeil{0};
+    };
+
     FlatQuantShapeInfo shape_;
 
-    // ---- Pipe / UB ----
-    TPipe pipe_;
-    TBuf<QuePosition::VECCALC> bufQueue_;
+    // ---- UB ----
+    // TOTAL_UB_SIZE 仅在 device 编译 pass（__NPU_ARCH__ 已定义）可用，
+    // 因此 xTensor_ 在 __aicore__ 的 Init 中构造，不能在类作用域默认初始化。
     AscendC::LocalTensor<bfloat16_t> xTensor_;
     AscendC::LocalTensor<int8_t> yTensor_;
     AscendC::LocalTensor<uint16_t> eMaxTensor_;
@@ -128,8 +128,8 @@ private:
     uint16_t addValueBit_ = 0;
 
     // ---- Events ----
-    event_t eventIdVToMte3_;
-    event_t eventIdMte3ToV_;
+    uint16_t eventIdVToMte3_{2};
+    uint16_t eventIdMte3ToV_{3};
 };
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
@@ -139,53 +139,49 @@ __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTyp
     cGlobal_.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(params.outGmAddr));
     scaleGlobal_.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(params.scaleGmAddr));
     problemShape_ = params.problemShape;
+    xTensor_ = AscendC::LocalTensor<bfloat16_t>{AscendC::TPosition::VECIN, 0,
+                                                AscendC::TOTAL_UB_SIZE / sizeof(bfloat16_t)};
 
     shape_.m = asc::te::get<Gemm::MNK_M>(problemShape_);
     shape_.n = asc::te::get<Gemm::MNK_N>(problemShape_);
     shape_.k = asc::te::get<Gemm::MNK_B>(problemShape_);
     dstTypeMax_ = params.dstTypeMax;
     invDstTypeMax_ = params.invDstTypeMax;
-    if (dstTypeMax_ == Constant::SIX_FLOAT) {
-        addValueBit_ = Constant::ADD_VALUE_FOR_BF16_MAN1;
-    } else if (dstTypeMax_ == Constant::SEVEN_FLOAT) {
-        addValueBit_ = Constant::ADD_VALUE_FOR_BF16_MAN2;
+    if (dstTypeMax_ == SIX_FLOAT) {
+        addValueBit_ = ADD_VALUE_FOR_BF16_MAN1;
+    } else if (dstTypeMax_ == SEVEN_FLOAT) {
+        addValueBit_ = ADD_VALUE_FOR_BF16_MAN2;
     }
 
-    shape_.mCeil = Gemm::CeilAlign(static_cast<int64_t>(shape_.m), static_cast<int64_t>(Constant::CEIL_SIZE));
-    shape_.nCeil = Constant::VEC_N_LEN;
-    alignM_ = Gemm::CeilDiv(static_cast<int64_t>(shape_.m * shape_.n), static_cast<int64_t>(Constant::VEC_N_LEN));
+    shape_.mCeil = Gemm::CeilAlign(static_cast<int64_t>(shape_.m), static_cast<int64_t>(CEIL_SIZE));
+    shape_.nCeil = VEC_N_LEN;
+    alignM_ = Gemm::CeilDiv(static_cast<int64_t>(shape_.m * shape_.n), static_cast<int64_t>(VEC_N_LEN));
 
-    pipe_.InitBuffer(bufQueue_, AscendC::TOTAL_UB_SIZE);
-    xTensor_ = bufQueue_.Get<bfloat16_t>();
-    yTensor_ = xTensor_[Constant::MN_SIZE].template ReinterpretCast<int8_t>();
-    eMaxTensor_ = yTensor_[Constant::OUT_SIZE].template ReinterpretCast<uint16_t>();
-    deQuantScaleTensor_ = eMaxTensor_[Constant::EMAX_SIZE];
-    scaleTensor_ = deQuantScaleTensor_[Constant::EMAX_SIZE].template ReinterpretCast<int8_t>();
-    scaleBlockTensor_ = scaleTensor_[Constant::EMAX_SIZE];
-
-    eventIdVToMte3_ = static_cast<event_t>(pipe_.FetchEventID(HardEvent::V_MTE3));
-    eventIdMte3ToV_ = static_cast<event_t>(pipe_.FetchEventID(HardEvent::MTE3_V));
+    yTensor_ = xTensor_[MN_SIZE].template ReinterpretCast<int8_t>();
+    eMaxTensor_ = yTensor_[OUT_SIZE].template ReinterpretCast<uint16_t>();
+    deQuantScaleTensor_ = eMaxTensor_[EMAX_SIZE];
+    scaleTensor_ = deQuantScaleTensor_[EMAX_SIZE].template ReinterpretCast<int8_t>();
+    scaleBlockTensor_ = scaleTensor_[EMAX_SIZE];
 }
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
 __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::ClearDirtyData()
 {
-    GatherMaskParams params;
+    AscendC::GatherMaskParams params;
     params.src0BlockStride = 1;
-    params.src0RepeatStride = Gemm::CeilAlign(static_cast<int64_t>(shape_.n),
-                                              static_cast<int64_t>(Constant::CEIL_SIZE)) *
-                              sizeof(DataTypeIn) / Constant::GROUP_SIZE;
+    params.src0RepeatStride = Gemm::CeilAlign(static_cast<int64_t>(shape_.n), static_cast<int64_t>(CEIL_SIZE)) *
+                              sizeof(DataTypeIn) / GROUP_SIZE;
     params.src1RepeatStride = 0;
     params.repeatTimes = shape_.m;
     uint64_t rvdCnt = 0Ul;
-    AscendC::GatherMask(xTensor_, xTensor_, Constant::GATHER_PATTERN, true, shape_.n, params, rvdCnt);
+    AscendC::GatherMask(xTensor_, xTensor_, GATHER_PATTERN, true, shape_.n, params, rvdCnt);
 }
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
 __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::ClearScaleTensor()
 {
-    AscendC::Duplicate(scaleTensor_, static_cast<int8_t>(0), Constant::EMAX_SIZE);
-    AscendC::Duplicate(scaleBlockTensor_, static_cast<int8_t>(0), Constant::EMAX_SIZE);
+    AscendC::Duplicate(scaleTensor_, static_cast<int8_t>(0), EMAX_SIZE);
+    AscendC::Duplicate(scaleBlockTensor_, static_cast<int8_t>(0), EMAX_SIZE);
     AscendC::PipeBarrier<PIPE_V>();
 }
 
@@ -209,11 +205,11 @@ __simd_vf__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTy
     AscendC::Reg::Duplicate(zeroReg, static_cast<uint16_t>(0));
     AscendC::Reg::UnalignRegForStore u1;
 
-    constexpr uint32_t strideElems = Constant::STORE_UNALIGN_STRIDE_BYTES / sizeof(uint16_t);
+    constexpr uint32_t strideElems = STORE_UNALIGN_STRIDE_BYTES / sizeof(uint16_t);
     uint32_t loopCount = (count + strideElems - 1) / strideElems;
     for (uint32_t i = 0; i < loopCount; i++) {
-        AscendC::Reg::StoreUnAlign<uint16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            dstPtr, zeroReg, u1, Constant::STORE_UNALIGN_STRIDE_BYTES);
+        AscendC::Reg::StoreUnAlign<uint16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(dstPtr, zeroReg, u1,
+                                                                                          STORE_UNALIGN_STRIDE_BYTES);
     }
     AscendC::Reg::StoreUnAlignPost(dstPtr, u1, 0);
 }
@@ -222,7 +218,7 @@ template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, 
 __simd_vf__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::RestoreTailVf(
     __ubuf__ uint16_t* dstPtr, __ubuf__ uint16_t* srcPtr, uint32_t count)
 {
-    constexpr uint32_t strideElems = Constant::STORE_UNALIGN_STRIDE_BYTES / sizeof(uint16_t);
+    constexpr uint32_t strideElems = STORE_UNALIGN_STRIDE_BYTES / sizeof(uint16_t);
     uint32_t loopCount = (count + strideElems - 1) / strideElems;
     AscendC::Reg::UnalignRegForStore u1;
     for (uint32_t i = 0; i < loopCount; i++) {
@@ -231,8 +227,8 @@ __simd_vf__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTy
         __ubuf__ uint16_t* curSrcPtr = srcPtr + i * strideElems;
         AscendC::Reg::LoadUnAlignPre(u0, curSrcPtr);
         AscendC::Reg::LoadUnAlign(vReg, u0, curSrcPtr);
-        AscendC::Reg::StoreUnAlign<uint16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            dstPtr, vReg, u1, Constant::STORE_UNALIGN_STRIDE_BYTES);
+        AscendC::Reg::StoreUnAlign<uint16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(dstPtr, vReg, u1,
+                                                                                          STORE_UNALIGN_STRIDE_BYTES);
     }
     AscendC::Reg::StoreUnAlignPost(dstPtr, u1, 0);
 }
@@ -255,17 +251,17 @@ __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTyp
     uint32_t blockCount = static_cast<uint32_t>(
         Gemm::CeilDiv(static_cast<uint64_t>(alignM_ * shape_.nCeil), Gemm::MXFP_DIVISOR_SIZE));
     copy_ubuf_to_gm_align_v2(scaleGlobal_[offset].GetPhyAddr(), (__ubuf__ void*)src.GetPhyAddr(), 0, blockCount,
-                             Constant::BLOCK_SCALE, 0, Constant::BLOCK_SCALE, 32);
+                             BLOCK_SCALE, 0, BLOCK_SCALE, 32);
 }
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
 __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::ComputeMxQuant(
-    LocalTensor<bfloat16_t>& xTensor, LocalTensor<int8_t>& yTensor, LocalTensor<uint16_t>& eMaxTensor,
-    LocalTensor<int8_t>& scaleTensor, LocalTensor<uint16_t>& deQuantScaleTensor, uint32_t totalDataInUB,
-    uint64_t inputOffset)
+    AscendC::LocalTensor<bfloat16_t>& xTensor, AscendC::LocalTensor<int8_t>& yTensor,
+    AscendC::LocalTensor<uint16_t>& eMaxTensor, AscendC::LocalTensor<int8_t>& scaleTensor,
+    AscendC::LocalTensor<uint16_t>& deQuantScaleTensor, uint32_t totalDataInUB, uint64_t inputOffset)
 {
     const uint32_t totalScale = static_cast<uint32_t>(
-        Gemm::CeilDiv(static_cast<uint64_t>(totalDataInUB), static_cast<uint64_t>(Constant::GROUP_SIZE)));
+        Gemm::CeilDiv(static_cast<uint64_t>(totalDataInUB), static_cast<uint64_t>(GROUP_SIZE)));
     const uint32_t xByteOffset = GetUbByteOffset(xTensor) +
                                  static_cast<uint32_t>(inputOffset) * static_cast<uint32_t>(sizeof(bfloat16_t));
 
@@ -286,25 +282,24 @@ __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTyp
 
     // MxQuantConfig 在调用点由 Init 阶段解析的普通成员组装（tile 类型不得出现在类作用域）
     // zeroScaleOnZeroExp=true: flat 阵营，zeroMask 取原始 maxExp
-    Tile::MxQuantConfig cfg{Tile::MxScaleAlg::OCP, Constant::FP4_E2M1_MAX_EXP, invDstTypeMax_, addValueBit_, true};
-    if (dstTypeMax_ == Constant::ZERO_FLOAT) {
+    Tile::MxQuantConfig cfg{Tile::MxScaleAlg::OCP, FP4_E2M1_MAX_EXP, invDstTypeMax_, addValueBit_, true};
+    if (dstTypeMax_ == ZERO_FLOAT) {
         cfg.alg = Tile::MxScaleAlg::OCP;
-    } else if (dstTypeMax_ == Constant::SIX_FLOAT || dstTypeMax_ == Constant::SEVEN_FLOAT) {
+    } else if (dstTypeMax_ == SIX_FLOAT || dstTypeMax_ == SEVEN_FLOAT) {
         cfg.alg = Tile::MxScaleAlg::DYN_DTYPE_RANGE;
     } else {
         cfg.alg = Tile::MxScaleAlg::CUBLAS;
     }
 
     Tile::MxQuant<DataTypeOut> mx;
-    mx.GroupMaxExp(xUbTensor, maxExpTensor, totalDataInUB,
-                   dstTypeMax_ >= Constant::SIX_FLOAT && dstTypeMax_ <= Constant::TWELVE_FLOAT);
+    mx.GroupMaxExp(xUbTensor, maxExpTensor, totalDataInUB, dstTypeMax_ >= SIX_FLOAT && dstTypeMax_ <= TWELVE_FLOAT);
     mx.GenScale(maxExpTensor, yScaleTensor, reciprocalTensor, cfg, totalScale);
     mx.Quantize(xUbTensor, reciprocalTensor, yUbTensor, totalDataInUB);
 }
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
 __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::ComputeTransLayout(
-    LocalTensor<int8_t>& scaleTensor, LocalTensor<int8_t>& scaleBlockTensor, uint16_t m, uint16_t n)
+    AscendC::LocalTensor<int8_t>& scaleTensor, AscendC::LocalTensor<int8_t>& scaleBlockTensor, uint16_t m, uint16_t n)
 {
     uint16_t scaleBlockN = Gemm::CeilDiv(static_cast<uint64_t>(n), static_cast<uint64_t>(Gemm::MXFP_DIVISOR_SIZE)) * 2;
 
@@ -338,9 +333,9 @@ __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTyp
         ClearDirtyData();
     }
 
-    uint32_t tailRemainder = totalDataInUB % Constant::GROUP_SIZE;
+    uint32_t tailRemainder = totalDataInUB % GROUP_SIZE;
     if (tailRemainder != 0) {
-        uint32_t tailSize = Constant::GROUP_SIZE - tailRemainder;
+        uint32_t tailSize = GROUP_SIZE - tailRemainder;
         __ubuf__ uint16_t* tailAddr = (__ubuf__ uint16_t*)xTensor_.GetPhyAddr() + inputOffset + totalDataInUB;
         __ubuf__ uint16_t* saveAddr = (__ubuf__ uint16_t*)scaleBlockTensor_.GetPhyAddr();
         AscendC::VF_CALL<SaveTailVf>(saveAddr, tailAddr, tailSize);
@@ -350,7 +345,7 @@ __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTyp
     ComputeMxQuant(xTensor_, yTensor_, eMaxTensor_, scaleTensor_, deQuantScaleTensor_, totalDataInUB, inputOffset);
 
     if (tailRemainder != 0) {
-        uint32_t tailSize = Constant::GROUP_SIZE - tailRemainder;
+        uint32_t tailSize = GROUP_SIZE - tailRemainder;
         __ubuf__ uint16_t* tailAddr = (__ubuf__ uint16_t*)xTensor_.GetPhyAddr() + inputOffset + totalDataInUB;
         __ubuf__ uint16_t* saveAddr = (__ubuf__ uint16_t*)scaleBlockTensor_.GetPhyAddr();
         AscendC::VF_CALL<RestoreTailVf>(tailAddr, saveAddr, tailSize);
@@ -358,13 +353,13 @@ __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTyp
 
     ComputeTransLayout(scaleTensor_, scaleBlockTensor_, static_cast<uint16_t>(alignM_),
                        static_cast<uint16_t>(shape_.nCeil));
-    AscendC::SetFlag<HardEvent::V_MTE3>(eventIdVToMte3_);
-    AscendC::WaitFlag<HardEvent::V_MTE3>(eventIdVToMte3_);
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventIdVToMte3_);
+    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventIdVToMte3_);
 
     CopyOutputFromUbToGm(yOffset, yTensor_);
     CopyScaleFromUbToGm(scaleOffset, scaleBlockTensor_);
-    AscendC::SetFlag<HardEvent::MTE3_V>(eventIdMte3ToV_);
-    AscendC::WaitFlag<HardEvent::MTE3_V>(eventIdMte3ToV_);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventIdMte3ToV_);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventIdMte3ToV_);
 }
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>

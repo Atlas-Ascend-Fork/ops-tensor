@@ -34,6 +34,15 @@ if(NOT DEFINED ASCEND_NPU_ARCH)
 endif()
 add_compile_options($<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${ASCEND_NPU_ARCH}>)
 
+# glibc >= 2.39 enables __float128/_Float128 declarations in bits/floatn.h based on the
+# __clang__ version, but the bisheng/ccec device pass cannot codegen them. Pretend to be
+# the Intel SYCL compiler so glibc sets __HAVE_FLOAT128 to 0 (only floatn.h reads these
+# two macros; nothing in glibc, CANN, or this project uses them otherwise).
+add_compile_options(
+    $<$<COMPILE_LANGUAGE:ASC>:-D__INTEL_LLVM_COMPILER=20250000>
+    $<$<COMPILE_LANGUAGE:ASC>:-DSYCL_LANGUAGE_VERSION=202001>
+)
+
 ##############################################################################
 # 3. Path Configuration
 ##############################################################################

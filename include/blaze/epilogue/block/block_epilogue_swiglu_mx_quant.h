@@ -370,7 +370,7 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
     __ubuf__ DataTypeIn* swishInputUbAddr = GetUbAddr<DataTypeIn>(0);
     __ubuf__ bfloat16_t* gluResAddr = GetUbAddr<bfloat16_t>(gluResUbOffset_);
 
-    constexpr uint16_t sizePerRepeat = AscendC::VECTOR_REG_WIDTH / sizeof(DataTypeIn);
+    constexpr uint16_t sizePerRepeat = asc_get_vf_len() / sizeof(DataTypeIn);
     const uint16_t oneRowRepeatTimes = Blaze::Gemm::CeilDiv(static_cast<uint64_t>(singleN_),
                                                             static_cast<uint64_t>(sizePerRepeat));
     const uint32_t nSrcUbAligned = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(singleN_),
@@ -386,7 +386,7 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
         {
             AscendC::Reg::RegTensor<bfloat16_t> zeroReg;
             AscendC::Reg::Duplicate(zeroReg, static_cast<bfloat16_t>(0));
-            constexpr uint32_t bf16Vl = AscendC::VECTOR_REG_WIDTH / sizeof(bfloat16_t);
+            constexpr uint32_t bf16Vl = asc_get_vf_len() / sizeof(bfloat16_t);
             uint32_t remainingElements = static_cast<uint32_t>(mSize) * nDstUbAligned64;
             uint32_t zeroOffset = 0;
             while (remainingElements > 0) {

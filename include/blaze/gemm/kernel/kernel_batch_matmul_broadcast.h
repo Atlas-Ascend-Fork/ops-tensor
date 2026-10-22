@@ -21,7 +21,7 @@
 #include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_mmad_matmul_basic.h"
 #include "blaze/gemm/utils/common_utils.h"
-#include "kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {

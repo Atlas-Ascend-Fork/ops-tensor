@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
@@ -15,7 +15,7 @@
 
 #pragma once
 
-#include "kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 #if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
 #else

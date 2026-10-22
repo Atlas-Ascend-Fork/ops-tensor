@@ -32,6 +32,10 @@
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_struct.h"
 
+namespace Blaze {
+namespace Gemm {
+namespace Kernel {
+
 using AscendC::CrossCoreSetFlag;
 using AscendC::CrossCoreWaitFlag;
 using AscendC::GetSubBlockIdx;
@@ -39,10 +43,6 @@ using AscendC::HardEvent;
 using AscendC::SetFlag;
 using AscendC::TEventID;
 using AscendC::WaitFlag;
-
-namespace Blaze {
-namespace Gemm {
-namespace Kernel {
 
 /*!
  * \brief Device-side tile enumerator for N-resplit + split-M execution.

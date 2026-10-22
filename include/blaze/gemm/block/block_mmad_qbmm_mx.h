@@ -31,7 +31,7 @@
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
-#include "block_mmad.h"
+#include "blaze/gemm/block/block_mmad.h"
 #include "tensor_api/tensor.h"
 #include "blaze/gemm/tile/compute.h"
 #include "blaze/gemm/tile/datamove.h"
