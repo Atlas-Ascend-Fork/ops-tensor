@@ -64,7 +64,7 @@ Compile and run ops-tensor example examples.
 
 Options:
   --ops=<names>       Operator directory name(s), comma-separated.
-                      Multiple: --ops=mat_mul,gmm (runs all examples under each).
+                      Multiple: --ops=mat_mul,grouped_matmul (runs all examples under each).
                       Single or omitted: --target may be specified.
   --target=<names>    Example name(s), comma-separated.
                       Multiple: --target=mat_mul_basic,mat_mul_streamk
@@ -108,7 +108,7 @@ Constraints:
 
 Examples:
   bash examples/common/run.sh --ops=mat_mul
-  bash examples/common/run.sh --ops=mat_mul,gmm
+  bash examples/common/run.sh --ops=mat_mul,grouped_matmul
   bash examples/common/run.sh --ops=mat_mul --target=mat_mul_basic
   bash examples/common/run.sh --ops=mat_mul --target=mat_mul_basic,mat_mul_streamk
   bash examples/common/run.sh --ops=mat_mul --target=mat_mul_basic --ti=0-5
