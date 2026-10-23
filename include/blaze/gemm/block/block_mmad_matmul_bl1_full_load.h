@@ -214,7 +214,7 @@ private:
     template <typename TensorB, typename TensorBias>
     __aicore__ inline auto CopyL1FromGMbFullLoad(TensorB& gmB, TensorBias& gmBias, uint64_t curK, uint64_t curN)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
 
         auto layoutBL1 = MakeLayoutBL1{}(curK, curN);
         auto tensorB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, BType>(bL1Buffer_), layoutBL1);
@@ -243,7 +243,7 @@ private:
         uint64_t curKL1 = asc::te::get<MNK_K>(l1Shape);
 
         auto layoutAL1 = MakeLayoutAL1{}(curM, curKL1);
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         auto tensorAL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Buffer_[aL1BufferId]), layoutAL1);
         Gemm::LockMte2(aL1BufferId + L1_BUFFER_ID_BASE);

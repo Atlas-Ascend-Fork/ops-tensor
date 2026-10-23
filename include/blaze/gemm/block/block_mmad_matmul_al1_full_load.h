@@ -127,7 +127,7 @@ public:
         uint64_t curN = asc::te::get<MNK_N>(blockShape);
 
         // A GM->L1 A全载模式
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         auto layoutAL1 = MakeLayoutAL1{}(curM, oriK_);
         auto tensorAL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Buffer_),
                                               layoutAL1);
@@ -222,7 +222,7 @@ private:
         uint64_t curN = asc::te::get<MNK_N>(l1Shape);
         uint64_t curKL1 = asc::te::get<MNK_K>(l1Shape);
 
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
 
         Gemm::LockMte2(bL1BufferId + L1_BUFFER_ID_BASE);
 

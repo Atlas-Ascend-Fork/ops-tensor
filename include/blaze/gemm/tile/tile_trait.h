@@ -42,4 +42,9 @@ struct CopyL0C2UBTraitSplitM {
                                                                       asc::te::dual_dst_mode::split_m};
 };
 
+struct CopyGM2L1TraitPreAllocation {
+    using TraitType = asc::te::gm_to_l1_trait;
+    static constexpr const TraitType value = asc::te::gm_to_l1_trait{true};
+};
+
 } // namespace Blaze::Gemm::Tile

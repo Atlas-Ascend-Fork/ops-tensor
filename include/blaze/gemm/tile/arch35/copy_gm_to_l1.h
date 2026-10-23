@@ -57,11 +57,11 @@ struct CopySliceGM2L1 {
         if constexpr (sizeof(srcType) == sizeof(half)) {
             CopyGmToCbufMultiNd2nz((__cbuf__ half*)(dst.data().get()), (__gm__ half*)(src.data().get()), ndNum,
                                    loop2DstStride, loop3DstStride, loop4DstStride, loop1SrcStride, cacheMode, nValue,
-                                   dValue, loop4SrcStride, false);
+                                   dValue, loop4SrcStride, false, traits.pre_allocation);
         } else if constexpr (sizeof(srcType) == sizeof(float)) {
             CopyGmToCbufMultiNd2nz((__cbuf__ float*)(dst.data().get()), (__gm__ float*)(src.data().get()), ndNum,
                                    loop2DstStride, loop3DstStride, loop4DstStride, loop1SrcStride, cacheMode, nValue,
-                                   dValue, loop4SrcStride, false);
+                                   dValue, loop4SrcStride, false, traits.pre_allocation);
         }
     }
 
@@ -71,7 +71,8 @@ private:
                                                          uint16_t loop2DstStride, uint16_t loop3DstStride,
                                                          uint16_t loop4DstStride, uint64_t loop1SrcStride,
                                                          uint8_t cacheMode, uint16_t nValue, uint32_t dValue,
-                                                         uint64_t loop4SrcStride, bool enableSmallC0)
+                                                         uint64_t loop4SrcStride, bool enableSmallC0,
+                                                         bool preAllocation)
     {
         if ASCEND_IS_AIV {
             return;
@@ -90,7 +91,7 @@ private:
         mte2NzPara |= static_cast<uint64_t>(ndNum);                        // MTE2_NZ_PARA[15:0]
         asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for ND2NZ DMA instructions
         asc_copy_gm2l1_nd2nz(dst, src, loop1SrcStride, static_cast<asc_load_l2_cache_mode>(cacheMode), nValue, dValue,
-                             loop4SrcStride, enableSmallC0, false);
+                             loop4SrcStride, enableSmallC0, preAllocation);
 #endif
     }
 };

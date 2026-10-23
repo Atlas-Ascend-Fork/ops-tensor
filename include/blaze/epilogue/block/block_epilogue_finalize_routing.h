@@ -21,6 +21,7 @@
 #if defined(__NPU_ARCH__)
 #if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
+#include "reg_compute/kernel_reg_compute_intf.h"
 #else
 #include "kernel_operator.h"
 #endif

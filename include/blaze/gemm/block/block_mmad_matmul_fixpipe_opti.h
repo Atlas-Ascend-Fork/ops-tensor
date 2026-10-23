@@ -220,7 +220,7 @@ private:
         uint64_t curN = asc::te::get<MNK_N>(l1Shape);
         uint64_t curKL1 = asc::te::get<MNK_K>(l1Shape);
 
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
 
         Gemm::LockMte2(l1BufferId + L1_BUFFER_ID_BASE);
 

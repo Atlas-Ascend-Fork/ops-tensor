@@ -231,7 +231,7 @@ private:
         Gemm::LockMte2(l1BufferId + L1_BUFFER_ID_BASE);
         // A GM->L1
         auto layoutAL1 = MakeLayoutAL1{}(curML1, curKL1);
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         auto tensorAL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Buffer_[l1BufferId]), layoutAL1);
 
@@ -241,7 +241,8 @@ private:
             auto gmTileASlice = tensorA.slice(
                 asc::te::make_coord(0, asc::te::make_coord(0, kIdx * kL1_)),
                 asc::te::make_shape(curML1 / sliceM, asc::te::make_shape(sliceM, curKL1)));
-            auto copyGM2L1Slice = asc::te::make_copy(Blaze::Gemm::Tile::CopySliceGM2L1{});
+            auto copyGM2L1Slice = asc::te::make_copy(Blaze::Gemm::Tile::CopySliceGM2L1{},
+                                                     Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
             asc::te::copy(copyGM2L1Slice, tensorAL1, gmTileASlice);
         } else {
             auto gmTileA = tensorA.slice(asc::te::make_coord(0, kIdx * kL1_), asc::te::make_shape(curML1, curKL1));
