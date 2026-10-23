@@ -19,12 +19,9 @@
 #include "kernel_operator.h"
 #include "tensor_api/tensor.h"
 
-#include "blaze/epilogue/block/block_epilogue_fmm_with_scale_add.h"
 #include "blaze/gemm/block/block_mmad.h"
-#include "blaze/gemm/block/block_mmad_matmul_fixpipe_opti.h"
 #include "blaze/gemm/block/block_scheduler_matmul_basic.h"
 #include "blaze/gemm/kernel/kernel_matmul_with_scale_add.h"
-#include "blaze/gemm/policy/dispatch_policy.h"
 #include "fused_mat_mul_tiling_data.h"
 
 namespace FusedMatMulUT {
@@ -60,6 +57,11 @@ __aicore__ inline void FusedMatMulWithScaleAddWrapper(GM_ADDR x1GM, GM_ADDR x2GM
                       matmulTiling.nBaseTailSplitCnt, matmulTiling.mTailMain, matmulTiling.nTailMain,
                       matmulTiling.mmadParam, static_cast<uint32_t>(matmulTiling.l2CacheDisable), matmulTiling.sliceM,
                       matmulTiling.srcNdStride, matmulTiling.innerBatch}};
+
+    params.epilogueParams.problemShape = params.problemShape;
+    params.epilogueParams.splitM = params.mmadParams.splitM != 0;
+    params.epilogueParams.baseM = params.schParams.baseM;
+    params.epilogueParams.baseN = params.schParams.baseN;
 
     MatmulKernel kernel;
     kernel(params);

@@ -2,6 +2,8 @@
 > [代码位置](../../../../include/blaze/gemm/kernel/kernel_matmul_with_scale_add.h)
 
 ## 功能说明
+兼容头文件保留原入口，并转发到公共 [Kernel Matmul With Epilogue](./kernel_matmul_with_epilogue.md)；原调度标签、分块与后处理计算接口保持兼容。
+
 FusedMatMul scale_add场景的AIC+AIV融合Kernel，按`KernelMmadFmmWithScaleAdd`调度策略对`GemmUniversal`进行特化，实现：
 
 $$ y = alpha \times (x1@x2) + beta \times x3 $$
@@ -70,7 +72,7 @@ x3/output使用fp32累加器后的UB空间，因此Kernel固定关闭累加器UB
 struct Params {
     ProblemShape problemShape;          // (m, n, k, batch)
     BlockMmadParams mmadParams;         // BlockMmad参数，包含splitM和ubDB
-    BlockEpilogueParams epilogueParams; // {x3GM, yGM, alpha, beta}
+    BlockEpilogueParams epilogueParams; // 地址、缩放、problemShape、splitM、baseM/baseN
     BlockSchedulerParams schParams;     // BlockScheduler参数
 };
 ```
@@ -98,6 +100,10 @@ Params params = {
     {...}
 };
 
+params.epilogueParams.problemShape = params.problemShape;
+params.epilogueParams.splitM = params.mmadParams.splitM != 0;
+params.epilogueParams.baseM = params.schParams.baseM;
+params.epilogueParams.baseN = params.schParams.baseN;
 MatmulKernel kernel;
 kernel(params);
 ```

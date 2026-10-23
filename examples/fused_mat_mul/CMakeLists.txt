@@ -1,0 +1,1 @@
+ops_example_add_executable(fused_mat_mul_sigmoid fused_mat_mul_sigmoid/fused_mat_mul_sigmoid.cpp)

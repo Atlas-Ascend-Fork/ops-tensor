@@ -81,6 +81,7 @@ public:
     using OutputType = ElementType_;
     using ComputeType = float;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
+    using BlockCoord = asc::te::coord<int64_t, int64_t, int64_t, int64_t>;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
 
     struct Params {
@@ -88,6 +89,10 @@ public:
         GM_ADDR outputGmAddr{nullptr};
         float alpha{Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
         float beta{Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
+        ProblemShape problemShape{};
+        bool splitM{false};
+        int64_t baseM{0};
+        int64_t baseN{0};
     };
 
     __aicore__ inline BlockEpilogueFmmWithScaleAdd()
@@ -106,7 +111,7 @@ public:
         }
     }
 
-    __aicore__ inline void Init(const Params& params, const ProblemShape& problemShape)
+    __aicore__ inline void Init(const Params& params)
     {
         if ASCEND_IS_AIV {
             x3GmAddr_ = params.x3GmAddr;
@@ -117,8 +122,22 @@ public:
             hasAlphaScale_ = alpha_ != Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE;
             hasBetaScale_ = beta_ != Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE;
             betaZero_ = beta_ == 0.0F;
-            n_ = asc::te::get<Blaze::Gemm::MNK_N>(problemShape);
+            m_ = asc::te::get<Blaze::Gemm::MNK_M>(params.problemShape);
+            n_ = asc::te::get<Blaze::Gemm::MNK_N>(params.problemShape);
+            splitM_ = params.splitM;
+            baseM_ = params.baseM;
+            baseN_ = params.baseN;
         }
+    }
+
+    template <typename TensorC>
+    __aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShape, const BlockCoord& blockCoord)
+    {
+        const int64_t coordM = asc::te::get<Blaze::Gemm::MNK_M>(blockCoord);
+        const int64_t coordN = asc::te::get<Blaze::Gemm::MNK_N>(blockCoord);
+        const int64_t batchIdx = asc::te::get<Blaze::Gemm::MNK_B>(blockCoord);
+        const int64_t dstOffset = (batchIdx * m_ + coordM) * n_ + coordN;
+        (*this)(ubTensor, blockShape, dstOffset, splitM_, baseM_, baseN_);
     }
 
     template <typename TensorC>
@@ -360,7 +379,11 @@ private:
 
     GM_ADDR x3GmAddr_{nullptr};
     GM_ADDR outputGmAddr_{nullptr};
+    int64_t m_{0};
     int64_t n_{0};
+    int64_t baseM_{0};
+    int64_t baseN_{0};
+    bool splitM_{false};
     float alpha_{Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
     float beta_{Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
     bool hasAlphaScale_{false};

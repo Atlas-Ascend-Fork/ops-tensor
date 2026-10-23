@@ -10,11 +10,14 @@
 ```cpp
 #pragma once
 
-#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510
+#if defined(__NPU_ARCH__)
+#include "blaze/epilogue/tile/arch35/dequant.h"
 #include "blaze/epilogue/tile/arch35/gelu.h"
 #include "blaze/epilogue/tile/arch35/initialize_empty_softmax.h"
+#include "blaze/epilogue/tile/arch35/mx_quant.h"
 #include "blaze/epilogue/tile/arch35/reduce_square.h"
 #include "blaze/epilogue/tile/arch35/rms_softmax.h"
+#include "blaze/epilogue/tile/arch35/sigmoid.h"
 #endif
 ```
 
@@ -27,14 +30,13 @@ Block Epilogue 只能 `#include "blaze/epilogue/tile/compute.h"`，
 - 新架构（如后续 arch 目录）只需扩展 compute.h，Block 层代码零改动
 
 ### 注册规范
-新增 Tile 时必须在 compute.h 的 `__NPU_ARCH__ == 3510` 守卫内注册，
+新增设备 Tile 时在 compute.h 的 `defined(__NPU_ARCH__)` 守卫内注册，
 include 列表保持**字母序**。未注册的 Tile 对 Block 层不可见
 （Block 经由 compute.h 引入，直连 arch35 头属于违规）。
 
 ### 架构守卫
-当前仅注册 `__NPU_ARCH__ == 3510`（Ascend 950 / dav-3510）的实现。
-非 3510 编译单元中 Tile 类型不可见，引用 Tile 类的代码只应出现在
-架构确定的 Kernel/Block 路径上。
+当前在定义 `__NPU_ARCH__` 的编译单元中引入 arch35 实现。
+Sigmoid 与 Gelu 等组件通过同一设备编译条件引入，Block 直接调用 Tile；调用处不再重复添加架构判断。
 
 ## 使用方式
 

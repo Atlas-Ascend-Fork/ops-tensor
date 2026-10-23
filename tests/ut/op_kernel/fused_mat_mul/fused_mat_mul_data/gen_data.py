@@ -64,10 +64,46 @@ def gen_fused_mat_mul_data(
     return a, b, x3, golden
 
 
+def gen_sigmoid_data(
+    m, n, k, dtype, bias_dtype, trans_a=False, trans_b=False, output_dir="./", seed=42
+):
+    os.makedirs(output_dir, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    a, a_fp32 = _cast_input(rng.uniform(-0.5, 0.5, (m, k)).astype(np.float32), dtype)
+    b, b_fp32 = _cast_input(rng.uniform(-0.5, 0.5, (k, n)).astype(np.float32), dtype)
+    accumulator = np.matmul(a_fp32, b_fp32)
+    if bias_dtype != "none":
+        bias_fp32 = np.linspace(-1.25, 1.25, n, dtype=np.float32)
+        if bias_dtype == "float32":
+            bias = bias_fp32
+        else:
+            bias, bias_fp32 = _cast_input(bias_fp32, dtype)
+        bias.tofile(os.path.join(output_dir, "input_bias.bin"))
+        accumulator += bias_fp32
+    golden_fp32 = 1.0 / (1.0 + np.exp(-accumulator))
+    golden = (
+        golden_fp32.astype(np.float16)
+        if dtype == "float16"
+        else _fp32_to_bf16_u16(golden_fp32)
+    )
+    (a.T.copy() if trans_a else a).tofile(os.path.join(output_dir, "input_a.bin"))
+    (b.T.copy() if trans_b else b).tofile(os.path.join(output_dir, "input_b.bin"))
+    golden.tofile(os.path.join(output_dir, "golden_c.bin"))
+    return golden
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate FusedMatMul scale-add test data"
+        description="Generate FusedMatMul scale-add or sigmoid test data"
     )
+    parser.add_argument(
+        "--optype", choices=["scale_add", "sigmoid"], default="scale_add"
+    )
+    parser.add_argument(
+        "--bias_dtype", choices=["none", "same", "float32"], default="none"
+    )
+    parser.add_argument("--trans_a", action="store_true")
+    parser.add_argument("--trans_b", action="store_true")
     parser.add_argument("--m", type=int, required=True, help="M dimension")
     parser.add_argument("--n", type=int, required=True, help="N dimension")
     parser.add_argument("--k", type=int, required=True, help="K dimension")
@@ -80,6 +116,20 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+
+    if args.optype == "sigmoid":
+        gen_sigmoid_data(
+            args.m,
+            args.n,
+            args.k,
+            args.dtype,
+            args.bias_dtype,
+            args.trans_a,
+            args.trans_b,
+            args.output_dir,
+            args.seed,
+        )
+        return
 
     gen_fused_mat_mul_data(
         args.m,

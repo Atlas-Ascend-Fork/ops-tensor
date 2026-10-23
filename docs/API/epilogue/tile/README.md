@@ -6,6 +6,7 @@
 | :----------------------------------------------------------- | :------: |
 | [compute](./compute.md) | Tile 计算组件的架构派发入口，Block 层唯一的 include 路径 |
 | [arch35/gelu](./arch35/gelu.md) | Tile 级 GELU 激活，支持 Tanh 近似与 Erf 精确两种算法 |
+| [arch35/sigmoid](./arch35/sigmoid.md) | Tile 级 sigmoid，FP32 输入与 float/FP16/BF16 输出，源和目的可使用不同的行跨度 |
 | [arch35/dequant](./arch35/dequant.md) | Tile 级反量化（双轴 API：类模板 tag 选量化对象、Run 模板 `DequantMode` 选粒度）：Fp4ToFp8Tag per-group 权重 → FP8；B32ToFpTag int32/fp32 ×scale + bias → fp32/bf16/fp16 |
 | [arch35/mx_quant](./arch35/mx_quant.md) | Tile 级 MX 动态量化链（eMax → scale → FP8/FP4 量化 → 布局转置） |
 | `arch35/initialize_empty_softmax.h` | BlockAttnResPrepare 空输入场景的 softmax 统计量初始化 |
@@ -19,6 +20,7 @@ BlockEpilogue（Block 层）
     └── #include "blaze/epilogue/tile/compute.h"（架构派发入口）
             └── arch35/（dav-3510 实现）
                     ├── Gelu                     → BlockEpilogueGeluMxQuant / BlockEpilogueGeluTanhMxQuant
+                    ├── Sigmoid                  → BlockEpilogueMatmulWithSigmoid
                     ├── Dequant<Fp4ToFp8Tag> → Gemm Kernel Wqmm Mix Pergroup 的 AIV prologue
                     ├── Dequant<B32ToFpTag>      → BlockEpilogueDequant
                     │                              / BlockEpilogueQbmmPertensorStreamK
@@ -54,6 +56,6 @@ Tile 层是 Block 层的可复用计算组件，职责边界：
 
 新增 Tile 时：
 1. 实现放在 `include/blaze/epilogue/tile/arch35/<name>.h`
-2. 在 `include/blaze/epilogue/tile/compute.h` 的 `__NPU_ARCH__ == 3510` 守卫内注册
+2. 在 `include/blaze/epilogue/tile/compute.h` 的 `defined(__NPU_ARCH__)` 守卫内注册
    （include 列表保持字母序）
 3. 对外函数开头增加 static_assert 基础校验（数据类型、UB 位置、NDExt 排布）

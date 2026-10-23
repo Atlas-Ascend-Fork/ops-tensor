@@ -68,6 +68,8 @@ __aicore__ inline void GemmSyrkSingleFetchWrapper(GM_ADDR aGM, GM_ADDR cInGM, GM
         {cInGM, cGM, tilingData.alpha, tilingData.beta},
         {block}};
 
+    params.epilogueParams.problemShape = params.problemShape;
+
     MatmulKernel kernel;
     kernel(params);
 }

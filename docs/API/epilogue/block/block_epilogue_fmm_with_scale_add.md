@@ -48,6 +48,7 @@ fp32累加器位于UB起始位置，x3和输出复用累加器后的同一块UB�
 | X3Type / OutputType | x3和输出类型 |
 | ComputeType | 向量计算类型，固定为float |
 | BlockShape | 当前Block的(M, N, K, Batch)形状 |
+| BlockCoord | 当前Block的全局(M, N, K, Batch)坐标 |
 
 ## 特殊数据结构
 
@@ -58,6 +59,10 @@ struct Params {
     GM_ADDR outputGmAddr{nullptr};
     float alpha{1.0F};
     float beta{1.0F};
+    ProblemShape problemShape{};
+    bool splitM{false};
+    int64_t baseM{0};
+    int64_t baseN{0};
 };
 ```
 
@@ -72,11 +77,25 @@ __aicore__ inline ~BlockEpilogueFmmWithScaleAdd()
 
 ### Init函数
 ```cpp
-__aicore__ inline void Init(const Params& params, const ProblemShape& problemShape)
+__aicore__ inline void Init(const Params& params)
 ```
-功能：记录x3和输出地址、alpha、beta及全局N；根据alpha、beta是否为1.0选择对应的向量计算分支。
+从 `params` 读取 x3 和输出地址、alpha、beta、完整 `problemShape` 及 `splitM/baseM/baseN` 配置。入口组装时填写完整的后处理参数，公共 Kernel 直接调用 `Init(params.epilogueParams)`。
+
+SYRK 同样使用 `Init(const Params&)`，在组装入口填写 `epilogueParams.problemShape`；`splitM/baseM/baseN` 保持原有默认值。原六参数、八参数计算接口及 SYRK 的显式 staging 窗口保持不变。
 
 ### operator函数
+公共Matmul Kernel使用三参入口：
+
+```cpp
+template <typename TensorC>
+__aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShape,
+                                const BlockCoord& blockCoord)
+```
+
+根据全局坐标计算`(batch * M + coordM) * N + coordN`，再使用初始化时保存的配置转调下方原接口。splitM行偏移、N分块、UB分段和同步均复用原实现。
+
+原多参接口继续保留，SYRK等已有调用方无需调整：
+
 ```cpp
 template <typename TensorC>
 __aicore__ inline void operator()(

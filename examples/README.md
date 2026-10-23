@@ -109,6 +109,7 @@ examples/
 | ---------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `mat_mul/`                       | mat_mul_basic, mat_mul_streamk, mat_mul_a_fullload, mat_mul_b_fullload, mat_mul_fixpipe_opti | 矩阵乘法样例                             |
 | `batch_mat_mul/`                 | mat_mul_bmm_broadcast, mat_mul_iterbatch_broadcast, mat_mul_iterbatch                     | 批量矩阵乘法样例                         |
+| `fused_mat_mul/` | [fused_mat_mul_sigmoid](fused_mat_mul/fused_mat_mul_sigmoid/README.md) | 矩阵乘与 sigmoid 融合，支持 FP16/BF16、转置及可选 bias |
 | `transpose_batch_mat_mul/`       | transpose_batch_mat_mul_basic                                                                | 转置批量矩阵乘法样例                     |
 | `quant_batch_matmul/`            | quant_batch_matmul_cube, quant_batch_matmul_mix, quant_batch_matmul_mx | 量化批量矩阵乘法样例 |
 | `block_attn_res_prepare/`        | block_attn_res_prepare                                                                        | Attention residual prepare 样例           |

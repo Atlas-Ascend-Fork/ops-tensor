@@ -31,6 +31,7 @@
 | [kernel_wqgmm_mix_weight_prologue](./kernel_wqgmm_mix_weight_prologue.md) | Grouped MX A8W4 Mix Kernel，支持 E2M1/E1M2、FP16/BF16 输出、可选 Bias 和单/多 Weight |
 | [kernel_wqmm_mix_antiquant](./kernel_wqmm_mix_antiquant.md) | 8 位权重反量化矩阵乘：AIV 前处理与 AIC 计算的 `GemmUniversal` 偏特化 |
 | [kernel_matmul_with_scale_add](./kernel_matmul_with_scale_add.md) | FusedMatMul scale_add Kernel，AIC 矩阵乘 + AIV 缩放相加后处理 |
+| [kernel_matmul_with_epilogue](./kernel_matmul_with_epilogue.md) | 公共 Matmul Kernel，AIC 矩阵乘 + 可替换 AIV epilogue，支持 sigmoid、scale_add 等后处理 |
 | [kernel_matmul_iterbatch](./kernel_matmul_iterbatch.md) | IterBatch MatMul Kernel，多 batch 驻留 L1 流水计算，支持 ON_THE_FLY（AIC 直出）和 ND_FIXPIPE_1_2（AIC+AIV）两种输出 |
 | [kernel_grouped_matmul](./kernel_grouped_matmul.md) | 非量化 Grouped Matmul Kernel，支持 M/K 轴分组、不分组、cumsum/count/sparse groupList、ND/NZ weight |
 
@@ -75,6 +76,7 @@ KernelMatmul
 | GemmUniversal (Weight Prologue) | AIC + AIV 双核 | FP8 激活 + packed FP4 权重 | ScaleA + ScaleB | `void` | 不需要 | 单 batch | Matmul SWAT | 有（ready/free 标志） | MXA8W4 Weight ND/NZ |
 | GmmWeightQuantMxKernel | AIC + AIV 双核 | FP8 激活 + packed FP4 E2M1/E1M2 权重 | ScaleA + ScaleB | `void` | 不需要 | group list | BlockSchedulerWqgmmNResplit | 有（ready/free 标志） | MX A8W4 Grouped Matmul |
 | KernelMatmulWithScaleAdd | AIC + AIV 双核 | 不支持 | alpha + beta | BlockEpilogueFmmWithScaleAdd | 不需要 | 多 batch | MatmulBasic | 有 | FusedMatMul scale_add |
+| GemmUniversal（KernelMmadWithEpilogue / sigmoid） | AIC + AIV 双核 | 不支持 | 不支持 | BlockEpilogueMatmulWithSigmoid | 不需要 | 单 batch | MatmulBasic | 有 | FusedMatMul sigmoid |
 | KernelMatmulIterbatch | 仅 AIC / AIC+AIV | 不支持 | 不支持 | BlockEpilogueIterbatch | 不需要 | 多 batch | MatmulIterBatch | 有（Fixpipe） | IterBatch Matmul |
 
 ## 使用流程

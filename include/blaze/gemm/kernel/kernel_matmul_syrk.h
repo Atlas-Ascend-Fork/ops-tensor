@@ -106,7 +106,7 @@ public:
 
         BlockEpilogue epilogueOp;
         BlockMmad blockMmad;
-        epilogueOp.Init(params.epilogueParams, problemShape_);
+        epilogueOp.Init(params.epilogueParams);
         if ASCEND_IS_AIC {
             blockMmad.Init(params.mmadParams);
         }

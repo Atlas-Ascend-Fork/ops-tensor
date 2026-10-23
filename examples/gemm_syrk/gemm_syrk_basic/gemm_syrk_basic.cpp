@@ -136,6 +136,8 @@ __global__ __aicore__ void gemm_syrk_kernel(GM_ADDR aGM, GM_ADDR cInGM, GM_ADDR 
                            // Scheduler params: the single symmetric block; no tail splitting.
                            {block}};
 
+    params.epilogueParams.problemShape = params.problemShape;
+
     MatmulKernel kernel;
     kernel(params);
 }

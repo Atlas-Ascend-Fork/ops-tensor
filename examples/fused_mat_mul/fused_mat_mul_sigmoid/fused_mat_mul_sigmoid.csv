@@ -1,0 +1,7 @@
+casename,m,k,n,transA,transB,dtype,bias_dtype
+fused_mat_mul_sigmoid_fp16_nn,513,129,257,false,false,float16,none
+fused_mat_mul_sigmoid_bf16_nn,64,128,64,false,false,bfloat16,none
+fused_mat_mul_sigmoid_fp16_nt_bias,17,33,65,false,true,float16,same
+fused_mat_mul_sigmoid_bf16_tn_fp32_bias,33,65,17,true,false,bfloat16,float32
+fused_mat_mul_sigmoid_fp16_tt_fp32_bias,33,65,79,true,true,float16,float32
+fused_mat_mul_sigmoid_bf16_small_n,1001,5,1,false,false,bfloat16,same

@@ -35,6 +35,7 @@ struct KernelMultiBlockStreamK {};               // Multi-tile transfer with K-a
 struct KernelQbmmMultiBlockStreamK {};           // QBMM MX StreamK schedule
 struct KernelQbmmPertensorMultiBlockStreamK {};  // QBMM per-tensor StreamK schedule
 struct KernelMmadMultiBlockBasic {};             // Multi-tile basic
+struct KernelMmadWithEpilogue {};                // Matmul with a dedicated AIV epilogue
 struct KernelMmadFmmWithScaleAdd {};             // Fused matmul with scale/add epilogue
 struct KernelMmadSyrk {};                        // Symmetric rank-k update, single nd2nz fetch per row-block
 struct KernelIterBatchBroadcast {};              // Multi-tile batchMatmul broadcast + iterbatch
