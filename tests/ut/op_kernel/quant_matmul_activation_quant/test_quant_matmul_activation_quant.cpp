@@ -10,7 +10,7 @@
 
 /*!
  * \file test_quant_matmul_activation_quant.cpp
- * \brief QuantMatmulActivationQuant production Blaze assembly and epilogue smoke tests.
+ * \brief QuantMatmulActivationQuant assembly compile checks and CPU-debug epilogue setup tests.
  */
 
 #include <algorithm>
@@ -54,6 +54,7 @@ private:
     GM_ADDR addr_{nullptr};
 };
 
+// Assembly checks validate types and signatures without instantiating or executing operator() bodies.
 template <typename AType, typename BType, typename OutputType, typename LayoutA, typename LayoutB,
           uint64_t FullLoadMode>
 void CheckPublicAssembly()
@@ -217,9 +218,70 @@ void CheckWithoutBatchSwiGluAssembly()
     EXPECT_EQ(params.qbmmParams.isBias, 1U);
 }
 
+template <typename AType, typename BType, typename LayoutA, typename LayoutB, uint64_t FullLoadMode>
+void CheckSwishAssembly()
+{
+    using Types = QuantMatmulSwishQuantTypes<AType, BType, LayoutA, LayoutB, FullLoadMode>;
+    using ExplicitScalar = Blaze::Epilogue::Block::BlockEpilogueSwishMxQuant<
+        AType, float, Blaze::Epilogue::Block::SwishBetaMode::Scalar>;
+    static_assert(std::is_same_v<typename Types::BlockEpilogue, ExplicitScalar>);
+    const typename ExplicitScalar::Params defaultParams{};
+    EXPECT_FLOAT_EQ(defaultParams.beta, 1.0F);
+    using Kernel = typename Types::Kernel;
+    using Epilogue = typename Types::BlockEpilogue;
+    using BlockMmad = typename Types::BlockMmad;
+    static_assert(std::is_same_v<typename Types::DispatchPolicy::ScheduleType,
+                                 Blaze::Gemm::KernelMmadWithScaleMxActivationQuant>);
+    static_assert(Types::DispatchPolicy::FULL_LOAD_MODE == FullLoadMode);
+    static_assert(Types::DispatchPolicy::L0C2UB_MODE == Blaze::Gemm::L0C2UB_MODE_DUAL_DST_SPLIT_M);
+    static_assert(!BlockMmad::CONCAT_N);
+    static_assert(std::is_same_v<typename BlockMmad::AType, AType>);
+    static_assert(std::is_same_v<typename BlockMmad::BType, BType>);
+    static_assert(std::is_same_v<typename BlockMmad::LayoutA, LayoutA>);
+    static_assert(std::is_same_v<typename BlockMmad::LayoutB, LayoutB>);
+    static_assert(std::is_same_v<typename BlockMmad::CType, float>);
+    static_assert(std::is_same_v<typename Epilogue::DataTypeIn, float>);
+    static_assert(std::is_same_v<typename Epilogue::DataTypeOut, AType>);
+    static_assert(
+        std::is_same_v<decltype(std::declval<Epilogue&>()(std::declval<const typename Epilogue::BlockShape&>(),
+                                                          std::declval<const typename Epilogue::BlockCoord&>())),
+                       void>);
+    static_assert(
+        std::is_same_v<decltype(std::declval<Kernel&>()(std::declval<const typename Kernel::Params&>())), void>);
+    EXPECT_GT(sizeof(Kernel), 0U);
+}
+
+template <typename AType, typename BType, typename LayoutA, typename LayoutB>
+void CheckSwishLoadModes()
+{
+    CheckSwishAssembly<AType, BType, LayoutA, LayoutB, Blaze::Gemm::NONE_FULL_LOAD_MODE>();
+    CheckSwishAssembly<AType, BType, LayoutA, LayoutB, Blaze::Gemm::A_FULL_LOAD_MODE>();
+}
+
+template <typename AType, typename BType>
+void CheckSwishNdLayouts()
+{
+    CheckSwishLoadModes<AType, BType, ND, ND>();
+    CheckSwishLoadModes<AType, BType, ND, DN>();
+    CheckSwishLoadModes<AType, BType, DN, ND>();
+    CheckSwishLoadModes<AType, BType, DN, DN>();
+}
+
+template <typename OutputType, uint32_t ScaleAlg>
+void RunSwishEpilogueSetup(float beta = 1.0F)
+{
+    GmBuffer y(static_cast<size_t>(M * N));
+    GmBuffer yScale(static_cast<size_t>(M * 2));
+    ASSERT_NE(y.Get(), nullptr);
+    ASSERT_NE(yScale.Get(), nullptr);
+    AscendC::SetKernelMode(KernelMode::MIX_MODE);
+    auto kernel = quant_matmul_swish_quant_epilogue_setup_entry<OutputType, ScaleAlg>;
+    ASSERT_TRUE(KERNEL_RUN_KF(kernel, BLOCK_NUM, y.Get(), yScale.Get(), beta)) << "Swish epilogue setup failed";
+}
+
 template <typename OutputType, Blaze::Epilogue::Block::GeluAlg GeluAlg, Blaze::Epilogue::Block::QuantAlg QuantAlg,
           Blaze::Epilogue::Block::ROUND_MODE_FP4 RoundMode>
-void RunEpilogueSmoke(float dstTypeMax)
+void RunEpilogueSetup(float dstTypeMax)
 {
     GmBuffer y(static_cast<size_t>(M * N));
     GmBuffer yScale(static_cast<size_t>(M * 2));
@@ -229,9 +291,8 @@ void RunEpilogueSmoke(float dstTypeMax)
     std::fill_n(reinterpret_cast<uint8_t*>(yScale.Get()), static_cast<size_t>(M * 2), 0U);
 
     AscendC::SetKernelMode(KernelMode::MIX_MODE);
-    auto kernel = quant_matmul_activation_quant_epilogue_smoke_entry<OutputType, GeluAlg, QuantAlg, RoundMode>;
-    ASSERT_TRUE(KERNEL_RUN_KF(kernel, BLOCK_NUM, y.Get(), yScale.Get(), dstTypeMax))
-        << "QuantMatmulActivationQuant production epilogue smoke failed";
+    auto kernel = quant_matmul_activation_quant_epilogue_setup_entry<OutputType, GeluAlg, QuantAlg, RoundMode>;
+    ASSERT_TRUE(KERNEL_RUN_KF(kernel, BLOCK_NUM, y.Get(), yScale.Get(), dstTypeMax)) << "GELU epilogue setup failed";
 }
 
 } // namespace
@@ -275,13 +336,37 @@ TEST(QuantMatmulActivationQuantTest, WithoutBatchAssemblyCoversGeluAndSwiGlu)
     CheckWithoutBatchSwiGluAssembly<ZN, Blaze::Gemm::A_FULL_LOAD_MODE>();
 }
 
-TEST(QuantMatmulActivationQuantTest, EpilogueAlgorithmsAndRoundModesSmoke)
+TEST(QuantMatmulActivationQuantTest, EpilogueSetupCoversAlgorithmsAndRoundModes)
 {
     using Blaze::Epilogue::Block::GeluAlg;
     using Blaze::Epilogue::Block::QuantAlg;
     using Blaze::Epilogue::Block::ROUND_MODE_FP4;
-    RunEpilogueSmoke<fp8_e4m3fn_t, GeluAlg::TANH, QuantAlg::OCP, ROUND_MODE_FP4::RINT>(0.0F);
-    RunEpilogueSmoke<fp8_e5m2_t, GeluAlg::ERF, QuantAlg::BLAS, ROUND_MODE_FP4::RINT>(0.0F);
-    RunEpilogueSmoke<fp4x2_e2m1_t, GeluAlg::ERF, QuantAlg::DYN_DTYPE_RANGE, ROUND_MODE_FP4::FLOOR>(7.0F);
-    RunEpilogueSmoke<fp4x2_e2m1_t, GeluAlg::TANH, QuantAlg::OCP, ROUND_MODE_FP4::ROUND>(0.0F);
+    RunEpilogueSetup<fp8_e4m3fn_t, GeluAlg::TANH, QuantAlg::OCP, ROUND_MODE_FP4::RINT>(0.0F);
+    RunEpilogueSetup<fp8_e5m2_t, GeluAlg::ERF, QuantAlg::BLAS, ROUND_MODE_FP4::RINT>(0.0F);
+    RunEpilogueSetup<fp4x2_e2m1_t, GeluAlg::ERF, QuantAlg::DYN_DTYPE_RANGE, ROUND_MODE_FP4::FLOOR>(7.0F);
+    RunEpilogueSetup<fp4x2_e2m1_t, GeluAlg::TANH, QuantAlg::OCP, ROUND_MODE_FP4::ROUND>(0.0F);
+}
+
+TEST(QuantMatmulActivationQuantTest, SwishAssemblyCoversNdDtypesTransposesAndLoadModes)
+{
+    CheckSwishNdLayouts<fp8_e4m3fn_t, fp8_e4m3fn_t>();
+    CheckSwishNdLayouts<fp8_e4m3fn_t, fp8_e5m2_t>();
+    CheckSwishNdLayouts<fp8_e5m2_t, fp8_e4m3fn_t>();
+    CheckSwishNdLayouts<fp8_e5m2_t, fp8_e5m2_t>();
+}
+
+TEST(QuantMatmulActivationQuantTest, SwishAssemblyCoversWeightNzTransposesAndLoadModes)
+{
+    CheckSwishLoadModes<fp8_e4m3fn_t, fp8_e4m3fn_t, ND, NZ>();
+    CheckSwishLoadModes<fp8_e4m3fn_t, fp8_e4m3fn_t, ND, ZN>();
+    CheckSwishLoadModes<fp8_e5m2_t, fp8_e4m3fn_t, ND, NZ>();
+    CheckSwishLoadModes<fp8_e5m2_t, fp8_e4m3fn_t, ND, ZN>();
+}
+
+TEST(QuantMatmulActivationQuantTest, SwishEpilogueSetupCoversOutputDtypesAndScaleAlgorithms)
+{
+    RunSwishEpilogueSetup<fp8_e4m3fn_t, 0U>();
+    RunSwishEpilogueSetup<fp8_e4m3fn_t, 1U>(0.5F);
+    RunSwishEpilogueSetup<fp8_e5m2_t, 0U>(2.0F);
+    RunSwishEpilogueSetup<fp8_e5m2_t, 1U>(-1.0F);
 }

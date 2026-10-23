@@ -33,8 +33,9 @@ void operator()(BlockShape, ...);                // 每个 tile 执行一次
 | **空操作** | `BlockEpilogueEmpty` | 无（占位符） |
 | **Fixpipe 直写** | `BlockEpilogueFixpipe` | UB → 可选 ReLU → GM |
 | **反量化** | `BlockEpilogueDequant` | int32→fp32→×scale→+bias→cast→GM |
-| **MX 量化+激活** | `BlockEpilogueGeluMxQuant` | fp32→Gelu→bf16→MaxExp→Scale→FP8/FP4→GM |
+| **MX 量化+激活** | `BlockEpilogueGeluMxQuant` | fp32→GELU→bf16→MaxExp→Scale→FP8/FP4→GM |
 | **SwiGLU+MX 量化** | `BlockEpilogueSwigluMxQuant` | fp32→SwiGLU→bf16→MX 量化→GM |
+| **Swish+MX 量化** | [BlockEpilogueSwishMxQuant](./block/block_epilogue_swish_mx_quant.md) | fp32→Swish(x, β)→bf16→MXFP8 量化→GM，保留完整 N |
 | **StreamK 归约** | `BlockEpilogueMatmulStreamK` | workspace GM→UB→K 轴 Add→cast→GM |
 | **Per-TOKEN Scale** | `BlockEpiloguePerTokenScale` | UB→×perTokenScale→cast→GM |
 | **Scale+Add** | `BlockEpilogueFmmWithScaleAdd` | UB→×alpha+beta×x3→GM |
@@ -112,6 +113,10 @@ epilogueOp.Init(params.epilogueParams);
 // 在 tile 循环中调用
 epilogueOp(blockShape, offsetC, splitM, baseM, baseN);
 ```
+
+接入 [QBMM MX Activation Quant Kernel](../gemm/kernel/kernel_qbmm_mx_activation_quant.md#输入-ub-复用通知的所有权) 时，
+`ConcatN=false` 的 Epilogue 须自行调用 `NotifyCube()`；`ConcatN=true` 时由 Kernel 在 Epilogue 返回后通知。
+每个 AIV/tile 须恰好通知一次，包括零行分支。输出和 scale 的搬出由 Epilogue 自行同步。
 
 ## 6. 检查清单
 

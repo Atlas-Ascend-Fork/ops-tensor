@@ -11,10 +11,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-"""Generate deterministic MX inputs and compute GELU/SwiGLU + MX-quant golden data.
+"""Generate deterministic MX inputs and compute GELU/SwiGLU/Swish + MX-quant golden data.
 
-A is MX-quantized FP8 (fp8_e4m3 / fp8_e5m2) or FP4 (fp4_e2m1). B is MX-quantized FP8 (fp8_e4m3)
-or FP4 (fp4_e2m1), NZ layout. FP4*FP8 mixed dtype is not supported.
+A is MX-quantized FP8 (fp8_e4m3 / fp8_e5m2) or FP4 (fp4_e2m1). B supports ND/NZ layouts.
+Swish (including SiLU) uses FP8 only and additionally supports fp8_e5m2 B in ND. FP4*FP8 mixed dtype is not supported.
 C dtype is float (L0C float32 accumulator, DualDst to UB).
 Output Y dtype follows A dtype; Y_scale is fp8_e8m0.
 """
@@ -165,7 +165,7 @@ def format_scale_b_trans(scale_b, n):
 
 
 # ---------------------------------------------------------------------------
-# NZ conversion (weight B is always NZ layout)
+# NZ conversion (when the requested weight layout is NZ)
 # ---------------------------------------------------------------------------
 
 
@@ -227,7 +227,20 @@ def swiglu(x):
         return gate / (1.0 + np.exp(-gate)) * linear
 
 
-def mx_quantize(data, emax, dtype_max, scale_alg):
+def swish(x, beta=1.0):
+    """Compute Swish in FP32 and flush subnormal results to signed zero."""
+    values = np.asarray(x, dtype=np.float32)
+    neg_beta = -np.float32(beta)
+    with np.errstate(over="ignore"):
+        result = values / (np.float32(1.0) + np.exp(values * neg_beta))
+    return np.where(
+        np.abs(result) < np.finfo(np.float32).tiny,
+        np.copysign(np.float32(0.0), result),
+        result,
+    )
+
+
+def mx_quantize(data, emax, dtype_max, scale_alg, *, zero_scale_on_zero_exp=True):
     """Quantize the last axis in 32-element blocks using OCP(0) or BLAS(1) scale."""
     values = np.asarray(data, dtype=np.float32)
     width = values.shape[-1]
@@ -250,6 +263,11 @@ def mx_quantize(data, emax, dtype_max, scale_alg):
     normalized = np.ldexp(
         blocks.astype(np.float64), (127 - scale_codes.astype(np.int32))[..., None]
     )
+    if scale_alg == 0 and not zero_scale_on_zero_exp:
+        # Swish follows DynamicMxQuant: zero reciprocal when sharedExp == 0.
+        normalized = np.where(
+            scale_codes[..., None] == 0, np.copysign(0.0, blocks), normalized
+        )
     normalized = np.clip(normalized, -dtype_max, dtype_max)
     quantized = normalized.reshape(rows.shape[0], padded_width)[:, :width]
     return quantized.reshape(values.shape), scale_codes.view(FP8_E8M0)
@@ -273,10 +291,24 @@ def _write_bin(path, arr):
 
 
 def generate(args):
-    if min(args.m, args.n, args.k) <= 0 or args.k % 8 != 0:
-        raise ValueError("M/N must be positive and K must be a multiple of 8")
+    if not np.isfinite(args.beta) or abs(args.beta) > np.finfo(np.float32).max:
+        raise ValueError("beta must be a finite FP32 scalar")
+    beta = np.float32(args.beta)
+    if args.activation != "swish" and beta != np.float32(1.0):
+        raise ValueError("beta can differ from 1 only for swish")
+    if min(args.m, args.n, args.k) <= 0:
+        raise ValueError("M/N/K must be positive")
+    if args.activation not in ("silu", "swish") and args.k % 8 != 0:
+        raise ValueError("GELU/SwiGLU examples require K to be a multiple of 8")
     if args.bias not in (0, args.n):
         raise ValueError("bias must be 0 or N")
+    if args.b_dtype == "fp8_e5m2" and args.activation not in ("silu", "swish"):
+        raise ValueError("This example enables E5M2 B only for Swish/SiLU")
+    if args.activation in ("silu", "swish"):
+        if args.a_dtype == "fp4_e2m1" or args.b_dtype == "fp4_e2m1":
+            raise ValueError("Swish/SiLU requires FP8 inputs")
+        if args.format == "(ND,NZ)" and (args.trans_a or args.b_dtype != "fp8_e4m3"):
+            raise ValueError("Swish/SiLU NZ requires transA=false and E4M3 B")
     if args.activation == "swiglu":
         if (
             args.n % 64 != 0
@@ -316,6 +348,8 @@ def generate(args):
     # The epilogue performs activation in FP32 and rounds its result to BF16 before MX quantization.
     if args.activation == "swiglu":
         activation_result = swiglu(matmul_with_bias).astype(bfloat16)
+    elif args.activation in ("silu", "swish"):
+        activation_result = swish(matmul_with_bias, beta).astype(bfloat16)
     else:
         activation_result = gelu_tanh(matmul_with_bias).astype(bfloat16)
 
@@ -323,7 +357,11 @@ def generate(args):
     emax = _EMAX_MAP[args.a_dtype]
     dtype_max = _DTYPE_MAX[args.a_dtype]
     quantized_fp32, y_scale_flat = mx_quantize(
-        activation_result.astype(np.float32), emax, dtype_max, args.scale_alg
+        activation_result.astype(np.float32),
+        emax,
+        dtype_max,
+        args.scale_alg,
+        zero_scale_on_zero_exp=args.activation not in ("silu", "swish"),
     )
 
     if args.a_dtype == "fp4_e2m1":
@@ -391,11 +429,16 @@ def main():
     parser.add_argument(
         "--a-dtype", required=True, choices=("fp8_e4m3", "fp8_e5m2", "fp4_e2m1")
     )
-    parser.add_argument("--b-dtype", required=True, choices=("fp8_e4m3", "fp4_e2m1"))
+    parser.add_argument(
+        "--b-dtype", required=True, choices=("fp8_e4m3", "fp8_e5m2", "fp4_e2m1")
+    )
     parser.add_argument("--trans-a", action="store_true", default=False)
     parser.add_argument("--trans-b", action="store_true", default=False)
     parser.add_argument("--format", default="(ND,NZ)", choices=("(ND,ND)", "(ND,NZ)"))
-    parser.add_argument("--activation", default="gelu", choices=("gelu", "swiglu"))
+    parser.add_argument(
+        "--activation", default="gelu", choices=("gelu", "swiglu", "silu", "swish")
+    )
+    parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--scale-alg", type=int, default=0, choices=(0, 1))
     generate(parser.parse_args())
 

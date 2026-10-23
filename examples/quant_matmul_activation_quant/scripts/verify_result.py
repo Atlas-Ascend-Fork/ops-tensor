@@ -34,7 +34,6 @@ _COLLECTED_METRICS = []
 
 FP8_E4M3FN = ml_dtypes.float8_e4m3fn
 FP8_E5M2 = ml_dtypes.float8_e5m2
-FP8_E8M0 = ml_dtypes.float8_e8m0fnu
 FP4_E2M1_TO_FP32 = (
     np.arange(16, dtype=np.int8).view(ml_dtypes.float4_e2m1fn).astype(np.float32)
 )
@@ -58,33 +57,39 @@ def load_y_as_fp32(path, dtype):
     return raw.view(_DTYPE_MAP[dtype]).astype(np.float32)
 
 
-def load_y_scale_as_fp32(path):
-    raw = np.fromfile(path, dtype=np.uint8)
-    return raw.view(FP8_E8M0).astype(np.float32)
-
-
 def compare(name, golden_path, actual_path, dtype, is_scale=False):
     if is_scale:
-        golden = load_y_scale_as_fp32(golden_path)
-        actual = load_y_scale_as_fp32(actual_path)
-        atol = 1.0
-        rtol = 1e-3
+        # Compare E8M0 bytes exactly, including paired-scale padding.
+        golden = np.fromfile(golden_path, dtype=np.uint8)
+        actual = np.fromfile(actual_path, dtype=np.uint8)
+        atol = 0.0
+        rtol = 0.0
     else:
         golden = load_y_as_fp32(golden_path, dtype)
         actual = load_y_as_fp32(actual_path, dtype)
         atol = 1.0
         rtol = 1e-3
 
-    n = min(golden.size, actual.size)
+    if golden.size != actual.size:
+        raise ValueError(
+            f"{name}: size mismatch: expected {golden.size}, got {actual.size}"
+        )
+    n = golden.size
     if n == 0:
         raise ValueError(f"{name}: empty output")
-    golden = golden[:n]
-    actual = actual[:n]
-
-    close = np.isclose(actual, golden, rtol=rtol, atol=atol)
+    if is_scale:
+        close = (actual == golden) & (actual != 0xFF) & (golden != 0xFF)
+    else:
+        close = (
+            np.isfinite(actual)
+            & np.isfinite(golden)
+            & np.isclose(actual, golden, rtol=rtol, atol=atol)
+        )
     error_count = int(np.count_nonzero(~close))
     error_ratio = error_count / n
-    max_abs_error = float(np.max(np.abs(golden - actual)))
+    max_abs_error = float(
+        np.max(np.abs(golden.astype(np.float64) - actual.astype(np.float64)))
+    )
 
     print(f"[verify] {name}: dtype={dtype}, elements={n}")
     print(f"  max abs diff: {max_abs_error:.6e}")
@@ -110,9 +115,11 @@ def compare(name, golden_path, actual_path, dtype, is_scale=False):
     print(f"[PASS] {name}")
 
 
-def _write_metrics_json():
+def _write_metrics_json(failed=False):
     overall = (
-        "pass" if all(o["status"] == "pass" for o in _COLLECTED_METRICS) else "fail"
+        "pass"
+        if not failed and all(o["status"] == "pass" for o in _COLLECTED_METRICS)
+        else "fail"
     )
     write_metrics_json(_COLLECTED_METRICS, overall, "./output")
 
@@ -147,7 +154,7 @@ def main():
         )
     except (OSError, ValueError) as error:
         print(error)
-        _write_metrics_json()
+        _write_metrics_json(failed=True)
         return 1
     _write_metrics_json()
     print("[PASS] NPU results are consistent with golden.")

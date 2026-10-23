@@ -10,7 +10,7 @@
 
 /*!
  * \file kernel_qbmm_mx_activation_quant.h
- * \brief QBMM MX with GELU/SwiGLU activation and MX quantization.
+ * \brief QBMM MX with GELU/SwiGLU/Swish activation and MX quantization.
  */
 
 #pragma once
@@ -111,6 +111,7 @@ private:
     static constexpr int64_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
     static constexpr uint16_t C0_SIZE_SHIFT = IsFp4<AType>() ? MXFP_DIVISOR_SHIFT : ALIGN_32_BYTES_SHIFT;
     static constexpr uint16_t BLOCK_CUBE_SHIFT = 4;
+    static constexpr uint64_t MX_QUANT_GROUP_SIZE = 32;
 
     using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE>>;
     using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE>>;
@@ -421,7 +422,8 @@ __aicore__ inline void GemmUniversal<QUANT_MATMUL_ACTIVATION_QUANT_TEMPLATE_ARGS
         } else {
             const int64_t scaleN = ((n + static_cast<int64_t>(MXFP_DIVISOR_SIZE) - 1) >> MXFP_DIVISOR_SHIFT)
                                    << MXFP_MULTI_BASE_SHIFT;
-            epilogueOp_.UpdateGlobalAddr({batchCOffset_ * m * n >> sizeShift, batchCOffset_ * m * scaleN, 0, 0, 0});
+            epilogueOp_.UpdateGlobalAddr({static_cast<int64_t>(batchCOffset_ * m * n >> sizeShift),
+                                          static_cast<int64_t>(batchCOffset_ * m * scaleN)});
         }
     }
 }
@@ -466,9 +468,11 @@ __aicore__ inline void GemmUniversal<QUANT_MATMUL_ACTIVATION_QUANT_TEMPLATE_ARGS
             const int64_t scaleN = ((n + static_cast<int64_t>(MXFP_DIVISOR_SIZE) - 1) >> MXFP_DIVISOR_SHIFT)
                                    << MXFP_MULTI_BASE_SHIFT;
             const int64_t scaleNPos = (nPos + BLOCK_SIZE - 1) >> ALIGN_32_BYTES_SHIFT;
-            epilogueOp_({baseM, baseN, 0, 0}, {mPos * n + nPos, mPos * scaleN + scaleNPos, 0, 0, 0});
+            epilogueOp_({baseM, baseN, 0, 0}, {mPos * n + nPos, mPos * scaleN + scaleNPos});
         }
-        Sync::NotifyCube();
+        if constexpr (IS_SWIGLU) {
+            Sync::NotifyCube();
+        }
     }
 }
 
@@ -509,7 +513,7 @@ __aicore__ inline void GemmUniversal<QUANT_MATMUL_ACTIVATION_QUANT_TEMPLATE_ARGS
     int64_t mPos = 0L, nPos = 0L;
     while (bs.GetTileIdx(blockCoord)) {
         BlockShape singleShape = bs.template GetBlockShape<QuantMode::MX_PERGROUP_MODE, QuantMode::MX_PERGROUP_MODE,
-                                                           WEIGHT_NZ, 32>(blockCoord);
+                                                           WEIGHT_NZ, MX_QUANT_GROUP_SIZE>(blockCoord);
         const auto baseM = asc::te::get<IDX_M_TILEIDX>(singleShape);
         const auto baseN = asc::te::get<IDX_N_TILEIDX>(singleShape);
         if (baseM <= 0 || baseN <= 0) {

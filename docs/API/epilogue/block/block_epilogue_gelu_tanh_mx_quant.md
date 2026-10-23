@@ -1,30 +1,28 @@
-# Block Epilogue GeluTanh MX Quant
+# Block Epilogue GELU(tanh) MX Quant
 > [代码位置](../../../../include/blaze/epilogue/block/block_epilogue_gelu_tanh_mx_quant.h)
 
 ## 功能说明
 
-`BlockEpilogueGeluTanhMxQuant` 是 GMMAQ/QGMM ActivationQuant 使用的 MIX
-后处理组件。AIC 完成 MX Grouped Matmul 后，通过 DualDst fixpipe 将 L0C 中的
-`float` 累加结果写入 UB；AIV 等待 AIC 完成后，执行 GeluTanh 和动态 MX 量化，
-最终将量化结果 `y` 与 E8M0 scale 写回 GM。
+`BlockEpilogueGeluTanhMxQuant` 在 AIV 上读取 UB 中的 FP32 矩阵乘结果，执行
+GELU（tanh）和动态 MX 量化，将 FP8/FP4 输出 `y` 与 E8M0 scale 写回 GM。
 
 本组件的计算流程为：
 
 ~~~text
-L0C(float) → UB(float) → GeluTanh(fp32) → bf16
+L0C(float) → UB(float) → GELU(tanh, fp32) → bf16
            → MX quantization → y(FP8/FP4) + yScale(E8M0)
 ~~~
 
-GeluTanh 使用高性能近似公式：
+GELU 的 tanh 近似公式为：
 
 $$
-\operatorname{GeluTanh}(x)=0.5x\left(1+\tanh\left(\sqrt{2/\pi}\left(x+0.044715x^3\right)\right)\right)
+\operatorname{GELU}(x)=0.5x\left(1+\tanh\left(\sqrt{2/\pi}\left(x+0.044715x^3\right)\right)\right)
 $$
 
-实现中等价地使用指数形式计算：
+实现采用以下指数形式计算：
 
 $$
-\operatorname{GeluTanh}(x)=\frac{x}{1+\exp\left(-\sqrt{8/\pi}\left(x+0.044715x^3\right)\right)}
+\operatorname{GELU}(x)=\frac{x}{1+\exp\left(-\sqrt{8/\pi}\left(x+0.044715x^3\right)\right)}
 $$
 
 激活计算以 fp32 完成，结果存储为 bf16，后续 MX scale 计算和 FP8/FP4
@@ -34,7 +32,7 @@ $$
 
 - 输入累加类型：仅支持 `float`。
 - 输出类型：`fp8_e4m3fn_t`、`fp8_e5m2_t`、`fp4x2_e2m1_t`、`fp4x2_e1m2_t`。
-- 激活函数：仅支持 GeluTanh，不支持 GeluErf。
+- 激活函数：仅支持 GELU（tanh），不支持 GELU（erf）。
 - yScale 类型：`fp8_e8m0_t`，以 E8M0 shared exponent 表示。
 - 执行位置：AIV，配合 AIC:AIV=1:2 的 MIX Kernel。
 - 上游 Kernel：`KernelGroupedMmadWithScaleMxActivationQuant`，即 GMMAQ/QGMM
@@ -192,7 +190,7 @@ __aicore__ inline void operator()(
 
 1. 两个 AIV 按 M 维均分当前 tile；没有分配到有效行的 AIV 直接返回。
 2. 从 UB 地址 0 读取 AIC 写入的 float L0C 结果。
-3. 计算 GeluTanh，并将激活结果转换为 bf16。
+3. 计算 GELU（tanh），并将激活结果转换为 bf16。
 4. 按 32 个元素计算 MX shared exponent 和 reciprocal scale。
 5. 将激活结果量化为 FP8 或 FP4。
 6. 转换 yScale 的行布局，并将 y 与 yScale 写回 GM。
@@ -274,13 +272,13 @@ QGMM Kernel 按 group list 逐组更新问题形状和 GM 偏移：
 
 ## 与 QBMMAQ Epilogue 的关系
 
-本组件与 [Block Epilogue Gelu MX Quant](./block_epilogue_gelu_mx_quant.md)
-共享 AIC+AIV 融合、Gelu 后 bf16 中间结果和动态 MX 量化的基本数据流，但接口
+本组件与 [Block Epilogue GELU MX Quant](./block_epilogue_gelu_mx_quant.md)
+共享 AIC+AIV 融合、GELU 后 bf16 中间结果和动态 MX 量化的基本数据流，但接口
 和适用 Kernel 不同：
 
-- QBMMAQ epilogue 支持 GeluTanh/GeluErf、float/bf16 输入，以及
+- QBMMAQ epilogue 支持 GELU（tanh）/GELU（erf）、float/bf16 输入，以及
   `geluAlg`、`quantAlg`、`fp4RoundMode` 参数。
-- GMMAQ/QGMM epilogue 仅支持 float 输入和 GeluTanh，使用
+- GMMAQ/QGMM epilogue 仅支持 float 输入和 GELU（tanh），使用
   `scaleAlg`、`dstTypeMax` 参数。
 - QBMMAQ 处理 Batch Matmul 的 batch 偏移；GMMAQ/QGMM 处理 group list、
   group shape 和每个 group 的 y/yScale 偏移。
@@ -291,7 +289,7 @@ QGMM Kernel 按 group list 逐组更新问题形状和 GM 偏移：
 ## 适用场景
 
 - Ascend950 上的 GMMAQ/QGMM MX Grouped Matmul 融合后处理。
-- 需要在单个 MIX Kernel 中完成 Grouped Matmul、GeluTanh 和 MXFP8/MXFP4
+- 需要在单个 MIX Kernel 中完成 Grouped Matmul、GELU（tanh）和 MXFP8/MXFP4
   activation quant 的推理场景。
 - 通过 AIC 计算与 AIV 向量后处理流水重叠，降低独立 activation quant
   Kernel 的额外访存和调度开销。

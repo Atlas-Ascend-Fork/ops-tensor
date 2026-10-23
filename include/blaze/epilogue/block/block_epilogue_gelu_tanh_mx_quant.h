@@ -10,7 +10,7 @@
 
 /*!
  * \file block_epilogue_gelu_tanh_mx_quant.h
- * \brief MIX epilogue: float L0C in UB -> GeluTanh -> dynamic MX y/yScale.
+ * \brief MIX epilogue: float L0C in UB -> GELU (tanh) -> dynamic MX y/yScale.
  */
 
 #pragma once
@@ -314,7 +314,7 @@ private:
 
         // MxQuantConfig members are resolved at Init time (fpEmax_ / invDstTypeMax_ / addValueBits_);
         // the tile config is built at the call site (tile types must stay out of class scope).
-        // zeroScaleOnZeroExp=false: gelu_tanh lineage
+        // In OCP mode, zero sharedExp clears the reciprocal.
         Tile::MxQuantConfig cfg{Tile::MxScaleAlg::OCP, fpEmax_, invDstTypeMax_, addValueBits_, false};
 
         Tile::MxQuant<DataTypeOut> mx;

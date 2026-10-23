@@ -22,4 +22,5 @@
 #include "blaze/epilogue/tile/arch35/reduce_square.h"
 #include "blaze/epilogue/tile/arch35/rms_softmax.h"
 #include "blaze/epilogue/tile/arch35/sigmoid.h"
+#include "blaze/epilogue/tile/arch35/swish.h"
 #endif

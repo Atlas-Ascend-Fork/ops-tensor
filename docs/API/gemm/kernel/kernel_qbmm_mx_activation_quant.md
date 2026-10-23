@@ -5,15 +5,16 @@
 ## 功能说明
 
 该 Kernel 是 MX 量化 Batch Matmul 的 AIC+AIV 融合实现：AIC 执行 MX MMAD，并通过
-DualDst Fixpipe 将 L0C 的 FP32 结果写入 UB；AIV 执行 GELU 或 SwiGLU 激活与动态
+DualDst Fixpipe 将 L0C 的 FP32 结果写入 UB；AIV 执行 GELU、SwiGLU 或 Swish 激活与动态
 MX 量化，输出 `y` 和 `yScale`。
 
 本实现支持最多 4 维 Batch、A/B Batch 广播和 Batch 地址换算；单 Batch（无广播）场景
 复用同一 Kernel，由调用方将 `qbmmParams` 中的 batch 维度填为默认值 1。
 
-激活路径由 `BlockMmad::DispatchPolicy::ScheduleType`（统一为 `KernelMmadWithScaleMxActivationQuant`）加 `MatmulWithScaleMx` 的 `ConcatN` 模板参数选择：
+使用 `KernelMmadWithScaleMxActivationQuant` 调度策略，由 `MatmulWithScaleMx` 的 `ConcatN` 参数与 BlockEpilogue 配合选择激活：
 
-- `KernelMmadWithScaleMxActivationQuant`：GELU + MX 量化。
+- `ConcatN=false`：保留完整 N，由 BlockEpilogue 选择 GELU 或 Swish。
+- `ConcatN=true`：拼接 gate/linear 两个半区，由 SwiGLU Epilogue 输出 N/2 列。
 
 ## 特殊约束
 
@@ -25,7 +26,7 @@ MX 量化，输出 `y` 和 `yScale`。
 
 ### SwiGLU 路径
 
-- A/B 仅支持 MXFP8，A 仅支持不转置。
+- A/B 仅支持 MXFP8；ND 权重支持 A 不转置或转置，WeightNZ 产品接口要求 A 不转置。
 - B 支持不转置和转置，对应 ND/DN 或 WeightNZ 的 NZ/ZN 布局。
 - 原始 `N` 必须为正数且是 64 的倍数；矩阵乘结果按 `C=[gate | linear]` 等分，gate 和 linear 各占
   `N/2`，并计算 `SiLU(gate) * linear`；输出 `y` 宽度为 `N/2`。
@@ -39,10 +40,23 @@ MX 量化，输出 `y` 和 `yScale`。
 `N/2` 是 32 的倍数。WeightNZ 的 gate/linear 半区和每个输出 tile 均从完整的
 NZ/ZN 分形边界开始，Cube 分别搬运两个半区到连续的 L1/L0C 列。
 
+### Swish 路径
+
+标量 β 由 Epilogue Params 指定，默认 1（SiLU）。
+
+- 使用 `ConcatN=false`，后处理替换为
+  [BlockEpilogueSwishMxQuant](../../epilogue/block/block_epilogue_swish_mx_quant.md)。
+- 完整 FP32 矩阵乘结果加 bias 后逐元素计算 `Swish(x, β)`，以 BF16 RINT 舍入后执行 MXFP8 RINT 量化。
+- ND 路径中，A、B 可分别选用 `fp8_e4m3fn_t` 或 `fp8_e5m2_t`，并分别设置是否转置。
+- WeightNZ 路径中，A 可选上述两种 FP8 类型且不转置；B 为 `fp8_e4m3fn_t`，可设置是否转置。
+- 输出 dtype 由 Epilogue 指定；example 使用与 A 相同的类型。
+- `scaleAlg` 仅支持 0（OCP）或 1（BLAS），输出保留完整 N，N 无 64 对齐要求。
+- `epilogueParams.baseN` 传入完整 tile 宽度；单 batch、多 batch、A 全载及非全载均使用同一 Epilogue。
+
 ### Scale 与 DualDst
 
 - `scaleAGmAddr`、`scaleBGmAddr` 的数据类型均为 `fp8_e8m0_t`。
-- 令 `H=N`（GELU）或 `H=N/2`（SwiGLU），输出形状为
+- 令 `H=N`（GELU/Swish）或 `H=N/2`（SwiGLU），输出形状为
   `y=[batch..., M, H]`、`yScale=[batch..., M, ceil(H/64), 2]`。
 - `scaleAlg=0/1` 分别选择 OCP 和 cuBLAS/BLAS；两者在 FP8 表示边界附近的差异与选择建议见
   [`MxQuant`](../../epilogue/tile/arch35/mx_quant.md#ocp-与-cublas-算法选择)。
@@ -72,8 +86,8 @@ class GemmUniversal<...>;
 | 参数 | 说明 |
 |---|---|
 | `ProblemShape` | 问题形状 `(M, N, K, Batch)` |
-| `BlockMmad` | MX MMAD 组件，ScheduleType 为 GELU 或 SwiGLU 的多 Batch tag |
-| `BlockEpilogue` | 与 ScheduleType 匹配的 GELU/SwiGLU 动态 MX 量化组件 |
+| `BlockMmad` | MX MMAD 组件，ScheduleType 为 `KernelMmadWithScaleMxActivationQuant` |
+| `BlockEpilogue` | GELU/SwiGLU/Swish 动态 MX 量化组件，须与 `ConcatN` 匹配；同步约定见下文 |
 | `BlockScheduler` | QBMM 分块调度器 |
 
 ## 数据结构
@@ -124,8 +138,8 @@ __aicore__ inline void operator()(const Params& params)
 1. 初始化输入地址、Batch 元数据、BlockMmad 和 BlockEpilogue。
 2. SwiGLU 路径把逻辑调度宽度设置为原始 `N/2`，并把调度 `baseN` 同步减半。
 3. Batch 为 1 时直接处理；Batch 大于 1 时计算各输入步长并执行 4 维广播循环。
-4. 对每个 tile，AIC 完成 MX MMAD 并通知 AIV；AIV 完成激活、量化和写回后通知 AIC。
-5. AIC 在退出前等待最后一个 AIV tile 完成。
+4. 对每个 tile，AIC 完成 MX MMAD 和 Fixpipe 写入后通知 AIV；AIV 等待数据就绪，再调用 epilogue。
+5. GELU/Swish 由 Epilogue 通知输入 UB 可复用，SwiGLU 由 Kernel 通知；AIC 在下一 tile 及退出前等待。
 
 ## 内部流程
 
@@ -149,15 +163,38 @@ AIC: WaitForVector（除首 tile）
      -> DualDst Fixpipe 到 UB
      -> NotifyVector
 
-AIV: WaitForCube
-     -> GELU 或 SwiGLU
-     -> 动态 MX 量化
-     -> 写回 y/yScale
-     -> NotifyCube
+AIV（GELU/Swish）:
+     WaitForCube（Kernel）
+     -> 激活结果写入独立 BF16 区（Epilogue）
+     -> NotifyCube：释放输入 UB（Epilogue）
+     -> 动态 MX 量化、提交 y/yScale 写回（Epilogue）
+
+AIV（SwiGLU）:
+     WaitForCube（Kernel）
+     -> Epilogue：激活、量化、提交 y/yScale 写回
+     -> NotifyCube：释放输入 UB（Kernel）
 ```
 
 SwiGLU 使用逻辑输出坐标 `(M, H)`，其中 `H=N/2`；Batch 输出偏移和 `yScale`
 步长也按 H 计算。
+
+### 输入 UB 复用通知的所有权
+
+`NotifyCube()` 的职责按 `BlockMmad::CONCAT_N` 约定：
+
+| `ConcatN` | Epilogue | 通知执行者与时机 |
+| --- | --- | --- |
+| `false` | GELU/Swish | Epilogue 完成输入区的最后一次读取后通知 |
+| `true` | SwiGLU | Kernel 在 Epilogue 的 `operator()` 返回后通知 |
+
+自定义 Epilogue 须遵循同一约定：`ConcatN=false` 时自行通知，`ConcatN=true` 时由 Kernel 通知。
+每个参与 tile 的 AIV 须恰好通知一次。GELU/Swish 的零行分支在返回前通知；SwiGLU 的零行分支返回后由 Kernel 通知。
+
+GELU/Swish 在激活结果写入 BF16 区后、MX 量化前通知，允许 Fixpipe 复用每个 AIV 的 FP32 输入区 `[0, 131072)` 字节。
+输出与 scale 的搬出及复用由 Epilogue 的 `V_MTE3` / `MTE3_V` 保护，析构时等待最后一次搬出完成。
+
+Kernel 负责 `NotifyVector()` / `WaitForCube()` 数据就绪同步。AIC 首 tile 无需等待输入释放，
+后续 tile（包括跨 batch）及退出前通过 `WaitForVector(..., true)` 等待两个 AIV 的通知。
 
 ## SwiGLU WeightNZ 组件组装示例
 
@@ -213,3 +250,4 @@ epilogueParams.scaleAlg = scaleAlg;
 - 多 Batch 或需要 A/B Batch 广播的 QuantMatmulActivationQuant。
 - MXFP4/MXFP8 GELU 融合输出量化。
 - MXFP8 SwiGLU 的 ND 或 WeightNZ 权重输入。
+- MXFP8 Swish 的 ND 或 WeightNZ 权重输入，输出保留完整 N。

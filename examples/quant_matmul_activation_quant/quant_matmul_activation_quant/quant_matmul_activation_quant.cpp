@@ -10,19 +10,22 @@
 
 /**
  * @file quant_matmul_activation_quant.cpp
- * @brief CSV-driven MX quantized matmul + GELU/SwiGLU + dynamic MX quant fusion example.
+ * @brief CSV-driven MX quantized matmul + GELU/SwiGLU/Swish + dynamic MX quant fusion example.
  *
- * Exercises the batch and without-batch GemmUniversal specializations with
- * Blaze::Gemm::MatmulWithScaleMx dispatch policy and GELU/SwiGLU epilogues.
+ * Both batch and without_batch options use the same GemmUniversal kernel with batch=1.
  *
  * Both A and B are MX-quantized (FP8 or FP4), each carrying an independent E8M0 scale.
  * AIC does MX GEMM (L0C→UB via DualDst fixpipe), AIV does activation and dynamic
  * MX quantization, outputting quantized Y (same dtype as A) + fp8_e8m0 scale.
  *
  * Supported transposes: transA (A stored as (K,M)), transB (B stored as (N,K))
- * Weight B is always in NZ layout (ZN when transB=true).
+ * Weight B supports ND and NZ layouts (DN/ZN when transB=true).
  *
- * Supported A dtypes: fp8_e4m3, fp8_e5m2, fp4_e2m1. B dtype: fp8_e4m3 or fp4_e2m1 (must match A's FP4/FP8 category).
+ * For Swish in ND, A and B can independently use fp8_e4m3 or fp8_e5m2.
+ * In NZ, B must use fp8_e4m3 and A must not be transposed.
+ * For GELU/SwiGLU with FP8 inputs, B must use fp8_e4m3; A may use fp8_e4m3 or fp8_e5m2.
+ * GELU also supports fp4_e2m1 for both A and B. Swish uses FP8 output with RINT only.
+ * The silu entry selects Swish with beta=1.
  * C dtype (matmul intermediate / epilogue input): float32 (L0C accumulator, DualDst to UB).
  * Bias dtype: float32
  */
@@ -31,6 +34,7 @@
 #define K_MAX_SHAPE_DIM 0
 #endif
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +44,7 @@
 
 #include "acl/acl.h"
 #include "blaze/epilogue/block/block_epilogue_gelu_mx_quant.h"
+#include "blaze/epilogue/block/block_epilogue_swish_mx_quant.h"
 #include "blaze/epilogue/block/block_epilogue_swiglu_mx_quant.h"
 #include "blaze/gemm/block/block_mmad_qbmm_mx.h"
 #include "blaze/gemm/block/block_scheduler_qbmm.h"
@@ -59,47 +64,49 @@ static constexpr int64_t BLOCK_16 = 16L;
 static constexpr uint64_t C0_SIZE_B8 = 32UL;
 static constexpr uint64_t C0_SIZE_B4 = 64UL;
 
+enum class ActivationKind { GELU, SWIGLU, SWISH };
+
 /* ========================================================================== */
 /* Macros                                                                     */
 /* ========================================================================== */
 
-#define LAUNCH_KERNEL_IMPL(FULL_LOAD_MODE, IS_SWIGLU)                                                            \
-    quant_matmul_activation_quant_kernel<A_TYPE, B_TYPE, A_TYPE, LAYOUT_A, LAYOUT_B, FULL_LOAD_MODE, IS_SWIGLU>  \
+#define LAUNCH_KERNEL_IMPL(FULL_LOAD_MODE, ACTIVATION)                                                           \
+    quant_matmul_activation_quant_kernel<A_TYPE, B_TYPE, A_TYPE, LAYOUT_A, LAYOUT_B, FULL_LOAD_MODE, ACTIVATION> \
         <<<p.blockNum, 0, p.stream>>>(p.dA, p.dB, p.dBias, p.dScaleA, p.dScaleB, p.dY, p.dYScale, p.m, p.k, p.n, \
                                       p.baseM, p.baseN, p.baseK, p.kL1, p.scaleKL1, p.l1BufferNum, p.dbL0C,      \
-                                      p.biasElements, p.scaleAlg)
+                                      p.biasElements, p.scaleAlg, p.beta)
 
-#define DISPATCH_TRANS(A_TYPE, B_TYPE, TRANS_A, TRANS_B, IS_NZ, FULL_LOAD_MODE)                             \
-    do {                                                                                                    \
-        if (TRANS_A) {                                                                                      \
-            if (TRANS_B) {                                                                                  \
-                if (IS_NZ) {                                                                                \
-                    LaunchKernel<A_TYPE, B_TYPE, true, true, true, FULL_LOAD_MODE, false>(launchParams);    \
-                } else {                                                                                    \
-                    LaunchKernel<A_TYPE, B_TYPE, true, true, false, FULL_LOAD_MODE, false>(launchParams);   \
-                }                                                                                           \
-            } else {                                                                                        \
-                if (IS_NZ) {                                                                                \
-                    LaunchKernel<A_TYPE, B_TYPE, true, false, true, FULL_LOAD_MODE, false>(launchParams);   \
-                } else {                                                                                    \
-                    LaunchKernel<A_TYPE, B_TYPE, true, false, false, FULL_LOAD_MODE, false>(launchParams);  \
-                }                                                                                           \
-            }                                                                                               \
-        } else {                                                                                            \
-            if (TRANS_B) {                                                                                  \
-                if (IS_NZ) {                                                                                \
-                    LaunchKernel<A_TYPE, B_TYPE, false, true, true, FULL_LOAD_MODE, false>(launchParams);   \
-                } else {                                                                                    \
-                    LaunchKernel<A_TYPE, B_TYPE, false, true, false, FULL_LOAD_MODE, false>(launchParams);  \
-                }                                                                                           \
-            } else {                                                                                        \
-                if (IS_NZ) {                                                                                \
-                    LaunchKernel<A_TYPE, B_TYPE, false, false, true, FULL_LOAD_MODE, false>(launchParams);  \
-                } else {                                                                                    \
-                    LaunchKernel<A_TYPE, B_TYPE, false, false, false, FULL_LOAD_MODE, false>(launchParams); \
-                }                                                                                           \
-            }                                                                                               \
-        }                                                                                                   \
+#define DISPATCH_TRANS(A_TYPE, B_TYPE, TRANS_A, TRANS_B, IS_NZ, FULL_LOAD_MODE, ACTIVATION)                      \
+    do {                                                                                                         \
+        if (TRANS_A) {                                                                                           \
+            if (TRANS_B) {                                                                                       \
+                if (IS_NZ) {                                                                                     \
+                    LaunchKernel<A_TYPE, B_TYPE, true, true, true, FULL_LOAD_MODE, ACTIVATION>(launchParams);    \
+                } else {                                                                                         \
+                    LaunchKernel<A_TYPE, B_TYPE, true, true, false, FULL_LOAD_MODE, ACTIVATION>(launchParams);   \
+                }                                                                                                \
+            } else {                                                                                             \
+                if (IS_NZ) {                                                                                     \
+                    LaunchKernel<A_TYPE, B_TYPE, true, false, true, FULL_LOAD_MODE, ACTIVATION>(launchParams);   \
+                } else {                                                                                         \
+                    LaunchKernel<A_TYPE, B_TYPE, true, false, false, FULL_LOAD_MODE, ACTIVATION>(launchParams);  \
+                }                                                                                                \
+            }                                                                                                    \
+        } else {                                                                                                 \
+            if (TRANS_B) {                                                                                       \
+                if (IS_NZ) {                                                                                     \
+                    LaunchKernel<A_TYPE, B_TYPE, false, true, true, FULL_LOAD_MODE, ACTIVATION>(launchParams);   \
+                } else {                                                                                         \
+                    LaunchKernel<A_TYPE, B_TYPE, false, true, false, FULL_LOAD_MODE, ACTIVATION>(launchParams);  \
+                }                                                                                                \
+            } else {                                                                                             \
+                if (IS_NZ) {                                                                                     \
+                    LaunchKernel<A_TYPE, B_TYPE, false, false, true, FULL_LOAD_MODE, ACTIVATION>(launchParams);  \
+                } else {                                                                                         \
+                    LaunchKernel<A_TYPE, B_TYPE, false, false, false, FULL_LOAD_MODE, ACTIVATION>(launchParams); \
+                }                                                                                                \
+            }                                                                                                    \
+        }                                                                                                        \
     } while (0)
 
 /* ========================================================================== */
@@ -127,6 +134,7 @@ struct CliArgs {
     std::string activation = "gelu";
     uint32_t scaleAlg = 0;
     std::string kernelVariant = "batch";
+    float beta = 1.0F;
 };
 
 static bool ParseBool(const char* s)
@@ -137,12 +145,12 @@ static bool ParseBool(const char* s)
 
 static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
 {
-    if (argc != 21) {
+    if (argc != 21 && argc != 22) {
         std::fprintf(stderr,
                      "Usage: %s <m> <k> <n> <bias> <a_dtype> <b_dtype>"
                      " <transA> <transB> <format> <base_m> <base_n> <base_k> <tile_k_l1> <scale_k_l1>"
-                     " <l1_buffers> <db_l0c> <a_full_load> <gelu|swiglu> <scale_alg>"
-                     " <batch|without_batch>\n",
+                     " <l1_buffers> <db_l0c> <a_full_load> <gelu|swiglu|silu|swish> <scale_alg>"
+                     " <batch|without_batch> [beta=1]\n",
                      argv[0]);
         return false;
     }
@@ -168,10 +176,26 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
     args.activation = argv[18];
     args.scaleAlg = static_cast<uint32_t>(std::atoll(argv[19]));
     args.kernelVariant = argv[20];
+    if (argc == 22) {
+        char* end = nullptr;
+        args.beta = std::strtof(argv[21], &end);
+        if (end == argv[21] || *end != '\0' || !std::isfinite(args.beta)) {
+            std::fprintf(stderr, "Error: beta must be a finite FP32 scalar.\n");
+            return false;
+        }
+    }
+    if (args.activation != "swish" && args.beta != 1.0F) {
+        std::fprintf(stderr, "Error: beta can differ from 1 only for swish.\n");
+        return false;
+    }
 
     // Validation
     if (args.m <= 0 || args.k <= 0 || args.n <= 0) {
         std::fprintf(stderr, "Error: M, K, N must be positive integers.\n");
+        return false;
+    }
+    if (args.baseM <= 0) {
+        std::fprintf(stderr, "Error: base_m must be a positive integer.\n");
         return false;
     }
     if (args.bias != 0 && args.bias != args.n) {
@@ -182,8 +206,8 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
         std::fprintf(stderr, "Error: A dtype must be fp8_e4m3, fp8_e5m2, or fp4_e2m1.\n");
         return false;
     }
-    if (args.bDtype != "fp8_e4m3" && args.bDtype != "fp4_e2m1") {
-        std::fprintf(stderr, "Error: B dtype must be fp8_e4m3 or fp4_e2m1.\n");
+    if (args.bDtype != "fp8_e4m3" && args.bDtype != "fp8_e5m2" && args.bDtype != "fp4_e2m1") {
+        std::fprintf(stderr, "Error: B dtype must be fp8_e4m3, fp8_e5m2, or fp4_e2m1.\n");
         return false;
     }
     bool aIsFp4 = args.aDtype == "fp4_e2m1";
@@ -197,8 +221,13 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
         std::fprintf(stderr, "Error: format must be (ND,ND) or (ND,NZ) (got '%s').\n", args.format.c_str());
         return false;
     }
-    if (args.activation != "gelu" && args.activation != "swiglu") {
-        std::fprintf(stderr, "Error: activation must be gelu or swiglu.\n");
+    if (args.activation != "gelu" && args.activation != "swiglu" && args.activation != "silu" &&
+        args.activation != "swish") {
+        std::fprintf(stderr, "Error: activation must be gelu, swiglu, silu, or swish.\n");
+        return false;
+    }
+    if (args.bDtype == "fp8_e5m2" && args.activation != "silu" && args.activation != "swish") {
+        std::fprintf(stderr, "Error: this example enables E5M2 B only for Swish/SiLU.\n");
         return false;
     }
     if (args.scaleAlg > 1U) {
@@ -216,8 +245,20 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
     if (args.activation == "swiglu") {
         if (args.kernelVariant != "without_batch" || args.transA || aIsFp4 || bIsFp4 || args.n % 64 != 0) {
             std::fprintf(stderr,
-                         "Error: swiglu example requires without_batch, transA=false, FP8 inputs, and N multiple "
+                         "Error: SwiGLU example requires without_batch, transA=false, FP8 inputs, and N multiple "
                          "of 64.\n");
+            return false;
+        }
+    }
+    if (args.activation == "silu" || args.activation == "swish") {
+        if (aIsFp4 || bIsFp4 || (args.format == "(ND,NZ)" && (args.transA || args.bDtype != "fp8_e4m3"))) {
+            std::fprintf(stderr, "Error: Swish/SiLU requires FP8 inputs; NZ requires transA=false and E4M3 B.\n");
+            return false;
+        }
+        if (args.baseM <= 0 || args.baseM > 256 || args.baseM % 16 != 0 || args.baseN <= 0 || args.baseN > 256 ||
+            args.baseN % GROUP_SIZE != 0) {
+            std::fprintf(stderr, "Error: Swish/SiLU requires base_m in [16,256] aligned to 16 and "
+                                 "base_n in [32,256] aligned to 32.\n");
             return false;
         }
     }
@@ -248,7 +289,7 @@ static size_t ElementCountToBytes(int64_t count, const std::string& dtype)
 }
 
 /* ========================================================================== */
-/* NZ format utilities (weight B is always NZ)                                */
+/* NZ format utilities                                                       */
 /* ========================================================================== */
 
 static uint64_t GetC0Size(const std::string& dtype) { return IsFp4Dtype(dtype) ? C0_SIZE_B4 : C0_SIZE_B8; }
@@ -272,11 +313,12 @@ static int64_t CalcNZElementCount(int64_t k, int64_t n, const std::string& dtype
 
 using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
 
-template <class AType, class BType, class CType, class LayoutA, class LayoutB, uint64_t FullLoadMode, bool IsSwiGlu>
+template <class AType, class BType, class CType, class LayoutA, class LayoutB, uint64_t FullLoadMode,
+          ActivationKind Activation>
 __global__ __aicore__ void quant_matmul_activation_quant_kernel(
     GM_ADDR aGm, GM_ADDR bGm, GM_ADDR biasGm, GM_ADDR scaleAGm, GM_ADDR scaleBGm, GM_ADDR yGm, GM_ADDR yScaleGm,
     int64_t m, int64_t k, int64_t n, uint64_t baseM, uint64_t baseN, uint64_t baseK, uint64_t kL1, uint64_t scaleKL1,
-    uint64_t l1BufferNum, uint64_t dbL0C, uint64_t biasElements, uint32_t scaleAlg)
+    uint64_t l1BufferNum, uint64_t dbL0C, uint64_t biasElements, uint32_t scaleAlg, float beta)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::InitSocState();
@@ -285,6 +327,7 @@ __global__ __aicore__ void quant_matmul_activation_quant_kernel(
     using BiasType = float;
     using LayoutC = asc::te::nd_ext_layout_ptn;
     using LayoutBias = asc::te::nd_ext_layout_ptn;
+    constexpr bool IsSwiGlu = Activation == ActivationKind::SWIGLU;
     // Single-batch cases reuse the batch kernel with default batch parameters (all batch dims 1).
     // SwiGLU selects the concat-N layout via the policy flag (mmad produces [gate|linear], epilogue N/2).
     using DispatchPolicy = Blaze::Gemm::MatmulWithScaleMx<FullLoadMode, false,
@@ -296,7 +339,9 @@ __global__ __aicore__ void quant_matmul_activation_quant_kernel(
                                                     LayoutC, BiasType, LayoutBias>;
     using BlockEpilogue = AscendC::Std::conditional_t<
         IsSwiGlu, Blaze::Epilogue::Block::BlockEpilogueSwigluMxQuant<OutType, MatmulOutType, fp8_e8m0_t>,
-        Blaze::Epilogue::Block::BlockEpilogueGeluMxQuant<OutType, MatmulOutType>>;
+        AscendC::Std::conditional_t<Activation == ActivationKind::SWISH,
+                                    Blaze::Epilogue::Block::BlockEpilogueSwishMxQuant<OutType, MatmulOutType>,
+                                    Blaze::Epilogue::Block::BlockEpilogueGeluMxQuant<OutType, MatmulOutType>>>;
     using Kernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 
     typename Kernel::Params params{};
@@ -312,6 +357,9 @@ __global__ __aicore__ void quant_matmul_activation_quant_kernel(
         params.epilogueParams.baseM = static_cast<uint32_t>(baseM);
         params.epilogueParams.baseN = static_cast<uint32_t>(baseN >> 1);
         params.epilogueParams.scaleAlg = static_cast<uint8_t>(scaleAlg);
+    } else if constexpr (Activation == ActivationKind::SWISH) {
+        params.epilogueParams = {yGm,      yScaleGm, static_cast<uint32_t>(baseM), static_cast<uint32_t>(baseN),
+                                 scaleAlg, beta};
     } else {
         params.epilogueParams = {yGm,
                                  yScaleGm,
@@ -366,10 +414,12 @@ struct LaunchParams {
     uint64_t baseM, baseN, baseK;
     uint64_t kL1, scaleKL1, l1BufferNum, dbL0C, biasElements;
     uint32_t scaleAlg;
+    float beta;
     aclrtStream stream;
 };
 
-template <class A_TYPE, class B_TYPE, bool TransA, bool TransB, bool IsNzFormat, uint64_t FullLoadMode, bool IsSwiGlu>
+template <class A_TYPE, class B_TYPE, bool TransA, bool TransB, bool IsNzFormat, uint64_t FullLoadMode,
+          ActivationKind Activation>
 void LaunchKernel(const LaunchParams& p)
 {
     using LAYOUT_A = std::conditional_t<TransA, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
@@ -377,22 +427,31 @@ void LaunchKernel(const LaunchParams& p)
         IsNzFormat, std::conditional_t<TransB, asc::te::zn_layout_ptn, asc::te::nz_layout_ptn>,
         std::conditional_t<TransB, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>>;
 
-    LAUNCH_KERNEL_IMPL(FullLoadMode, IsSwiGlu);
+    if constexpr (Activation == ActivationKind::SWISH && IsNzFormat &&
+                  (TransA || !std::is_same_v<B_TYPE, fp8_e4m3fn_t>)) {
+        // ParseCliArgs rejects these combinations before allocating device memory.
+        std::fprintf(stderr, "Unsupported Swish/SiLU WeightNZ layout/dtype combination.\n");
+        std::exit(1);
+    } else {
+        LAUNCH_KERNEL_IMPL(FullLoadMode, Activation);
+    }
 }
 
-template <class A_TYPE, class B_TYPE, uint64_t FullLoadMode>
-void LaunchGeluByTrans(const CliArgs& args, bool isNzFormat, const LaunchParams& launchParams)
+template <class A_TYPE, class B_TYPE, uint64_t FullLoadMode, ActivationKind Activation>
+void LaunchElementwiseByTrans(const CliArgs& args, bool isNzFormat, const LaunchParams& launchParams)
 {
-    DISPATCH_TRANS(A_TYPE, B_TYPE, args.transA, args.transB, isNzFormat, FullLoadMode);
+    DISPATCH_TRANS(A_TYPE, B_TYPE, args.transA, args.transB, isNzFormat, FullLoadMode, Activation);
 }
 
-template <class A_TYPE, class B_TYPE>
-void LaunchGeluByFullLoad(const CliArgs& args, bool isNzFormat, const LaunchParams& launchParams)
+template <class A_TYPE, class B_TYPE, ActivationKind Activation = ActivationKind::GELU>
+void LaunchElementwiseByFullLoad(const CliArgs& args, bool isNzFormat, const LaunchParams& launchParams)
 {
     if (args.aFullLoad) {
-        LaunchGeluByTrans<A_TYPE, B_TYPE, Blaze::Gemm::A_FULL_LOAD_MODE>(args, isNzFormat, launchParams);
+        LaunchElementwiseByTrans<A_TYPE, B_TYPE, Blaze::Gemm::A_FULL_LOAD_MODE, Activation>(args, isNzFormat,
+                                                                                            launchParams);
     } else {
-        LaunchGeluByTrans<A_TYPE, B_TYPE, Blaze::Gemm::NONE_FULL_LOAD_MODE>(args, isNzFormat, launchParams);
+        LaunchElementwiseByTrans<A_TYPE, B_TYPE, Blaze::Gemm::NONE_FULL_LOAD_MODE, Activation>(args, isNzFormat,
+                                                                                               launchParams);
     }
 }
 
@@ -401,14 +460,14 @@ void LaunchSwiGluByLayout(const CliArgs& args, bool isNzFormat, const LaunchPara
 {
     if (args.transB) {
         if (isNzFormat) {
-            LaunchKernel<A_TYPE, B_TYPE, false, true, true, FullLoadMode, true>(launchParams);
+            LaunchKernel<A_TYPE, B_TYPE, false, true, true, FullLoadMode, ActivationKind::SWIGLU>(launchParams);
         } else {
-            LaunchKernel<A_TYPE, B_TYPE, false, true, false, FullLoadMode, true>(launchParams);
+            LaunchKernel<A_TYPE, B_TYPE, false, true, false, FullLoadMode, ActivationKind::SWIGLU>(launchParams);
         }
     } else if (isNzFormat) {
-        LaunchKernel<A_TYPE, B_TYPE, false, false, true, FullLoadMode, true>(launchParams);
+        LaunchKernel<A_TYPE, B_TYPE, false, false, true, FullLoadMode, ActivationKind::SWIGLU>(launchParams);
     } else {
-        LaunchKernel<A_TYPE, B_TYPE, false, false, false, FullLoadMode, true>(launchParams);
+        LaunchKernel<A_TYPE, B_TYPE, false, false, false, FullLoadMode, ActivationKind::SWIGLU>(launchParams);
     }
 }
 
@@ -437,6 +496,17 @@ static void Run(const CliArgs& args)
     if (blockNum <= 0) {
         std::cerr << "blockNum cannot be less than 0, but current: " << blockNum << std::endl;
         return;
+    }
+    if (args.aFullLoad) {
+        const int64_t mBlockNum = CeilDiv(args.m, args.baseM);
+        if (mBlockNum > blockNum) {
+            std::cerr << "AFullLoad requires ceil(M / base_m) <= AIC core count, but got " << mBlockNum
+                      << " M blocks and " << blockNum << " AIC cores." << std::endl;
+            std::exit(1);
+        }
+        // A stays resident in L1: each core must keep the same M tile across N rounds.
+        // The A-full-load scheduler requires an equal number of cores for every M tile.
+        blockNum = blockNum / mBlockNum * mBlockNum;
     }
 
     const uint64_t scaleK = static_cast<uint64_t>(CeilDiv(args.k, static_cast<int64_t>(MXFP_DIVISOR_SIZE))) *
@@ -516,14 +586,17 @@ static void Run(const CliArgs& args)
     ACL_CHECK(aclrtMemcpy(deviceBias, biasSize, hostBias.data(), biasSize, ACL_MEMCPY_HOST_TO_DEVICE));
     ACL_CHECK(aclrtMemcpy(deviceScaleA, scaleASize, hostScaleA.data(), scaleASize, ACL_MEMCPY_HOST_TO_DEVICE));
     ACL_CHECK(aclrtMemcpy(deviceScaleB, scaleBSize, hostScaleB.data(), scaleBSize, ACL_MEMCPY_HOST_TO_DEVICE));
+    // Poison outputs so missing stores (including the paired scale padding byte) fail verification.
+    ACL_CHECK(aclrtMemset(deviceY, ySize, 0xFF, ySize));
+    ACL_CHECK(aclrtMemset(deviceYScale, yScaleSize, 0xFF, yScaleSize));
 
     // Print execution summary
     std::cout << "============================================================" << std::endl;
     std::cout << "  QuantMatmulActivationQuant MX — Execution Summary" << std::endl;
     std::cout << "============================================================" << std::endl;
     std::cout << "  Shape    : M=" << args.m << ", K=" << args.k << ", N=" << args.n << std::endl;
-    std::cout << "  A Dtype  : " << args.aDtype << " (also C/Y dtype)" << std::endl;
-    std::cout << "  B Dtype  : " << args.bDtype << " (weight NZ)" << std::endl;
+    std::cout << "  A Dtype  : " << args.aDtype << " (also Y dtype; C is FP32)" << std::endl;
+    std::cout << "  B Dtype  : " << args.bDtype << std::endl;
     std::cout << "  transA   : " << (args.transA ? "true" : "false") << std::endl;
     std::cout << "  transB   : " << (args.transB ? "true" : "false") << std::endl;
     std::cout << "  Format   : " << args.format << std::endl;
@@ -535,6 +608,9 @@ static void Run(const CliArgs& args)
     std::cout << "  dbL0C    : " << args.dbL0C << std::endl;
     std::cout << "  AFullLoad: " << (args.aFullLoad ? "true" : "false") << std::endl;
     std::cout << "  Activation: " << args.activation << std::endl;
+    if (args.activation == "silu" || args.activation == "swish") {
+        std::cout << "  Beta     : " << args.beta << std::endl;
+    }
     std::cout << "  ScaleAlg : " << (args.scaleAlg == 0U ? "OCP" : "BLAS") << std::endl;
     std::cout << "  Kernel   : " << args.kernelVariant << std::endl;
     std::cout << "  BlockNum : " << blockNum << std::endl;
@@ -560,6 +636,7 @@ static void Run(const CliArgs& args)
                                  static_cast<uint64_t>(args.dbL0C),
                                  static_cast<uint64_t>(args.bias),
                                  args.scaleAlg,
+                                 args.beta,
                                  stream};
 
     if (args.activation == "swiglu") {
@@ -572,12 +649,25 @@ static void Run(const CliArgs& args)
                          args.bDtype.c_str());
             std::exit(1);
         }
+    } else if (args.activation == "silu" || args.activation == "swish") {
+        if (args.aDtype == "fp8_e4m3" && args.bDtype == "fp8_e4m3") {
+            LaunchElementwiseByFullLoad<fp8_e4m3fn_t, fp8_e4m3fn_t, ActivationKind::SWISH>(args, isNzFormat,
+                                                                                           launchParams);
+        } else if (args.aDtype == "fp8_e5m2" && args.bDtype == "fp8_e4m3") {
+            LaunchElementwiseByFullLoad<fp8_e5m2_t, fp8_e4m3fn_t, ActivationKind::SWISH>(args, isNzFormat,
+                                                                                         launchParams);
+        } else if (args.aDtype == "fp8_e4m3" && args.bDtype == "fp8_e5m2") {
+            LaunchElementwiseByFullLoad<fp8_e4m3fn_t, fp8_e5m2_t, ActivationKind::SWISH>(args, isNzFormat,
+                                                                                         launchParams);
+        } else {
+            LaunchElementwiseByFullLoad<fp8_e5m2_t, fp8_e5m2_t, ActivationKind::SWISH>(args, isNzFormat, launchParams);
+        }
     } else if (args.aDtype == "fp8_e4m3" && args.bDtype == "fp8_e4m3") {
-        LaunchGeluByFullLoad<fp8_e4m3fn_t, fp8_e4m3fn_t>(args, isNzFormat, launchParams);
+        LaunchElementwiseByFullLoad<fp8_e4m3fn_t, fp8_e4m3fn_t>(args, isNzFormat, launchParams);
     } else if (args.aDtype == "fp8_e5m2" && args.bDtype == "fp8_e4m3") {
-        LaunchGeluByFullLoad<fp8_e5m2_t, fp8_e4m3fn_t>(args, isNzFormat, launchParams);
+        LaunchElementwiseByFullLoad<fp8_e5m2_t, fp8_e4m3fn_t>(args, isNzFormat, launchParams);
     } else if (args.aDtype == "fp4_e2m1" && args.bDtype == "fp4_e2m1") {
-        LaunchGeluByFullLoad<fp4x2_e2m1_t, fp4x2_e2m1_t>(args, isNzFormat, launchParams);
+        LaunchElementwiseByFullLoad<fp4x2_e2m1_t, fp4x2_e2m1_t>(args, isNzFormat, launchParams);
     } else {
         std::fprintf(stderr,
                      "Unsupported A/B dtype combination: a=%s b=%s.\n"

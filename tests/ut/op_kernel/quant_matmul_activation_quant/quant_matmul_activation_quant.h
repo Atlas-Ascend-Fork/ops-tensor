@@ -10,7 +10,7 @@
 
 /*!
  * \file quant_matmul_activation_quant.h
- * \brief QuantMatmulActivationQuant production Blaze assembly and epilogue smoke entries.
+ * \brief QuantMatmulActivationQuant Blaze assembly types and CPU-debug epilogue setup entries.
  */
 
 #pragma once
@@ -24,6 +24,7 @@
 #include "quant_batch_matmul/qbmm_cpu_debug_stub.h"
 
 #include "blaze/epilogue/block/block_epilogue_gelu_mx_quant.h"
+#include "blaze/epilogue/block/block_epilogue_swish_mx_quant.h"
 #include "blaze/epilogue/block/block_epilogue_swiglu_mx_quant.h"
 #include "blaze/gemm/block/block_mmad_qbmm_mx.h"
 #include "blaze/gemm/block/block_scheduler_qbmm.h"
@@ -104,17 +105,43 @@ struct QuantMatmulSwiGluQuantWithoutBatchTypes {
     using Kernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 };
 
+template <typename AType_, typename BType_, typename LayoutA_, typename LayoutB_, uint64_t FullLoadMode_>
+struct QuantMatmulSwishQuantTypes {
+    using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
+    using LayoutC = asc::te::nd_ext_layout_ptn;
+    using DispatchPolicy = Blaze::Gemm::MatmulWithScaleMx<FullLoadMode_, false,
+                                                          Blaze::Gemm::KernelMmadWithScaleMxActivationQuant,
+                                                          Blaze::Gemm::L0C2UB_MODE_DUAL_DST_SPLIT_M>;
+    using BlockMmad = Blaze::Gemm::Block::BlockMmad<DispatchPolicy, AType_, LayoutA_, BType_, LayoutB_, float, LayoutC,
+                                                    float, LayoutC>;
+    using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueSwishMxQuant<AType_, float>;
+    using BlockScheduler = Blaze::Gemm::Block::BlockSchedulerQuantBatchMatmulV3<ProblemShape, FullLoadMode_, LayoutA_,
+                                                                                LayoutB_, AType_>;
+    using Kernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
+};
+
+template <typename OutputType_, uint32_t ScaleAlg_>
+__global__ __aicore__ void quant_matmul_swish_quant_epilogue_setup_entry(GM_ADDR y, GM_ADDR yScale, float beta)
+{
+    using Epilogue = Blaze::Epilogue::Block::BlockEpilogueSwishMxQuant<OutputType_, float>;
+    typename Epilogue::Params params{y, yScale, 16U, 64U, ScaleAlg_, beta};
+    Epilogue epilogue;
+    // CPU-debug checks setup only; use the CSV example to validate device computation.
+    epilogue.Init(params);
+    epilogue.UpdateNextProblem({16L, 64L, 64L, 1L});
+    epilogue.UpdateGlobalAddr({0L, 0L});
+}
+
 template <typename OutputType_, Blaze::Epilogue::Block::GeluAlg GeluAlg_, Blaze::Epilogue::Block::QuantAlg QuantAlg_,
           Blaze::Epilogue::Block::ROUND_MODE_FP4 RoundMode_>
-__global__ __aicore__ void quant_matmul_activation_quant_epilogue_smoke_entry(GM_ADDR y, GM_ADDR yScale,
+__global__ __aicore__ void quant_matmul_activation_quant_epilogue_setup_entry(GM_ADDR y, GM_ADDR yScale,
                                                                               float dstTypeMax)
 {
     using Epilogue = Blaze::Epilogue::Block::BlockEpilogueGeluMxQuant<OutputType_, float>;
     typename Epilogue::Params params{y, yScale, 16U, 64U, GeluAlg_, QuantAlg_, RoundMode_, dstTypeMax};
     Epilogue epilogue;
-    // Host op_kernel UT exercises the production epilogue setup and problem/address updates. Its device-only MicroAPI
-    // operator() is handled by the device toolchain and must not be expanded by the host CPU-debug path here.
+    // CPU-debug checks setup only; use the CSV example to validate device computation.
     epilogue.Init(params);
     epilogue.UpdateNextProblem({16L, 64L, 64L, 1L});
-    epilogue.UpdateGlobalAddr({0L, 0L, 0L, 0L, 0L});
+    epilogue.UpdateGlobalAddr({0L, 0L});
 }

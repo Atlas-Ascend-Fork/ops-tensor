@@ -17,10 +17,10 @@
 | [block_epilogue_fmm_with_scale_add](./block/block_epilogue_fmm_with_scale_add.md) | FusedMatMul scale_add 向量后处理，执行 alpha × (x1@x2) + beta × x3 |
 | [block_epilogue_matmul_with_sigmoid](./block/block_epilogue_matmul_with_sigmoid.md) | FusedMatMul sigmoid 向量后处理，执行 sigmoid(x1@x2 + bias) |
 | [block_epilogue_flat_quant](./block/block_epilogue_flat_quant.md) | FlatQuant AIV 侧 MX FP4 量化后处理，bf16→eMax→E8M0 scale→FP4 量化 |
-| [block_epilogue_gelu_mx_quant](./block/block_epilogue_gelu_mx_quant.md) | QBMM GELU + 动态 MXFP8/MXFP4 量化后处理 |
-| [block_epilogue_swiglu_mx_quant](./block/block_epilogue_swiglu_mx_quant.md) | QBMM SwiGLU + 动态 MXFP8 量化，支持 ND 与 WeightNZ 前缀拼接输入 |
-| [block_epilogue_gelu_tanh_mx_quant](./block/block_epilogue_gelu_tanh_mx_quant.md) | MIX 模板 GeluTanh + MXFP8/MXFP4 在线量化，输出 y 与 E8M0 yScale |
-| [block_epilogue_swiglu_mx_quant](./block/block_epilogue_swiglu_mx_quant.md) | MIX 模板 SwiGLU mode 2 + MXFP8 在线量化，保留 V2 mode 0 内部兼容 |
+| [block_epilogue_gelu_mx_quant](./block/block_epilogue_gelu_mx_quant.md) | GELU 激活 + 动态 MXFP8/MXFP4 量化 |
+| [block_epilogue_swish_mx_quant](./block/block_epilogue_swish_mx_quant.md) | Swish 激活 + 动态 MXFP8 量化 |
+| [block_epilogue_swiglu_mx_quant](./block/block_epilogue_swiglu_mx_quant.md) | SwiGLU 激活 + 动态 MXFP8 量化 |
+| [block_epilogue_gelu_tanh_mx_quant](./block/block_epilogue_gelu_tanh_mx_quant.md) | GELU（tanh）激活 + 动态 MXFP8/MXFP4 量化 |
 | [block_epilogue_block_attn_res_prepare](./block/block_epilogue_block_attn_res_prepare.md) | BlockAttnResPrepare AIV 后处理，执行 V 平方和、RMS-softmax、空输入处理和结果搬运 |
 | [block_epilogue_iterbatch](./block/block_epilogue_iterbatch.md) | IterBatch AIV 后处理组件，双 sub-block 奇偶消费 AIC fixpipe 写入的 UB 帧并 ND 写回 GM（ND_FIXPIPE_1_2） |
 | [tile](./tile/README.md) | Tile 级可复用计算组件（compute.h 架构派发 + arch35 实现：Gelu、Sigmoid、RmsSoftmax 等） |
@@ -60,9 +60,9 @@ BlockEpilogue
 | BlockEpilogueMatmulWithSigmoid | sigmoid(x1@x2 + bias) | AIV 核 | 不支持 | 支持 fp32 → bf16/fp16 | 不支持 | FusedMatMul sigmoid Kernel |
 | BlockEpilogueFlatQuant | MX FP4 量化：eMax→E8M0 scale→FP4 quant | AIV 核 | 不支持 | 支持 bf16 → FP4(int8) | 不支持 | Attention FlatQuant Kernel |
 | BlockEpilogueGeluMxQuant | GELU + MXFP8/MXFP4 量化 | AIV 核 | 不支持 | 支持 float → bf16 → FP8/FP4 | GELU | QBMM MX ActivationQuant Kernel |
-| BlockEpilogueSwigluMxQuant | C=[gate &#124; linear]，`SiLU(gate) × linear` + MXFP8 量化 | AIV 核 | 不支持 | 支持 float → bf16 → FP8 | SwiGLU | QBMM MX ActivationQuant Kernel |
-| BlockEpilogueGeluTanhMxQuant | GeluTanh + OCP/cuBLAS MXFP8 或 MXFP4 量化 | AIV 核 | 不支持 | float → GeluTanh → FP8/FP4 | GeluTanh | QGMM MX ActivationQuant MIX Kernel |
-| BlockEpilogueSwigluMxQuant | SwiGLU + OCP/cuBLAS MXFP8 量化 | AIV 核 | 不支持 | float → SwiGLU → bf16 → FP8 | SwiGLU（V3 mode 2） | QGMM SwiGLU MX MIX Kernel |
+| BlockEpilogueSwishMxQuant | Swish(x, β) + MXFP8 量化 | AIV 核 | 不支持 | float → Swish → bf16 → FP8 | Swish | QBMM MX ActivationQuant Kernel |
+| BlockEpilogueSwigluMxQuant | SwiGLU + MXFP8 量化 | AIV 核 | 不支持 | 支持 float → bf16 → FP8 | SwiGLU | QBMM/QGMM MIX Kernel |
+| BlockEpilogueGeluTanhMxQuant | GELU（tanh） + OCP/cuBLAS MXFP8 或 MXFP4 量化 | AIV 核 | 不支持 | float → GELU（tanh） → FP8/FP4 | GELU（tanh） | QGMM MX ActivationQuant MIX Kernel |
 | BlockEpilogueBlockAttnResPrepare | V 平方和、RMS-softmax、空输入处理和结果搬运 | AIV 核 | 支持 | FP32 | 不支持 | BlockAttnResPrepare Kernel |
 | BlockEpilogueIterbatch | 无融合计算，AIV 消费 AIC fixpipe 写入的 UB 帧，ND 搬出 GM | AIV 核 | 不支持 | 不支持 | 不支持 | IterBatch ND_FIXPIPE_1_2 Kernel |
 

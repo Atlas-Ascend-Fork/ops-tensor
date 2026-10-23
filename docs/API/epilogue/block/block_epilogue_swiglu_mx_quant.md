@@ -4,25 +4,23 @@
 
 ## 功能说明
 
-`BlockEpilogueSwigluMxQuant` 在 AIV 上消费 AIC 通过 DualDst Fixpipe 写入 UB 的两路 float L0C
+`BlockEpilogueSwigluMxQuant` 在 AIV 上读取 AIC 通过 DualDst Fixpipe 写入 UB 的两路 FP32 矩阵乘
 结果，执行 SwiGLU、转换为 bf16、按 N 轴每 32 个元素生成一个 E8M0 scale，并
 输出 MXFP8 `y` 与 `yScale`。一个 AIC 对应两个 AIV，两个 AIV 沿 M 轴分工。
 
-输入 UB 的逻辑布局为 `[M, 2*N]`，前 `N` 列是激活分支，后 `N` 列是
-gate 分支；输出逻辑布局为 `[M, N]`。
+输入 UB 的逻辑布局为 `[M, 2*N]`，前 `N` 列为 gate，后 `N` 列为 linear；输出布局为 `[M, N]`。
 
 ## 模式边界
 
-共享组件保留两个有调用者的模式：
+支持以下模式：
 
-- `swigluMode=0`：仅用于既有 V2 内部兼容，
+- `swigluMode=0`：
   `left / (1 + exp(-left)) * right`。
-- `swigluMode=2`：V3 路径，
+- `swigluMode=2`：
   `min(left, clampLimit) / (1 + exp(-gluAlpha * min(left, clampLimit)))`
   再乘 `clamp(right, -clampLimit, clampLimit) + gluBias`。
 
-本次 V3 能力只公开 mode 2，不支持 mode 1、mode 3 或其他值。mode 0 的保留
-不表示 V3 接口支持 mode 0。
+V3 接口仅支持 mode 2；mode 0 仅供 V2 内部兼容使用。
 
 ## 模板参数
 
@@ -123,6 +121,9 @@ void operator()(const BlockShape& blockShape, const OutputOffsets& outputOffsets
 ```
 
 执行当前 tile 的 SwiGLU、MX 量化、scale 布局转换和 GM 写回。
+
+`operator()` 返回后，由 Kernel 执行 `NotifyCube()`，零行 AIV 也遵循此流程。
+输出与 scale 的搬出由本组件的流水事件保护。详见 [QBMM Kernel 同步约定](../../gemm/kernel/kernel_qbmm_mx_activation_quant.md#输入-ub-复用通知的所有权)。
 
 ## 资源与校验边界
 

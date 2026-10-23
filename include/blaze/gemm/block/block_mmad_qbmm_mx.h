@@ -146,7 +146,7 @@ public:
     template <typename TensorA, typename TensorB, typename TensorScaleA, typename TensorScaleB, typename TensorBias,
               typename TensorC>
     __aicore__ inline void operator()(TensorA const& gmA, TensorB const& gmB, TensorScaleA const& gmScaleA,
-                                      TensorScaleB const& gmScaleB, TensorBias const& gmBias, TensorC const& gmC,
+                                      TensorScaleB const& gmScaleB, TensorBias const& gmBias, TensorC const& tensorOut,
                                       BlockShape const& singleShape, uint64_t splitKIdx = 0)
     {
         TileL1L0Param tileL1L0Param;
@@ -174,7 +174,7 @@ public:
                                scaleKOffsetStride, scaleKIter, scaleKIterIdx, isFirstSplitK, isLastSplitK);
         }
         if (isLastSplitK) {
-            CopyL0CToOut(gmC, tensorL0C, tileL1L0Param);
+            CopyL0CToOut(tensorOut, tensorL0C, tileL1L0Param);
             if (enableL0cPingPong_) {
                 l0cPingPong_++;
             }
@@ -677,25 +677,28 @@ private:
     }
 
     template <typename TensorC, typename TensorL0C>
-    __aicore__ inline void CopyL0CToOut(TensorC const& gmC, TensorL0C& tensorL0C, const TileL1L0Param& tileL1L0Param)
+    __aicore__ inline void CopyL0CToOut(TensorC const& tensorOut, TensorL0C& tensorL0C,
+                                        const TileL1L0Param& tileL1L0Param)
     {
         if constexpr (AscendC::Std::is_same_v<asc::te::get_mem_location<TensorC>, asc::te::location::ub>) {
             if constexpr (DispatchPolicy::L0C2UB_MODE == L0C2UB_MODE_DUAL_DST_SPLIT_M) {
                 auto CopyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{},
                                                      Blaze::Gemm::Tile::CopyL0C2UBTraitSplitM{});
+                constexpr uint64_t ubAlignElements = asc::te::c0_element<CType>;
+                // Align the transfer width to 32 bytes; tensorOut retains the epilogue's row stride.
                 auto tensorL0CAligned = tensorL0C.slice(
                     asc::te::make_coord(0L, 0L),
-                    asc::te::make_shape((tileL1L0Param.curM + 1) & ~1, Align32(tileL1L0Param.curN)));
-                asc::te::copy(CopyL0C2UB.with(asc::te::l0c_to_ub_params(asc::te::unit_flag_mode::enable_update)), gmC,
-                              tensorL0CAligned);
+                    asc::te::make_shape((tileL1L0Param.curM + 1) & ~1, CeilAlign(tileL1L0Param.curN, ubAlignElements)));
+                asc::te::copy(CopyL0C2UB.with(asc::te::l0c_to_ub_params(asc::te::unit_flag_mode::enable_update)),
+                              tensorOut, tensorL0CAligned);
             } else {
                 auto CopyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{});
-                asc::te::copy(CopyL0C2UB.with(asc::te::l0c_to_ub_params(asc::te::unit_flag_mode::enable_update)), gmC,
-                              tensorL0C);
+                asc::te::copy(CopyL0C2UB.with(asc::te::l0c_to_ub_params(asc::te::unit_flag_mode::enable_update)),
+                              tensorOut, tensorL0C);
             }
         } else {
             auto CopyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
-            asc::te::copy(CopyL0C2GM.with(asc::te::l0c_to_gm_params(asc::te::unit_flag_mode::enable_update)), gmC,
+            asc::te::copy(CopyL0C2GM.with(asc::te::l0c_to_gm_params(asc::te::unit_flag_mode::enable_update)), tensorOut,
                           tensorL0C);
         }
     }
