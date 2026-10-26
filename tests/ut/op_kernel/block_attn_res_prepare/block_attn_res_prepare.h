@@ -49,7 +49,7 @@ inline int64_t AscGetSubBlockId()
 #define asc_get_sub_block_id() (::BlazeUtStub::AscGetSubBlockId())
 #endif
 
-#include "blaze/attention/kernel/kernel_block_attn_res_prepare.h"
+#include "blaze/attention/kernel/kernel_universal.h"
 
 // Keep the UT launch payload plain and mirror the host tiling data contract. Generic Tensor API
 // component parameters are assembled at the kernel entry instead of being copied through GM.

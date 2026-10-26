@@ -21,10 +21,10 @@
 #include "kernel_operator.h"
 #include "kernel_operator_intf.h"
 #endif
+#include "blaze/attention/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/layout_utils.h"
-#include "blaze/attention/kernel/kernel_universal.h"
 #include "blaze/attention/block/block_mmad_flat_quant.h"
 #include "blaze/attention/block/block_scheduler_flat_quant.h"
 #include "blaze/epilogue/block/block_epilogue_flat_quant.h"

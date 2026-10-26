@@ -19,7 +19,7 @@
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
-#include "blaze/gemm/block/block_mmad.h"
+#include "blaze/gemm/block/block_mmad_decl.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {

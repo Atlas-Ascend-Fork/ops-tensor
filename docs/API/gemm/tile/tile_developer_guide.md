@@ -22,10 +22,16 @@ include/blaze/gemm/tile/
 ├── compute.h              # 统一入口：计算/变换类 Tile
 ├── datamove.h             # 统一入口：数据搬运类 Tile
 ├── tile_trait.h           # Trait 定义（独立）
+├── copy_gm_to_l1.h        # 以下 5 个为兼容保留的转发头，仅 include 聚合头；
+├── copy_gm_to_ub.h        # 新代码请勿包含它们，也不得再新增同类转发头
+├── copy_weight_ub_to_l1.h
+├── pad_mx_kl1.h
+├── shift_w4_to_w8.h
 └── arch35/                # 架构实现
     ├── copy_gm_to_l1.h
     ├── copy_gm_to_ub.h
     ├── copy_mx_scale.h
+    ├── copy_ub_to_l1.h
     ├── copy_weight_ub_to_l1.h
     ├── fill_ub.h
     ├── pad_mx_kl1.h
@@ -625,6 +631,7 @@ constexpr bool isUB = AscendC::Std::is_same_v<MemLoc, AscendC::Te::Location::UB>
 ### 文件结构
 - [ ] 实现文件放在 `tile/arch35/my_tile.h`
 - [ ] 在 `compute.h`（计算/变换类）或 `datamove.h`（数据搬运类）中添加 `#include`
+- [ ] 不新增顶层转发头（旧有的 5 个仅为兼容保留）
 - [ ] 使用正确的命名空间：`Blaze::Gemm::Tile`
 
 ### Copy Tile

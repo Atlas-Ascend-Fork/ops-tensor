@@ -26,7 +26,20 @@ class GemmUniversal<PS, BM, BE, BS,
 
 Attention 算子使用对应的 `AttentionUniversal` 主模板。
 
-### 1.2 Params 聚合
+### 1.2 文件组织与 Include 约定
+
+主模板（`GemmUniversal` / `AttentionUniversal`）的声明独立放在 `kernel_universal_decl.h` 中；
+`kernel_universal.h` 是聚合头，包含 `kernel_universal_decl.h` 和**全部** `kernel_xx.h` 特化片段。
+Include 约定：
+
+- **特化片段**（`kernel_xx.h`）：自身 include `kernel_universal_decl.h` 获得主模板声明，保持自包含；
+  **不得** include `kernel_universal.h`（避免循环包含）。使用方推荐只 include
+  `kernel_universal.h`，直接 include 单个片段亦可编译。新增 Kernel 时，将新文件追加到聚合列表中。
+- 仅两个头文件不参与聚合：`kernel_wqgmm_mix_weight_prologue.h` 定义独立的
+  `GmmWeightQuantMxKernel` 类、不是 `GemmUniversal` 特化；`kernel_gmm_fixpipe_quant.h` 是
+  `kernel_qgmm_mix_fixpipe_quant.h` 的废弃改名兼容头。两者的使用方直接 include 对应头文件。
+
+### 1.3 Params 聚合
 
 每个 Kernel 定义嵌套 `Params`，聚合所有子组件参数：
 

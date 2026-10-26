@@ -16,7 +16,8 @@
 #pragma once
 
 #include "blaze/gemm/block/block_mmad.h"
-#include "blaze/gemm/kernel/kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
+#include "blaze/gemm/utils/common_utils.h"
 
 namespace Blaze {
 namespace Gemm {

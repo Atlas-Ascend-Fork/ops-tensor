@@ -10,7 +10,8 @@
 
 /*!
  * \file copy_gm_to_l1.h
- * \brief
+ * \brief Legacy forwarding header kept for source compatibility only. New code should
+ * include the aggregate header datamove.h instead. Implementations live in arch35/.
  */
 #pragma once
 

@@ -20,9 +20,9 @@
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_mmad_matmul_al1_full_load.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
-#include "blaze/gemm/kernel/kernel_universal.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {

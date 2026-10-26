@@ -1,5 +1,5 @@
 # Pad MX K L1
-> [代码位置](../../../../include/blaze/gemm/tile/pad_mx_kl1.h)
+> [代码位置](../../../../include/blaze/gemm/tile/arch35/pad_mx_kl1.h)
 
 说明：调用方应包含聚合头 `tile/compute.h`（`tile/pad_mx_kl1.h` 为兼容保留的转发入口）。
 

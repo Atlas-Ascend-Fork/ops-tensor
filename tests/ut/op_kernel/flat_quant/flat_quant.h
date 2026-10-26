@@ -34,13 +34,6 @@ using AscendC::QuePosition;
 using AscendC::TBuf;
 using AscendC::TPipe;
 
-#ifndef COPY_UBUF_TO_GM_ALIGN_V2_STUB
-#define COPY_UBUF_TO_GM_ALIGN_V2_STUB
-inline void copy_ubuf_to_gm_align_v2(const void* dst, const void* src, uint8_t sid, uint32_t nBurst, uint32_t lenBurst,
-                                     uint8_t cacheMode, uint64_t dstStride, uint32_t srcStride)
-{}
-#endif
-
 #include "blaze/attention/block/block_mmad.h"
 #include "blaze/attention/block/block_scheduler_flat_quant.h"
 #include "blaze/attention/policy/dispatch_policy.h"
@@ -49,7 +42,7 @@ inline void copy_ubuf_to_gm_align_v2(const void* dst, const void* src, uint8_t s
 
 using Blaze::Gemm::CeilAlign;
 
-#include "blaze/attention/kernel/kernel_flat_quant.h"
+#include "blaze/attention/kernel/kernel_universal.h"
 
 #if defined(ASCENDC_CPU_DEBUG)
 #undef half

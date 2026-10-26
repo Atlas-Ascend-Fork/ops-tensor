@@ -42,7 +42,7 @@
 #define IMPL_TENSOR_API_UTILS_INT_IMPL_H
 #endif
 
-#include "blaze/gemm/kernel/kernel_grouped_matmul.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 
 #define ACL_CHECK(expr)                                                                                               \
     do {                                                                                                              \

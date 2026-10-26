@@ -1,5 +1,7 @@
 # Copy GM To L1
-> [代码位置](../../../../include/blaze/gemm/tile/copy_gm_to_l1.h)
+> [代码位置](../../../../include/blaze/gemm/tile/arch35/copy_gm_to_l1.h)
+
+说明：调用方应包含聚合头 `tile/datamove.h`（`tile/copy_gm_to_l1.h` 为兼容保留的转发入口）。
 
 ## 功能说明
 A 矩阵 ND slice 非连续场景，以及 SwiGLU MX 左右 B/ScaleB 半区拼接场景的 GM->L1 搬运 Tile。

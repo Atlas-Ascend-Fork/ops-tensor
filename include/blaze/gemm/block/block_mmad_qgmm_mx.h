@@ -25,7 +25,7 @@
 #include "tensor_api/tensor.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
-#include "blaze/gemm/block/block_mmad.h"
+#include "blaze/gemm/block/block_mmad_decl.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/tile/compute.h"
 #include "blaze/gemm/tile/datamove.h"
@@ -812,8 +812,7 @@ private:
         }
 
         if constexpr (isUbOutput) {
-            auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{},
-                                                 Blaze::Gemm::Tile::CopyL0C2UBTraitMixSplitM{});
+            auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Blaze::Gemm::Tile::CopyL0C2UBTraitSplitM{});
             if constexpr (IS_FINALIZE_ROUTING) {
                 auto tensorL0CAligned = tensorL0C.slice(asc::te::make_coord(0L, 0L),
                                                         asc::te::make_shape(l0cLayoutM, CeilAlign(curN, C0_SIZE_L0C)));

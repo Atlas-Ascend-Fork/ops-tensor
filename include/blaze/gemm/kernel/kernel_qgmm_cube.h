@@ -23,6 +23,7 @@
 #include "kernel_operator_list_tensor_intf.h"
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"

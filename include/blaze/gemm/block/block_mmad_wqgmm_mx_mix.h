@@ -16,7 +16,7 @@
 
 #include "kernel_basic_intf.h"
 #include "tensor_api/tensor.h"
-#include "blaze/gemm/block/block_mmad.h"
+#include "blaze/gemm/block/block_mmad_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/tile/tile_trait.h"
 #include "blaze/gemm/utils/common_utils.h"

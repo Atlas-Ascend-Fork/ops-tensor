@@ -18,7 +18,7 @@
  */
 #pragma once
 
-#include "blaze/gemm/kernel/kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/block/block_mmad_a8w8_fixpipe_quant.h"
 #if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"

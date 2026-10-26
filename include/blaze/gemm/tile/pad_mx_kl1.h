@@ -10,7 +10,8 @@
 
 /*!
  * \file pad_mx_kl1.h
- * \brief
+ * \brief Legacy forwarding header kept for source compatibility only. New code should
+ * include the aggregate header compute.h instead. Implementations live in arch35/.
  */
 #pragma once
 

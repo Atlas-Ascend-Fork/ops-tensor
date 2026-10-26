@@ -24,7 +24,7 @@
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
-#include "blaze/gemm/kernel/kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {

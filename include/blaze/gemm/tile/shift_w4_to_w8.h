@@ -10,7 +10,8 @@
 
 /*!
  * \file shift_w4_to_w8.h
- * \brief
+ * \brief Legacy forwarding header kept for source compatibility only. New code should
+ * include the aggregate header compute.h instead. Implementations live in arch35/.
  */
 #pragma once
 

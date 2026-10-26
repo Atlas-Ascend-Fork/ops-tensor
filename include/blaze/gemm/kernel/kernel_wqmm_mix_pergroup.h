@@ -24,15 +24,14 @@
 #include "kernel_operator_intf.h"
 #endif
 
-#include "blaze/gemm/kernel/kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/block/block_mmad_wqmm_mix_prologue_fixpipe_quant.h"
 #include "blaze/gemm/block/block_scheduler_wqmm_block_split.h"
 #include "blaze/gemm/utils/buffer_manager.h"
-#include "blaze/gemm/tile/arch35/copy_gm_to_ub.h"
-#include "blaze/gemm/tile/arch35/copy_weight_ub_to_l1.h"
+#include "blaze/gemm/tile/datamove.h"
 #include "blaze/epilogue/tile/compute.h"
 #include "tensor_api/tensor.h"
 

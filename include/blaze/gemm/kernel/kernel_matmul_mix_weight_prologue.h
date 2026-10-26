@@ -23,7 +23,7 @@
 
 #include "blaze/gemm/block/block_mmad_weight_prologue_mx.h"
 #include "blaze/gemm/block/block_scheduler_matmul_swat_with_tail_split.h"
-#include "blaze/gemm/kernel/kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/tile/compute.h"
 #include "blaze/gemm/tile/datamove.h"

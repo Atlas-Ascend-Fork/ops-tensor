@@ -282,10 +282,12 @@ blaze/
 ├── include/blaze/
 │   ├── attention/               # Attention 类算子kernel实现
 │   │   ├── kernel/                  # Kernel 层组件
-│   │   │   ├── kernel_universal.h       # AttentionUniversal 基础模板
+│   │   │   ├── kernel_universal_decl.h  # AttentionUniversal 主模板声明
+│   │   │   ├── kernel_universal.h       # AttentionUniversal 基础模板（聚合头）
 │   │   │   └── ...
 │   │   ├── block/                   # Block 层组件
-│   │   │   ├── block_mmad.h             # BlockMmad 基础模板
+│   │   │   ├── block_mmad_decl.h        # BlockMmad 主模板声明
+│   │   │   ├── block_mmad.h             # BlockMmad 聚合头
 │   │   │   └── ...
 │   │   └── policy/                  # Policy 层
 │   │       └── dispatch_policy.h
@@ -294,11 +296,13 @@ blaze/
 │   │   └── ...
 |   └── gemm/
 │       ├── kernel/              # Kernel 层组件
-│       │   ├── kernel_universal.h
+│       │   ├── kernel_universal_decl.h  # GemmUniversal 主模板声明
+│       │   ├── kernel_universal.h       # GemmUniversal 聚合头
 │       │   └── ...
 │       │
 │       ├── block/               # Block 层组件
-│       │   ├── block_mmad.h          # BlockMmad 基类
+│       │   ├── block_mmad_decl.h     # BlockMmad 主模板声明
+│       │   ├── block_mmad.h          # BlockMmad 聚合头
 │       │   └── ...
 │       │
 │       ├── tile/                # Tile 层组件

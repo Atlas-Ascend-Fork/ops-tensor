@@ -34,7 +34,7 @@ using AscendC::TPipe;
 
 #include "blaze/attention/block/block_mmad.h"
 #include "blaze/attention/block/block_scheduler_flat_quant.h"
-#include "blaze/attention/kernel/kernel_flat_quant.h"
+#include "blaze/attention/kernel/kernel_universal.h"
 #include "blaze/attention/policy/dispatch_policy.h"
 #include "blaze/epilogue/block/block_epilogue_flat_quant.h"
 #include "blaze/epilogue/fusion/default_fusion_op.h"

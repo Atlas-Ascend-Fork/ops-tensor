@@ -21,7 +21,7 @@
 #include "kernel_operator_intf.h"
 #endif
 
-#include "blaze/gemm/block/block_mmad.h"
+#include "blaze/gemm/block/block_mmad_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/tile/compute.h"
 #include "blaze/gemm/tile/tile_trait.h"

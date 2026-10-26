@@ -18,7 +18,7 @@
 主模板故意 `static_assert` 阻止误用，每个实现文件提供偏特化：
 
 ```cpp
-// 主模板（block_mmad.h）
+// 主模板（block_mmad_decl.h）
 template <class DispatchPolicy_, class AType_, class LayoutA_, ...>
 class BlockMmad {
     static_assert(always_false_v<DispatchPolicy_>, "Not implemented");
@@ -32,7 +32,20 @@ class BlockMmad<MatmulMultiBlockBasic<FullLoadMode_, FusedOpType_, ...>,
 };
 ```
 
-### 2.2 必须暴露的接口
+### 2.2 文件组织与 Include 约定
+
+主模板 `BlockMmad` 的声明独立放在 `block_mmad_decl.h` 中（gemm 与 attention 各一份）；
+`block_mmad.h` 是聚合头，包含 `block_mmad_decl.h` 和**全部** `block_mmad_xx.h` 特化片段。
+Include 约定（与 Kernel 层 `kernel_universal.h` 约定一致）：
+
+- **特化片段**（`block_mmad_xx.h`）：自身 include `block_mmad_decl.h` 获得主模板声明，保持自包含；
+  **不得** include `block_mmad.h`（避免循环包含）。使用方推荐只 include `block_mmad.h`，
+  直接 include 单个片段亦可编译。新增 BlockMmad 时，将新文件追加到聚合列表中。
+
+BlockScheduler / BlockEpilogue 各自定义独立类，没有公共主模板，因此不参与上述
+decl/聚合头模式，使用方按需直接 include 对应头文件。
+
+### 2.3 必须暴露的接口
 
 ```cpp
 using AType = AType_;  using BType = BType_;  using CType = CType_;  // 类型别名
@@ -44,7 +57,7 @@ void Init(const Params& params);
 void operator()(TensorA& gmA, TensorB& gmB, TensorBias& gmBias, TensorC& gmC, TupleShape& blockShape);
 ```
 
-### 2.3 内部流水线（K-L1/K-L0 双层循环）
+### 2.4 内部流水线（K-L1/K-L0 双层循环）
 
 ```
 Init(): 计算 buffer 偏移、L1 slot 布局
@@ -60,7 +73,7 @@ operator()():
   CopyL0C2GM/UB: 输出
 ```
 
-### 2.4 关键细节
+### 2.5 关键细节
 
 **MMAD 累加控制**：
 ```cpp

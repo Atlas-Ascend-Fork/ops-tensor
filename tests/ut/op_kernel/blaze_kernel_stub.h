@@ -69,3 +69,12 @@ struct hif4_scale {};
 
 } // namespace AscendC
 #endif
+
+// copy_ubuf_to_gm_align_v2 (8 参数，dst 为 GM 物理地址的重载)
+// tikicpulib 现有重载与该调用形式不匹配，block_epilogue_flat_quant.h 的 UB→GM 回写需要此桩
+#ifndef COPY_UBUF_TO_GM_ALIGN_V2_STUB
+#define COPY_UBUF_TO_GM_ALIGN_V2_STUB
+inline void copy_ubuf_to_gm_align_v2(const void* dst, const void* src, uint8_t sid, uint32_t nBurst, uint32_t lenBurst,
+                                     uint8_t cacheMode, uint64_t dstStride, uint32_t srcStride)
+{}
+#endif

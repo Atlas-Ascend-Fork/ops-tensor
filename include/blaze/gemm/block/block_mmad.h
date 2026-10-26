@@ -10,41 +10,29 @@
 
 /*!
  * \file block_mmad.h
- * \brief
+ * \brief Aggregate header for GEMM BlockMmad. Pulls in the BlockMmad primary template declaration
+ * (block_mmad_decl.h) and then every block_mmad_xx.h specialization fragment in this directory.
+ * Users of these blocks include this header only; the fragments themselves include block_mmad_decl.h
+ * so they stay self-contained without including this header back.
  */
 #pragma once
 
-#include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/block/block_mmad_decl.h"
 
-namespace Blaze {
-namespace Gemm {
-namespace Block {
-/**
- * @class BlockMmad
- * @brief Block matrix multiplication class for performing block matrix multiplication operations
- */
-template <class DispatchPolicy_, class AType_, class LayoutA_, class BType_, class LayoutB_, class CType_,
-          class LayoutC_, class BiasType_, class LayoutBias_>
-class BlockMmad {
-    static_assert(Blaze::Gemm::always_false_v<DispatchPolicy_>, "BlockMmad is not implemented for this DispatchPolicy");
-};
-} // namespace Block
-} // namespace Gemm
-} // namespace Blaze
-#include "blaze/gemm/block/block_mmad_iterbatch_broadcast.h"
-#include "blaze/gemm/block/block_mmad_matmul_iterbatch.h"
-#include "blaze/gemm/block/block_mmad_matmul_al1_full_load.h"
-#include "blaze/gemm/block/block_mmad_matmul_basic_split_k.h"
-#include "blaze/gemm/block/block_mmad_matmul_basic.h"
-#include "blaze/gemm/block/block_mmad_matmul_bl1_full_load.h"
-#include "blaze/gemm/block/block_mmad_matmul_fixpipe_opti.h"
-#include "blaze/gemm/block/block_mmad_matmul_streamk_split_k.h"
-#include "blaze/gemm/block/block_mmad_matmul_streamk.h"
-#include "blaze/gemm/block/block_mmad_qbmm_mx.h"
 #include "blaze/gemm/block/block_mmad_a8w8_fixpipe_quant.h"
 #include "blaze/gemm/block/block_mmad_a8w8_mix.h"
+#include "blaze/gemm/block/block_mmad_iterbatch_broadcast.h"
+#include "blaze/gemm/block/block_mmad_matmul_al1_full_load.h"
+#include "blaze/gemm/block/block_mmad_matmul_basic.h"
+#include "blaze/gemm/block/block_mmad_matmul_basic_split_k.h"
+#include "blaze/gemm/block/block_mmad_matmul_bl1_full_load.h"
 #include "blaze/gemm/block/block_mmad_matmul_emu_split_weight.h"
+#include "blaze/gemm/block/block_mmad_matmul_fixpipe_opti.h"
+#include "blaze/gemm/block/block_mmad_matmul_iterbatch.h"
+#include "blaze/gemm/block/block_mmad_matmul_streamk.h"
+#include "blaze/gemm/block/block_mmad_matmul_streamk_split_k.h"
 #include "blaze/gemm/block/block_mmad_matmul_syrk.h"
+#include "blaze/gemm/block/block_mmad_qbmm_mx.h"
 #include "blaze/gemm/block/block_mmad_qbmm_mx_l0c_pingpong.h"
 #include "blaze/gemm/block/block_mmad_qgmm_mx.h"
 #include "blaze/gemm/block/block_mmad_weight_prologue_mx.h"

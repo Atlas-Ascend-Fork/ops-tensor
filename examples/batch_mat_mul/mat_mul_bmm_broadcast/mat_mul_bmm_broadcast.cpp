@@ -36,7 +36,7 @@
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_mmad_matmul_basic.h"
 #include "blaze/gemm/block/block_scheduler_matmul_basic.h"
-#include "blaze/gemm/kernel/kernel_batch_matmul_broadcast.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "data_utils.h"

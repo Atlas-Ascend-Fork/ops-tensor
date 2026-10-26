@@ -10,25 +10,13 @@
 
 /*!
  * \file block_mmad.h
- * \brief
+ * \brief Aggregate header for attention BlockMmad. Pulls in the BlockMmad primary template declaration
+ * (block_mmad_decl.h) and then all aggregated block_mmad_xx.h specialization fragments. Users of
+ * these blocks include this header only; the fragments themselves include block_mmad_decl.h
+ * so they stay self-contained without including this header back.
  */
 #pragma once
 
-#include "blaze/gemm/utils/common_utils.h"
-namespace Blaze {
-namespace Attention {
-namespace Block {
-/**
- * @class BlockMmad
- * @brief Block matrix multiplication class for performing block matrix multiplication operations
- */
-template <class DispatchPolicy_, class QType_, class LayoutQ_, class KType_, class LayoutK_, class VType_,
-          class LayoutV_, class OutType_, class LayoutOut_, class... ExtArgs_>
-class BlockMmad {
-    static_assert(Blaze::Gemm::always_false_v<DispatchPolicy_>, "BlockMmad is not implemented for this DispatchPolicy");
-};
-} // namespace Block
-} // namespace Attention
-} // namespace Blaze
+#include "blaze/attention/block/block_mmad_decl.h"
 
 #include "blaze/attention/block/block_mmad_flat_quant.h"

@@ -21,7 +21,7 @@
 
 #include "acl/acl.h"
 #include "kernel_operator.h"
-#include "blaze/attention/kernel/kernel_block_attn_res_prepare.h"
+#include "blaze/attention/kernel/kernel_universal.h"
 #include "data_utils.h"
 
 namespace {

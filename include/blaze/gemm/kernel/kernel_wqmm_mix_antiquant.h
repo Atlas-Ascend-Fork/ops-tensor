@@ -30,7 +30,7 @@
 #include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/tile/datamove.h"
 #include "blaze/gemm/block/block_mmad_wqmm_mix_weight_prologue.h"
-#include "blaze/gemm/kernel/kernel_universal.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 
 namespace Blaze {
 namespace Gemm {

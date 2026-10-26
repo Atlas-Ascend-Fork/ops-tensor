@@ -10,43 +10,50 @@
 
 /*!
  * \file kernel_universal.h
- * \brief
+ * \brief Aggregate header for GEMM kernels. Pulls in the GemmUniversal primary template declaration
+ * (kernel_universal_decl.h) and then every kernel_xx.h specialization fragment in this directory.
+ * Users of these kernels include this header only; the fragments themselves include
+ * kernel_universal_decl.h so they stay self-contained without including this header back.
+ * The only kernel headers not aggregated here are kernel_wqgmm_mix_weight_prologue.h, which defines
+ * the standalone GmmWeightQuantMxKernel class rather than a GemmUniversal specialization, and
+ * kernel_gmm_fixpipe_quant.h, which is a deprecated rename shim for kernel_qgmm_mix_fixpipe_quant.h;
+ * users of those two include them directly.
  */
-
 #pragma once
 
-#include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 
-namespace Blaze {
-namespace Gemm {
-namespace Kernel {
-
-/**
- * @class GemmUniversal
- * @brief
- */
-template <class ProblemShape_, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, typename Enable_ = void>
-class GemmUniversal {
-    static_assert(always_false_v<BlockEpilogue_> && always_false_v<BlockMmad_>,
-                  "GemmUniversal is not implemented for this combination of BlockMmad, BlockEpilogue and "
-                  "BlockScheduler");
-};
-
-} // namespace Kernel
-} // namespace Gemm
-} // namespace Blaze
 #include "blaze/gemm/kernel/kernel_batch_matmul_broadcast.h"
 #include "blaze/gemm/kernel/kernel_batch_matmul_iterbatch_broadcast.h"
-#include "blaze/gemm/kernel/kernel_matmul_iterbatch.h"
-#include "blaze/gemm/kernel/kernel_matmul_basic.h"
-#include "blaze/gemm/kernel/kernel_matmul_al1_full_load.h"
-#include "blaze/gemm/kernel/kernel_matmul_bl1_full_load.h"
-#include "blaze/gemm/kernel/kernel_matmul_fixpipe_opti.h"
-#include "blaze/gemm/kernel/kernel_matmul_streamk.h"
-#include "blaze/gemm/kernel/kernel_matmul_with_scale_add.h"
-#include "blaze/gemm/kernel/kernel_qbmm_cube_without_batch.h"
-#include "blaze/gemm/kernel/kernel_qgmm_cube.h"
-#include "blaze/gemm/kernel/kernel_tqbmm.h"
-#include "blaze/gemm/kernel/kernel_tbmm_basic.h"
 #include "blaze/gemm/kernel/kernel_grouped_matmul.h"
+#include "blaze/gemm/kernel/kernel_matmul_al1_full_load.h"
+#include "blaze/gemm/kernel/kernel_matmul_basic.h"
+#include "blaze/gemm/kernel/kernel_matmul_bl1_full_load.h"
+#include "blaze/gemm/kernel/kernel_matmul_emu_split_weight.h"
+#include "blaze/gemm/kernel/kernel_matmul_fixpipe_opti.h"
+#include "blaze/gemm/kernel/kernel_matmul_iterbatch.h"
+#include "blaze/gemm/kernel/kernel_matmul_mix_weight_prologue.h"
+#include "blaze/gemm/kernel/kernel_matmul_streamk.h"
+#include "blaze/gemm/kernel/kernel_matmul_syrk.h"
+#include "blaze/gemm/kernel/kernel_matmul_with_epilogue.h"
+#include "blaze/gemm/kernel/kernel_matmul_with_scale_add.h"
+#include "blaze/gemm/kernel/kernel_qbmm_cube.h"
+#include "blaze/gemm/kernel/kernel_qbmm_cube_without_batch.h"
+#include "blaze/gemm/kernel/kernel_qbmm_mix.h"
+#include "blaze/gemm/kernel/kernel_qbmm_mix_without_batch.h"
+#include "blaze/gemm/kernel/kernel_qbmm_mx.h"
+#include "blaze/gemm/kernel/kernel_qbmm_mx_activation_quant.h"
+#include "blaze/gemm/kernel/kernel_qbmm_mx_mix.h"
+#include "blaze/gemm/kernel/kernel_qbmm_mx_without_batch.h"
+#include "blaze/gemm/kernel/kernel_qbmm_pertensor_streamk.h"
+#include "blaze/gemm/kernel/kernel_qbmm_streamk.h"
+#include "blaze/gemm/kernel/kernel_qgmm_cube.h"
+#include "blaze/gemm/kernel/kernel_qgmm_mix_fixpipe_quant.h"
+#include "blaze/gemm/kernel/kernel_qgmm_mx.h"
+#include "blaze/gemm/kernel/kernel_qgmm_mx_activation_quant.h"
 #include "blaze/gemm/kernel/kernel_qgmm_mx_mix_finalize_routing.h"
+#include "blaze/gemm/kernel/kernel_qgmm_swiglu_mx.h"
+#include "blaze/gemm/kernel/kernel_tbmm_basic.h"
+#include "blaze/gemm/kernel/kernel_tqbmm.h"
+#include "blaze/gemm/kernel/kernel_wqmm_mix_antiquant.h"
+#include "blaze/gemm/kernel/kernel_wqmm_mix_pergroup.h"

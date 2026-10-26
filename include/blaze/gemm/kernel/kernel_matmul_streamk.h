@@ -19,9 +19,9 @@
 #include "blaze/epilogue/block/block_epilogue_matmul_streamk.h"
 #include "blaze/gemm/block/block_mmad_matmul_streamk.h"
 #include "blaze/gemm/block/block_mmad_matmul_streamk_split_k.h"
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/sync.h"
-#include "blaze/gemm/kernel/kernel_universal.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {

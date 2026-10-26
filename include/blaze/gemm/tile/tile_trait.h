@@ -23,24 +23,20 @@ struct MmadTraitMX {
     using TraitType = asc::te::mmad_trait;
     static constexpr const TraitType value = MX_MMAD_TRAIT;
 };
-constexpr asc::te::l0c_to_ub_trait MIX_COPY_L0C2UB_SPLIT_M_TRAIT = asc::te::l0c_to_ub_trait{
+constexpr asc::te::l0c_to_ub_trait COPY_L0C2UB_SPLIT_M_TRAIT = asc::te::l0c_to_ub_trait{
     asc::te::round_mode::default_round, false, false, asc::te::dual_dst_mode::split_m};
-struct CopyL0C2UBTraitMixSplitM {
+struct CopyL0C2UBTraitSplitM {
     using TraitType = asc::te::l0c_to_ub_trait;
-    static constexpr const TraitType value = MIX_COPY_L0C2UB_SPLIT_M_TRAIT;
+    static constexpr const TraitType value = COPY_L0C2UB_SPLIT_M_TRAIT;
 };
+// 与 CopyL0C2UBTraitSplitM 完全相同，仅作为别名保留以兼容既有调用
+using CopyL0C2UBTraitMixSplitM = CopyL0C2UBTraitSplitM;
 
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
 using CopyL0C2UBTraitMix = asc::te::l0c_to_ub_trait_default;
 #else
-using CopyL0C2UBTraitMix = CopyL0C2UBTraitMixSplitM;
+using CopyL0C2UBTraitMix = CopyL0C2UBTraitSplitM;
 #endif
-
-struct CopyL0C2UBTraitSplitM {
-    using TraitType = asc::te::l0c_to_ub_trait;
-    static constexpr const TraitType value = asc::te::l0c_to_ub_trait{asc::te::round_mode::default_round, false, false,
-                                                                      asc::te::dual_dst_mode::split_m};
-};
 
 struct CopyGM2L1TraitPreAllocation {
     using TraitType = asc::te::gm_to_l1_trait;

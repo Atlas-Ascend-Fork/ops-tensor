@@ -21,7 +21,7 @@
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/tile/datamove.h"
 #include "blaze/gemm/tile/tile_trait.h"
-#include "blaze/gemm/block/block_mmad.h"
+#include "blaze/gemm/block/block_mmad_decl.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {

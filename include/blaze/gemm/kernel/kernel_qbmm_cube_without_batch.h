@@ -21,6 +21,7 @@
 #include "kernel_operator.h"
 #include "kernel_operator_intf.h"
 #endif
+#include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"

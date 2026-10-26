@@ -19,7 +19,7 @@
 #include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/attention/policy/dispatch_policy.h"
-#include "blaze/attention/block/block_mmad.h"
+#include "blaze/attention/block/block_mmad_decl.h"
 
 namespace Blaze {
 namespace Attention {

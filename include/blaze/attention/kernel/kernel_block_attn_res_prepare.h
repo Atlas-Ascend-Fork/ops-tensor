@@ -11,6 +11,7 @@
 #pragma once
 
 #include "blaze/attention/block/block_scheduler_block_attn_res_prepare.h"
+#include "blaze/attention/kernel/kernel_universal_decl.h"
 #include "blaze/epilogue/block/block_epilogue_block_attn_res_prepare.h"
 #include "blaze/gemm/block/block_mmad_matmul_basic.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
@@ -19,9 +20,6 @@
 namespace Blaze {
 namespace Attention {
 namespace Kernel {
-
-template <class ProblemShape_, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, typename Enable_>
-class AttentionUniversal;
 
 namespace BlockAttnResPrepareDetail {
 constexpr uint32_t MMAD_BLOCK_NUM = 2U;
