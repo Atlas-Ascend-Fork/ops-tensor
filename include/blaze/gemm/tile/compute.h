@@ -11,6 +11,10 @@
 /*!
  * \file compute.h
  * \brief Architecture-specific compute and transform primitives for tile-level tensors.
+ *
+ * 分层约定（见 issue #230）：ARCH 差异隔离统一收束在 Tile 层（本文件与
+ * datamove.h），Block/Kernel 调度层不感知 __NPU_ARCH__；新增架构适配时
+ * 在此按 arch 子目录挂接对应头文件即可。
  */
 #pragma once
 
