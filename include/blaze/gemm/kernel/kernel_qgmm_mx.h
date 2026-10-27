@@ -14,12 +14,7 @@
  */
 
 #pragma once
-#if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
-#else
-#include "kernel_operator.h"
-#include "kernel_operator_intf.h"
-#endif
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
 #include "blaze/gemm/utils/common_utils.h"

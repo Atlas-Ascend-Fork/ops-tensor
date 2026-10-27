@@ -243,7 +243,7 @@ void MyFunc() {
 #include "blaze/api/gemm/block/block_mmad.h"
 ```
 
-### 2.5 禁止在类成员变量初始化表达式中使用被 `__NPU_ARCH_` 宏保护的函数或常量
+### 2.5 禁止在类成员变量初始化表达式中使用被 `__NPU_ARCH__` 宏保护的函数或常量
 
 在混合编译场景下，存在编译失败的风险。只能在类方法中使用，类方法存在 `__aicore__` 前缀，因此编译器会忽略函数内部实现。
 
@@ -252,7 +252,7 @@ void MyFunc() {
 template <class AType_, class LayoutA_>
 class MyKernel {
 private:
-    // GetArchDepValue() 仅在 __NPU_ARCH_ 下可用，CPU 侧编译会失败
+    // GetArchDepValue() 仅在 __NPU_ARCH__ 下可用，CPU 侧编译会失败
     uint32_t archValue_ = GetArchDepValue();
 };
 
@@ -490,4 +490,48 @@ struct Params {
     uint64_t mHbm;
     uint32_t newField;    // 新字段放在最后
 };
+```
+
+### 2.16 vf类接口需要使用__NPU_ARCH__包裹
+
+兼容性要求，当前最早兼容版本中相关接口被__NPU_ARCH__包裹，不添加该宏会导致在对应版本的toolkit无法编译
+
+```c++
+#ifdef __NPU_ARCH__ // 使用宏定义包住AscendC::Reg
+static constexpr AscendC::Reg::CastTrait CAST_FR_FP32_TO_BF16 = {
+    AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT, AscendC::Reg::MaskMergeMode::ZEROING,
+    AscendC::RoundMode::CAST_RINT};
+
+static constexpr AscendC::Reg::CastTrait CAST_FR_BF16_TO_FP32 = {
+    AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
+    AscendC::RoundMode::UNKNOWN};
+#endif
+```
+
+### 2.17 不允许使用TPipe和TBuf接口
+
+TPipe和TBuf用于管理同步，当前blaze已自行管理同步，性能更优
+
+```c++
+// 错误
+AscendC::TPipe pipe_;
+AscendC::TBuf<QuePosition::VECCALC> bufQueue_;
+```
+
+### 2.18 头文件中不允许使用匿名空间
+
+匿名空间内定义内容仅对当前编译单元可见。头文件中使用匿名空间实际效果等于此头文件的源文件定义了一组私有成员，而头文件一般用于定义模块间的公共接口，容易引发混淆，不建议使用
+
+```c++
+// 错误
+namespace {
+    namespace BlockAttnResPrepareDetail {
+        // xxxx
+    }
+}
+
+// 正确
+namespace BlockAttnResPrepareDetail {
+    // xxxx
+}
 ```

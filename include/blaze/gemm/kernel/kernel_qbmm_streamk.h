@@ -17,12 +17,7 @@
 
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 
-#if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
-#else
-#include "kernel_operator.h"
-#include "kernel_operator_intf.h"
-#endif
 
 #include "blaze/epilogue/block/block_epilogue_matmul_streamk.h"
 #include "blaze/gemm/block/block_mmad_qbmm_mx.h"

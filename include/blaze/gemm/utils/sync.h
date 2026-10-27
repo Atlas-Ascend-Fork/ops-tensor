@@ -14,11 +14,7 @@
  */
 #pragma once
 
-#if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
-#else
-#include "kernel_operator.h"
-#endif
 #include "c_api/sync/sync.h"
 
 // bisheng --asc-aicore-lang 混合编译（host/device 双边）时，host 侧不定义 __NPU_ARCH__，

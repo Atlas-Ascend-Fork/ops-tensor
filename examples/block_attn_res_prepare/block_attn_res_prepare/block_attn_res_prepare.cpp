@@ -61,7 +61,6 @@ struct TilingData {
     uint64_t eWorkspaceElems{static_cast<uint64_t>(S_ALIGN) * N_ALIGN};
     uint64_t vUbElems{static_cast<uint64_t>(TOTAL_N) * BASE_D_ALIGN};
     uint64_t dotUbElems{static_cast<uint64_t>(S_ALIGN) * N_ALIGN};
-    uint64_t reduceUbElems{AscendC::VECTOR_REG_WIDTH / sizeof(float)};
     uint64_t softmaxUbElems{static_cast<uint64_t>(SOFTMAX_STAT_NUM) * S_ALIGN};
     uint64_t workspacePerCoreElems{WORKSPACE_PER_CORE_ELEMS};
     float epsilon{EPSILON};
@@ -119,7 +118,7 @@ __global__ __aicore__ void BlockAttnResPrepareKernel(GM_ADDR blockResidual, GM_A
     params.epilogueParams.eWorkspaceElems = tiling.eWorkspaceElems;
     params.epilogueParams.vUbElems = tiling.vUbElems;
     params.epilogueParams.dotUbElems = tiling.dotUbElems;
-    params.epilogueParams.reduceUbElems = tiling.reduceUbElems;
+    params.epilogueParams.reduceUbElems = asc_get_vf_len() / sizeof(float);
     params.epilogueParams.softmaxUbElems = tiling.softmaxUbElems;
     params.epilogueParams.workspacePerCoreElems = tiling.workspacePerCoreElems;
     params.epilogueParams.epsilon = tiling.epsilon;

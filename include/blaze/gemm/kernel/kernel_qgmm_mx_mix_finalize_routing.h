@@ -17,13 +17,8 @@
 
 #include <cstdint>
 
-#if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
 #include "reg_compute/kernel_reg_compute_intf.h"
-#else
-#include "kernel_operator.h"
-#include "kernel_operator_intf.h"
-#endif
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/utils/buffer_manager.h"
@@ -36,9 +31,11 @@ namespace Blaze {
 namespace Gemm {
 namespace Kernel {
 
+#ifdef __NPU_ARCH__
 static constexpr AscendC::Reg::CastTrait CAST_GMM_FR_BF16_TO_FP32 = {
     AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
     AscendC::RoundMode::UNKNOWN};
+#endif // __NPU_ARCH__
 
 __aicore__ inline uint16_t FloatToBf16Bits(float value)
 {
@@ -148,6 +145,7 @@ __aicore__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_P
     ubOutPongOffset_ = ubOutPingOffset_ + GMM_FR_UB_DOUBLE_BUFFER_LEN * sizeof(DataTypeOut);
 }
 
+#ifdef __NPU_ARCH__
 GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS
 __simd_vf__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_PARAMS>::VfDoSharedCastAndMuls(
     __ubuf__ DataTypeOut* dstPtr, __ubuf__ DataTypeIn* residualLocalUbAddr, float sharedWeight,
@@ -189,6 +187,7 @@ __simd_vf__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_
         }
     }
 }
+#endif // __NPU_ARCH__
 
 GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS
 __aicore__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_PARAMS>::Compute(uint64_t singleCount,

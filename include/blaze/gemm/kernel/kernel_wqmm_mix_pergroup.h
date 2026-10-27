@@ -17,12 +17,7 @@
 
 #pragma once
 
-#if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
-#else
-#include "kernel_operator.h"
-#include "kernel_operator_intf.h"
-#endif
 
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
@@ -338,7 +333,6 @@ private:
     static constexpr uint64_t DOUBLE_BUFFER = 2;
     static constexpr uint64_t INT4_PACK_SHIFT = 1;
     static constexpr int32_t ALIGNED_32_SIZE = 32;
-    static constexpr int32_t BLOCK_NUM_REG = AscendC::VECTOR_REG_WIDTH / AscendC::ONE_BLK_SIZE;
     static constexpr int32_t AIV_NUM = 2;
     static constexpr int32_t OFFSET_64 = 64;
     static constexpr int32_t UB_ALIGN_SIZE_FOR_4_BITS = 64;
@@ -355,6 +349,8 @@ private:
     __aicore__ inline void InitUbStorage(uint64_t bl1Pingpong, uint64_t vecPingpong, uint64_t nBubSize,
                                          uint64_t kBubSize, uint64_t scaleOffsetLen)
     {
+        // '/ 8' converts VECTOR_REG_WIDTH (in bits) to bytes; the result is the uint64 word count of one mask register.
+        constexpr uint32_t SCALE_MASK_WORD_NUM = asc_get_vf_len() / 8 / sizeof(uint64_t);
         uint64_t vecWeightInLen;
         uint64_t vecWeightOutLen;
         if (bl1Pingpong == QUADRUPLE_BUFFER) {
@@ -432,8 +428,6 @@ private:
     // scale banks (BLOCK_CUBE elements apart) with the same block-distributed address
     // and Select()s the lanes with this mask, reading from alternating banks.
     static constexpr uint64_t SCALE_MASK_WORD = 0x00000000ffffffff;
-    // '/ 8' converts VECTOR_REG_WIDTH (in bits) to bytes; the result is the uint64 word count of one mask register.
-    static constexpr uint32_t SCALE_MASK_WORD_NUM = AscendC::VECTOR_REG_WIDTH / 8 / sizeof(uint64_t);
 
     template <typename GmBTensor_, typename GmScaleTensor_>
     __aicore__ inline void ProduceBL1(const GmBTensor_& gmBlockB, const GmScaleTensor_& gmBlockScale)
@@ -788,6 +782,7 @@ private:
                                             uint16_t blockCount, int64_t srcStride, int64_t dstStride, int64_t runCount,
                                             int64_t l1OffsetStep)
     {
+        constexpr int32_t BLOCK_NUM_REG = asc_get_vf_len() / AscendC::ONE_BLK_SIZE;
         uint32_t blockLen = BLOCK_NUM_REG;
         if (blockCount == 0 || blockLen == 0) {
             return;
@@ -825,6 +820,7 @@ private:
     __aicore__ inline void CopyVecOut2L1NzKSplit(uint64_t l1BaseBytes, int64_t l1Offset, __ubuf__ uint8_t* ubLocal,
                                                  int32_t bubKLen, int32_t bubNLen)
     {
+        constexpr int32_t BLOCK_NUM_REG = asc_get_vf_len() / AscendC::ONE_BLK_SIZE;
         if (bubKLen < bubNLen) {
             uint16_t blockCount = static_cast<uint16_t>((Blaze::Gemm::BLOCK_CUBE >> 1) * bubNLen * sizeof(xType) /
                                                         AscendC::VECTOR_REG_WIDTH);

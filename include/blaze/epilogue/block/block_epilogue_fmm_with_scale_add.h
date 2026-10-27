@@ -25,14 +25,8 @@
 
 #pragma once
 
-#if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
 #include "reg_compute/kernel_reg_compute_intf.h"
-#else
-#include "kernel_operator.h"
-#include "kernel_operator_intf.h"
-#endif
-
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/sync.h"

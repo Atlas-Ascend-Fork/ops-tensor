@@ -15,13 +15,8 @@
 
 #pragma once
 
-#if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
 #include "reg_compute/kernel_reg_compute_intf.h"
-#else
-#include "kernel_operator.h"
-#include "kernel_operator_intf.h"
-#endif
 #include "kernel_operator_list_tensor_intf.h"
 #include "tensor_api/tensor.h"
 #include "blaze/gemm/utils/common_utils.h"
