@@ -535,3 +535,42 @@ namespace BlockAttnResPrepareDetail {
     // xxxx
 }
 ```
+
+### 2.19 Tile 层共享实现的组织方式与取舍依据
+
+tag 分派全特化的 Tile（如 `Dequant<Tag>` / `Gelu<Tag>`）存在多个特化共用内部件
+（参数结构、cast traits、callee 等）的情况，按共享面大小二选一，**禁止**使用匿名
+namespace 或 `detail` 命名空间承载——namespace 级内部件只有约定层面的防护，外部
+文件仍可直接调用，且存在 ODR 与符号污染隐患。
+
+- **共享面小**（仅个别 traits / 样板断言）：各特化 `private` 自持，接受少量重复。
+  参考 `dequant.h`：两个特化仅共享 2 个 widen cast traits，各自私有定义。
+- **共享面大**（参数结构、参数工厂、load/store callee 等成组内部件）：定义
+  protected 基类，各特化私有继承，由编译器强制访问控制。
+  参考 `gelu.h` 的 `GeluImplBase`。
+
+```cpp
+// 错误：detail 命名空间，约定防护，外部可直接调用
+namespace detail {
+template <typename DataTypeIn>
+static __simd_callee__ inline void GeluLoadCallee(...) { /* ... */ }
+} // namespace detail
+
+// 正确：protected 基类 + 私有继承，编译器强制隔离
+class GeluImplBase {
+protected:
+    template <typename DataTypeIn>
+    static __simd_callee__ inline void GeluLoadCallee(...) { /* ... */ }
+};
+
+template <>
+class Gelu<GeluTanhTag> : private GeluImplBase { /* ... */ };
+```
+
+两条刻意保留重复的例外，不为去重而归并：
+
+1. **逐字移植的 VF 指令序列**：与 adv_api 源实现一一对应的 `__simd_vf__` 函数体
+   （注释标注 verbatim 的），保持指令级对应关系优先于去重，便于与 golden 基线比对。
+2. **跨 family 的精度基线**：同一数学操作在不同 Tile 家族允许刻意不同的 cast
+   策略（如 dequant 的 16F 缩窄 NO_SAT vs Gelu 的 half-SAT），每个家族保持自己的
+   精度基线，**禁止**跨家族统一。

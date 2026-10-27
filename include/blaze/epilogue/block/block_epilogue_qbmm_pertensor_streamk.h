@@ -452,15 +452,15 @@ private:
         using B32ToFpDequant = Tile::Dequant<Tile::B32ToFpTag>;
         using DequantMode = Tile::DequantMode;
         if (hasX1Scale_ && isBias_) {
-            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, true, BiasDtype>(
+            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, true>(
                 accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_, mSize16,
                 nSize16, nSrcAligned, nDstAligned);
         } else if (isBias_) {
-            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, true, BiasDtype>(
+            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, true>(
                 accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16, nSize16,
                 nSrcAligned, nDstAligned);
         } else {
-            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, false, BiasDtype>(
+            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, false>(
                 accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16, nSize16,
                 nSrcAligned, nDstAligned);
         }

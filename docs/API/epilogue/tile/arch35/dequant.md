@@ -108,7 +108,7 @@ scale/输出的布局族见
 ### `Dequant<B32ToFpTag>::Run`
 
 ```cpp
-template <DequantMode x2Gran, DequantMode x1Gran, bool hasBias, class BiasDtype,
+template <DequantMode x2Gran, DequantMode x1Gran, bool hasBias,
           class AccTensor, class DstTensor, class X2ScaleTensor, class X1ScaleTensor, class BiasTensor>
 __aicore__ inline static void Run(const AccTensor& accTensor, const DstTensor& dstTensor,
                                   const X2ScaleTensor& x2ScaleTensor, const X1ScaleTensor& x1ScaleTensor,
@@ -126,7 +126,7 @@ __aicore__ inline static void Run(const AccTensor& accTensor, const DstTensor& d
 | `dstTensor`     | 输出（fp32/bf16/fp16），UB ping-pong，行距 = nDstAligned                                                                           |
 | `x2ScaleTensor` | `PER_CHANNEL` → 单行向量（跨行复用，按 vfBlock 偏移索引）；`PER_TENSOR` → 占位张量（不解引用），数值走 `x2ScaleScalar`                 |
 | `x1ScaleTensor` | `PER_TOKEN` → fp32 线性 mSize 项（Block 已套用行偏移）；否则占位张量                                                                |
-| `biasTensor`    | `hasBias` → BiasDtype 单行向量（跨行复用）；否则占位张量                                                                           |
+| `biasTensor`    | `hasBias` → fp32/bf16/fp16 单行向量（跨行复用，元素类型即 bias 计算类型，由 Tile 从张量推导）；否则占位张量                     |
 | 标量槽          | 未启用的 stage 不读取；`PER_TENSOR` 的值经对应 scalar 传入，禁用槽传 `1.0f`                                                          |
 
 **StreamK 无 bias 的「x2*x1 预合并 + 0xFFFFE000 尾数掩码」属于 Block 侧 Init 关注点**：

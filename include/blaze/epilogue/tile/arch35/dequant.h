@@ -435,11 +435,12 @@ public:
      *                  dereferenced), the value travels via x2ScaleScalar
      *   x1ScaleTensor: x1Gran==PER_TOKEN -> fp32 linear mSize entries (the Block has already
      *                  applied the row offset); otherwise a placeholder tensor
-     *   biasTensor   : hasBias -> BiasDtype single-row vector (reused across rows);
+     *   biasTensor   : hasBias -> fp32/bf16/fp16 single-row vector (reused across rows); the
+     *                  bias compute dtype is derived from the tensor element type;
      *                  otherwise a placeholder tensor
      *   Unused scalar slots pass 1.0f (never read by the disabled stages).
      */
-    template <DequantMode x2Gran, DequantMode x1Gran, bool hasBias, class BiasDtype, class AccTensor, class DstTensor,
+    template <DequantMode x2Gran, DequantMode x1Gran, bool hasBias, class AccTensor, class DstTensor,
               class X2ScaleTensor, class X1ScaleTensor, class BiasTensor>
     __aicore__ inline static void Run(const AccTensor& accTensor, const DstTensor& dstTensor,
                                       const X2ScaleTensor& x2ScaleTensor, const X1ScaleTensor& x1ScaleTensor,
@@ -450,7 +451,7 @@ public:
         using DataTypeOut = asc::te::get_attribute_element_type<typename DstTensor::element_type*>;
         using X2ScaleType = asc::te::get_attribute_element_type<typename X2ScaleTensor::element_type*>;
         using X1ScaleElementType = asc::te::get_attribute_element_type<typename X1ScaleTensor::element_type*>;
-        using BiasElementType = asc::te::get_attribute_element_type<typename BiasTensor::element_type*>;
+        using BiasDtype = asc::te::get_attribute_element_type<typename BiasTensor::element_type*>;
         using AccLayoutPattern = asc::te::get_layout_pattern<typename AccTensor::layout_type>;
         using DstLayoutPattern = asc::te::get_layout_pattern<typename DstTensor::layout_type>;
         using X2ScaleLayoutPattern = asc::te::get_layout_pattern<typename X2ScaleTensor::layout_type>;
@@ -474,8 +475,6 @@ public:
                       "B32 dequant bias dtype must be float / bfloat16_t / half.");
         static_assert(AscendC::Std::is_same_v<X1ScaleElementType, float>,
                       "B32 dequant x1Scale tensor must be fp32 (per-token dtype is fixed).");
-        static_assert(AscendC::Std::is_same_v<BiasElementType, BiasDtype>,
-                      "B32 dequant bias tensor element type must match BiasDtype.");
         static_assert(AscendC::Std::is_same_v<asc::te::get_mem_location<AccTensor>, asc::te::location::ub> &&
                           AscendC::Std::is_same_v<asc::te::get_mem_location<DstTensor>, asc::te::location::ub> &&
                           AscendC::Std::is_same_v<asc::te::get_mem_location<X2ScaleTensor>, asc::te::location::ub> &&

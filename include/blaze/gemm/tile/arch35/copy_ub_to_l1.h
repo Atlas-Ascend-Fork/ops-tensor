@@ -267,13 +267,10 @@ private:
 namespace asc {
 namespace te {
 
-template <typename Traits>
-struct copy_traits<Blaze::Gemm::Tile::CopyPaddedUBToL1, Traits>
-    : public copy_traits<Blaze::Gemm::Tile::CopyPaddedUBToL1, Traits, Blaze::Gemm::Tile::CopyPaddedUBToL1, Traits> {};
-
 template <>
 struct copy_traits<Blaze::Gemm::Tile::CopyPaddedUBToL1>
-    : public copy_traits<Blaze::Gemm::Tile::CopyPaddedUBToL1, ub_to_l1_trait_default> {};
+    : public copy_traits<Blaze::Gemm::Tile::CopyPaddedUBToL1, ub_to_l1_trait_default,
+                         Blaze::Gemm::Tile::CopyPaddedUBToL1, ub_to_l1_trait_default> {};
 
 } // namespace te
 } // namespace asc

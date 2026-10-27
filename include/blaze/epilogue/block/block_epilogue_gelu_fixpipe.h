@@ -106,9 +106,7 @@ public:
                     auto ubGeluDstLayout = Gemm::MakeNDExtLayout<DataTypeOut>(localRows, rowPitch, rowPitch);
                     auto ubGeluDst = asc::te::make_tensor(
                         asc::te::make_mem_ptr<asc::te::location::ub, DataTypeOut>(dstOffsetBytes), ubGeluDstLayout);
-                    Tile::Gelu<DataTypeOut, DataTypeIn> gelu;
-                    gelu.GeluTanh(ubGeluSrc, ubGeluDst, static_cast<uint16_t>(localRows),
-                                  static_cast<uint16_t>(rowPitch));
+                    Tile::Gelu<Tile::GeluTanhTag>::Run(ubGeluSrc, ubGeluDst);
 
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(GELU_V_MTE3_EVENT_ID);
                     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(GELU_V_MTE3_EVENT_ID);

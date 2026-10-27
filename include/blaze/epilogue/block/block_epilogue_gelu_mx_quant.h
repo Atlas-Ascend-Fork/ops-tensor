@@ -267,25 +267,26 @@ __aicore__ inline void BlockEpilogueGeluMxQuant<DataTypeOut_, DataTypeIn_>::VFDo
                                                                                                   uint32_t nAligned)
 {
     const uint32_t elementCount = static_cast<uint32_t>(mSize) * nAligned;
-    auto layout = Gemm::MakeNDExtLayout(static_cast<int64_t>(mSize), static_cast<int64_t>(nSize),
-                                        static_cast<int64_t>(nAligned));
+    // ZEROING cast plus an aligned store mask initializes only the final MX group's tail.
+    // Aligned rows form one contiguous span, including rows that are 32 modulo 64 elements;
+    // the tile shape travels in the tensor layout, so the flattened span is expressed
+    // as a single-row layout.
+    const bool contiguous = nSize == nAligned;
+    const int64_t rows = contiguous ? 1 : static_cast<int64_t>(mSize);
+    const int64_t cols = contiguous ? static_cast<int64_t>(elementCount) : static_cast<int64_t>(nSize);
+    const int64_t rowStride = contiguous ? static_cast<int64_t>(elementCount) : static_cast<int64_t>(nAligned);
+    auto layout = Gemm::MakeNDExtLayout(rows, cols, rowStride);
     auto srcTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(0), layout);
     auto dstTensor = asc::te::make_tensor(
         asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(GELU_OUTPUT_UB_OFFSET), layout);
-    // ZEROING cast plus an aligned store mask initializes only the final MX group's tail.
-    // Aligned rows form one contiguous span, including rows that are 32 modulo 64 elements.
-    const bool contiguous = nSize == nAligned;
-    const uint16_t rows = contiguous ? 1 : mSize;
-    const uint16_t cols = contiguous ? static_cast<uint16_t>(elementCount) : nSize;
     if constexpr (IS_FP4) {
         // FP4 layout conversion may reuse the GELU result as the previous MTE3 source.
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
     }
-    Tile::Gelu<bfloat16_t, DataTypeIn, false, true> gelu;
     if (useErf_) {
-        gelu.GeluErf(srcTensor, dstTensor, rows, cols);
+        Tile::Gelu<Tile::GeluErfTag>::Run</*kPadToMxGroup=*/true>(srcTensor, dstTensor);
     } else {
-        gelu.GeluTanh(srcTensor, dstTensor, rows, cols);
+        Tile::Gelu<Tile::GeluTanhTag>::Run</*kPreciseDiv=*/false, /*kPadToMxGroup=*/true>(srcTensor, dstTensor);
     }
     // Quantization only reads the BF16 result; Fixpipe can reuse the FP32 input now.
     Gemm::Sync::NotifyCube();

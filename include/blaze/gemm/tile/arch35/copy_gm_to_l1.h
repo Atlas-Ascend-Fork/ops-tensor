@@ -340,7 +340,10 @@ private:
 namespace asc {
 namespace te {
 
-// 特化Traits，绑定自定义GM->L1拷贝实现
+// 特化Traits，绑定自定义GM->L1拷贝实现。
+// 保留两参偏特化：Block 层存在非默认 trait 的消费点
+// （make_copy(copy_gm_to_l1{}, CopyGM2L1TraitPreAllocation{})，见 tile_trait.h），
+// 不能合并为单一全特化
 template <typename Traits>
 struct copy_traits<Blaze::Gemm::Tile::CopySliceGM2L1, Traits>
     : public copy_traits<Blaze::Gemm::Tile::CopySliceGM2L1, Traits, Blaze::Gemm::Tile::CopySliceGM2L1, Traits> {};

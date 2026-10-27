@@ -34,14 +34,10 @@ struct CopyUB2L1Weight8Bit {
 namespace asc {
 namespace te {
 
-template <typename Traits>
-struct copy_traits<Blaze::Gemm::Tile::CopyUB2L1Weight8Bit, Traits>
-    : public copy_traits<Blaze::Gemm::Tile::CopyUB2L1Weight8Bit, Traits, Blaze::Gemm::Tile::CopyUB2L1Weight8Bit,
-                         Traits> {};
-
 template <>
 struct copy_traits<Blaze::Gemm::Tile::CopyUB2L1Weight8Bit>
-    : public copy_traits<Blaze::Gemm::Tile::CopyUB2L1Weight8Bit, ub_to_l1_trait_default> {};
+    : public copy_traits<Blaze::Gemm::Tile::CopyUB2L1Weight8Bit, ub_to_l1_trait_default,
+                         Blaze::Gemm::Tile::CopyUB2L1Weight8Bit, ub_to_l1_trait_default> {};
 
 } // namespace te
 } // namespace asc

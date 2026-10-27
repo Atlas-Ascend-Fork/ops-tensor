@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
@@ -358,21 +358,21 @@ private:
         if (isPerToken_) {
             if (isBias_) {
                 if (isPerChannel_) {
-                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TOKEN, true, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TOKEN, true>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
                         nSize16, nSrcAligned, nDstAligned);
                 } else {
-                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TOKEN, true, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TOKEN, true>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
                         nSize16, nSrcAligned, nDstAligned);
                 }
             } else {
                 if (isPerChannel_) {
-                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TOKEN, false, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TOKEN, false>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
                         nSize16, nSrcAligned, nDstAligned);
                 } else {
-                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TOKEN, false, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TOKEN, false>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
                         nSize16, nSrcAligned, nDstAligned);
                 }
@@ -380,21 +380,21 @@ private:
         } else if (isX1PerTensor_) {
             if (isBias_) {
                 if (isPerChannel_) {
-                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TENSOR, true, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TENSOR, true>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_,
                         mSize16, nSize16, nSrcAligned, nDstAligned);
                 } else {
-                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, true, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, true>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_,
                         mSize16, nSize16, nSrcAligned, nDstAligned);
                 }
             } else {
                 if (isPerChannel_) {
-                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TENSOR, false, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::PER_TENSOR, false>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_,
                         mSize16, nSize16, nSrcAligned, nDstAligned);
                 } else {
-                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, false, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, false>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_,
                         mSize16, nSize16, nSrcAligned, nDstAligned);
                 }
@@ -402,21 +402,21 @@ private:
         } else {
             if (isBias_) {
                 if (isPerChannel_) {
-                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::NONE, true, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::NONE, true>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
                         nSize16, nSrcAligned, nDstAligned);
                 } else {
-                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, true, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, true>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
                         nSize16, nSrcAligned, nDstAligned);
                 }
             } else {
                 if (isPerChannel_) {
-                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::NONE, false, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_CHANNEL, DequantMode::NONE, false>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
                         nSize16, nSrcAligned, nDstAligned);
                 } else {
-                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, false, BiasDtype>(
+                    B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, false>(
                         accTensor, dstTensor, x2ScaleTensor, x1ScaleTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16,
                         nSize16, nSrcAligned, nDstAligned);
                 }

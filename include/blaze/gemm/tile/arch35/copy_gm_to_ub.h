@@ -101,13 +101,10 @@ private:
 namespace asc {
 namespace te {
 
-template <typename Traits>
-struct copy_traits<Blaze::Gemm::Tile::CopyGM2UBWeight, Traits>
-    : public copy_traits<Blaze::Gemm::Tile::CopyGM2UBWeight, Traits, Blaze::Gemm::Tile::CopyGM2UBWeight, Traits> {};
-
 template <>
 struct copy_traits<Blaze::Gemm::Tile::CopyGM2UBWeight>
-    : public copy_traits<Blaze::Gemm::Tile::CopyGM2UBWeight, gm_to_ub_trait_default> {};
+    : public copy_traits<Blaze::Gemm::Tile::CopyGM2UBWeight, gm_to_ub_trait_default, Blaze::Gemm::Tile::CopyGM2UBWeight,
+                         gm_to_ub_trait_default> {};
 
 } // namespace te
 } // namespace asc

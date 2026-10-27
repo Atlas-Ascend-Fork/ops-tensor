@@ -12,7 +12,25 @@
  * \file gelu.h
  * \brief Tile-level GELU epilogue: Tanh approximation and Erf exact.
  *
- * Design:
+ * Design: tag-dispatched full specializations (same organization as dequant.h):
+ *   - Algorithm tags (GeluTanhTag / GeluErfTag) are the class template
+ *     parameter — the first dispatch axis; the primary template is a
+ *     declaration only, so unsupported tags fail at compile time.
+ *   - Element types and layouts follow the tensors (deduced via
+ *     get_attribute_element_type), never restated as template arguments.
+ *   - Tile shape [mSize, nSize] travels in the tensor layout and is read
+ *     back from srcTensor, never restated as Run arguments.
+ *   - kPreciseDiv is a Tanh-only Run template parameter (GELU (tanh) lineage =
+ *     true: error-compensation DivPrecisionImpl; GELU MX lineage = false:
+ *     plain vdiv). Both lineages are golden-verified with their own mode, so
+ *     the divergence is parameterized instead of silently unified.
+ *   - kPadToMxGroup is a Run template parameter on both algorithms (MX
+ *     quant epilogues): the 16F store mask is widened to nAligned so the
+ *     ZEROING cast zero-fills the tail of the final MX group. Requires
+ *     bfloat16_t output.
+ *   - Shared implementation lives in GeluImplBase with protected members;
+ *     both specializations inherit it privately, so the internals are
+ *     unreachable from outside code (no detail namespace convention needed).
  *   - Public  (__aicore__): accepts make_tensor-created UB tensors, extracts
  *     raw __ubuf__ pointers via .data().get(), and delegates to Vf.
  *   - Private (__simd_vf__): Reg API register-level computation.
@@ -28,101 +46,49 @@
 
 namespace Blaze::Epilogue::Tile {
 
-// ---------------------------------------------------------------------------
-// Gelu tile: reusable activation epilogue
-//   Any input/output combination of float / bfloat16_t / half:
-//     - non-fp32 input  : widened to fp32 (CT_16F_TO_32F) before computing
-//     - fp32 output     : stored directly, no narrowing cast
-//     - bf16 output     : narrowed with CT_32F_TO_16F (NO_SAT)
-//     - half output     : narrowed with CT_32F_TO_16F_SAT (clamps at 65504)
-//   kPreciseDiv: per-caller division mode (GELU (tanh) lineage = true:
-//   error-compensation DivPrecisionImpl; GELU MX lineage = false: plain vdiv).
-//   Both lineages are golden-verified with their own mode, so the divergence
-//   is parameterized instead of silently unified.
-// ---------------------------------------------------------------------------
-template <typename DataTypeOut_, typename DataTypeIn_, bool kPreciseDiv_ = false, bool kPadToMxGroup_ = false>
-class Gelu {
-public:
-    using DataTypeOut = DataTypeOut_;
-    using DataTypeIn = DataTypeIn_;
+// Algorithm tags (class template parameter): the first dispatch axis. The tag selects
+// the GELU algorithm; layouts and dtypes follow the tensors.
+struct GeluTanhTag {}; // tanh approximation (sigmoid form)
+struct GeluErfTag {};  // erf exact (subsection polynomial)
 
-    static_assert(!kPadToMxGroup_ || AscendC::IsSameType<DataTypeOut, bfloat16_t>::value,
-                  "MX tail padding requires BF16 output with a zeroing cast.");
+// Primary template: declaration only; unsupported tags fail at compile time.
+template <class GeluTag>
+class Gelu;
 
-    __aicore__ inline Gelu() = default;
-
-    /*!
-     * Tanh-approximation GELU: 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))
-     * Equivalent sigmoid form: x / (1 + exp(-2*sqrt(2/pi)*(x+0.044715*x^3)))
-     * Accepts make_tensor-created UB tensors, extracts __ubuf__ for Vf.
-     */
+// Shared implementation for the Gelu algorithm specializations. All members are
+// protected and both specializations inherit this base privately, so nothing in
+// here is reachable from outside code. Not part of the public interface.
+class GeluImplBase {
+protected:
+    // Any input/output combination of float / bfloat16_t / half:
+    //   - non-fp32 input  : widened to fp32 (CT_16F_TO_32F) before computing
+    //   - fp32 output     : stored directly, no narrowing cast
+    //   - bf16 output     : narrowed with CT_32F_TO_16F (NO_SAT)
+    //   - half output     : narrowed with CT_32F_TO_16F_SAT (clamps at 65504)
     template <typename SrcTensor, typename DstTensor>
-    __aicore__ inline void GeluTanh(const SrcTensor& srcTensor, const DstTensor& dstTensor, uint16_t mSize,
-                                    uint16_t nSize);
+    static __aicore__ inline void CheckGeluTensors()
+    {
+        using SrcElementType = asc::te::get_attribute_element_type<typename SrcTensor::element_type*>;
+        using DstElementType = asc::te::get_attribute_element_type<typename DstTensor::element_type*>;
+        using SrcLayoutPattern = asc::te::get_layout_pattern<typename SrcTensor::layout_type>;
+        using DstLayoutPattern = asc::te::get_layout_pattern<typename DstTensor::layout_type>;
+        static_assert(AscendC::Std::is_same_v<SrcElementType, float> ||
+                          AscendC::Std::is_same_v<SrcElementType, bfloat16_t> ||
+                          AscendC::Std::is_same_v<SrcElementType, half>,
+                      "Gelu input must be float, bfloat16_t or half.");
+        static_assert(AscendC::Std::is_same_v<DstElementType, float> ||
+                          AscendC::Std::is_same_v<DstElementType, bfloat16_t> ||
+                          AscendC::Std::is_same_v<DstElementType, half>,
+                      "Gelu output must be float, bfloat16_t or half.");
+        static_assert(AscendC::Std::is_same_v<asc::te::get_mem_location<SrcTensor>, asc::te::location::ub> &&
+                          AscendC::Std::is_same_v<asc::te::get_mem_location<DstTensor>, asc::te::location::ub>,
+                      "Gelu only supports UB tensors.");
+        static_assert(AscendC::Std::is_same_v<SrcLayoutPattern, asc::te::nd_ext_layout_ptn> &&
+                          AscendC::Std::is_same_v<DstLayoutPattern, asc::te::nd_ext_layout_ptn>,
+                      "Gelu only supports NDExt tensor layouts.");
+    }
 
-    /*!
-     * Erf-based GELU: 0.5*x*(1+erf(x/sqrt(2)))
-     * Accepts make_tensor-created UB tensors, extracts __ubuf__ for Vf.
-     * Pure register pipeline: scale x/sqrt(2), subsection polynomial erf
-     * (ErfCallee) and (1+erf)*(0.5*x) assembly in a single Vf launch.
-     */
-    template <typename SrcTensor, typename DstTensor>
-    __aicore__ inline void GeluErf(const SrcTensor& srcTensor, const DstTensor& dstTensor, uint16_t mSize,
-                                   uint16_t nSize);
-
-private:
-    // Constants
-    static constexpr float TANH_APPROX_FACTOR = 1.0f / 0.044715f;
-    static constexpr float NEG_SQRT_EIGHT_OVER_PI = -1.595769121f * 0.044715f;
-    static constexpr float ONE_OVER_SQRT_TWO = 0.707106781f;
-    static constexpr float GELU_HALF = 0.5f;
-    static constexpr float GELU_ONE = 1.0f;
-
-#ifdef __NPU_ARCH__
-    // Erf subsection polynomial approximation coefficients (fp32 bit patterns),
-    // ported from impl/adv_api/detail/math/erf/erf_3510_impl.h (ErfAPI).
-    // P1: |x| >= ERF_C0 branch, P2: |x| < ERF_C0 branch.
-    static constexpr uint32_t ERF_C0 = 0x3F8060FE;
-    static constexpr uint32_t ERF_P1[] = {0x38EB4C3A, 0xBAAE005B, 0x3C09919F, 0xBD24D99A,
-                                          0x3E235519, 0x3F69B4F9, 0x3F210A14};
-    static constexpr uint32_t ERF_P2[] = {0x38B1E96A, 0xBA574D20, 0x3BAAD5EA, 0xBCDC1BE7,
-                                          0x3DE718AF, 0xBEC093AC, 0x3E0375D3};
-
-    // Cast traits (compile-time constexpr, shared between high-level and Vf).
-    // Named by bit-width: 16F covers both half and bfloat16_t.
-    // Narrowing fp32 -> 16F, no saturation: safe for bf16 (shares fp32's exponent range).
-    static constexpr AscendC::Reg::CastTrait CT_32F_TO_16F = {
-        AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT, AscendC::Reg::MaskMergeMode::ZEROING,
-        AscendC::RoundMode::CAST_RINT};
-
-    // Narrowing fp32 -> 16F with saturation: for half (max 65504), clamps instead of inf.
-    static constexpr AscendC::Reg::CastTrait CT_32F_TO_16F_SAT = {
-        AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::SAT, AscendC::Reg::MaskMergeMode::ZEROING,
-        AscendC::RoundMode::CAST_RINT};
-
-    // Widening 16F -> fp32 (half / bfloat16_t); Sat/Round are ignored for widening.
-    static constexpr AscendC::Reg::CastTrait CT_16F_TO_32F = {
-        AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
-        AscendC::RoundMode::UNKNOWN};
-
-    // Per-instantiation narrowing trait selected by output type:
-    // half -> SAT (avoid inf beyond 65504); bf16 -> NO_SAT (no overflow possible);
-    // float output skips the narrowing cast entirely (if constexpr at call sites).
-    static constexpr AscendC::Reg::CastTrait CT_32F_TO_OUT = AscendC::IsSameType<DataTypeOut, half>::value ?
-                                                                 CT_32F_TO_16F_SAT :
-                                                                 CT_32F_TO_16F;
-
-    // Division mode selected per instantiation. {ZEROING, false} is bit-identical
-    // to the default Div<float> template (GetDivSpecificMode(MaskMergeMode) maps to
-    // {ZEROING, false, INTRINSIC} -> plain vdiv); true switches to the
-    // error-compensation precision division (2-3x instruction count per Div).
-    static constexpr AscendC::Reg::DivSpecificMode GELU_DIV_MODE = {
-        AscendC::Reg::MaskMergeMode::ZEROING,
-        kPreciseDiv_,
-    };
-#endif // __NPU_ARCH__
-
-    // Vf parameter structs: raw __ubuf__ pointers + shape info for Reg API.
+    // Vf parameter struct: raw __ubuf__ pointers + shape info for Reg API.
     // Shared by the tanh and erf Vf entries (identical tile shape contract).
     template <typename DataTypeOut, typename DataTypeIn>
     struct GeluVfParams {
@@ -135,12 +101,149 @@ private:
         uint32_t nAligned;
     };
 
+    // Repeat geometry + params packing (identical for both algorithms). The tile
+    // shape travels in the tensor layout: Shape = ((1, rows), (1, cols)), so
+    // mSize/nSize are read back from srcTensor instead of restated by the caller.
+    template <typename SrcTensor, typename DstTensor>
+    static __aicore__ inline auto MakeGeluVfParams(const SrcTensor& srcTensor, const DstTensor& dstTensor)
+    {
+        using DataTypeIn = asc::te::get_attribute_element_type<typename SrcTensor::element_type*>;
+        using DataTypeOut = asc::te::get_attribute_element_type<typename DstTensor::element_type*>;
+        uint16_t mSize = static_cast<uint16_t>(AscendC::Std::get<1>(AscendC::Std::get<0>(srcTensor.layout().shape())));
+        uint16_t nSize = static_cast<uint16_t>(AscendC::Std::get<1>(AscendC::Std::get<1>(srcTensor.layout().shape())));
+        constexpr uint16_t sizePerRepeat = static_cast<uint16_t>(asc_get_vf_len() / sizeof(float));
+        uint16_t oneRowRepeatTimes = Gemm::CeilDiv(static_cast<uint32_t>(nSize), static_cast<uint32_t>(sizePerRepeat));
+        uint32_t nAligned = Gemm::Align32(static_cast<uint32_t>(nSize));
+        return GeluVfParams<DataTypeOut, DataTypeIn>{reinterpret_cast<__ubuf__ DataTypeOut*>(dstTensor.data().get()),
+                                                     reinterpret_cast<__ubuf__ DataTypeIn*>(srcTensor.data().get()),
+                                                     mSize,
+                                                     nSize,
+                                                     sizePerRepeat,
+                                                     oneRowRepeatTimes,
+                                                     nAligned};
+    }
+
+#ifdef __NPU_ARCH__
+    // Cast traits (compile-time constexpr, shared between high-level and Vf).
+    // Named by bit-width: 16F covers both half and bfloat16_t.
+    struct GeluCastTraits {
+        // Narrowing fp32 -> 16F, no saturation: safe for bf16 (shares fp32's exponent range).
+        static constexpr AscendC::Reg::CastTrait CT_32F_TO_16F = {
+            AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT, AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::CAST_RINT};
+
+        // Narrowing fp32 -> 16F with saturation: for half (max 65504), clamps instead of inf.
+        static constexpr AscendC::Reg::CastTrait CT_32F_TO_16F_SAT = {
+            AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::SAT, AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::CAST_RINT};
+
+        // Widening 16F -> fp32 (half / bfloat16_t); Sat/Round are ignored for widening.
+        static constexpr AscendC::Reg::CastTrait CT_16F_TO_32F = {
+            AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::UNKNOWN};
+    };
+
+    // Per-output-type narrowing trait: half -> SAT (avoid inf beyond 65504);
+    // bf16 -> NO_SAT (no overflow possible); float output skips the narrowing cast
+    // entirely (if constexpr at the store callee).
+    template <typename DataTypeOut>
+    struct GeluOutCastTrait {
+        static constexpr AscendC::Reg::CastTrait VALUE = AscendC::IsSameType<DataTypeOut, half>::value ?
+                                                             GeluCastTraits::CT_32F_TO_16F_SAT :
+                                                             GeluCastTraits::CT_32F_TO_16F;
+    };
+
+    // Division mode selected per Run instantiation. {ZEROING, false} is bit-identical
+    // to the default Div<float> template (GetDivSpecificMode(MaskMergeMode) maps to
+    // {ZEROING, false, INTRINSIC} -> plain vdiv); true switches to the
+    // error-compensation precision division (2-3x instruction count per Div).
+    template <bool kPreciseDiv>
+    struct GeluDivMode {
+        static constexpr AscendC::Reg::DivSpecificMode VALUE = {
+            AscendC::Reg::MaskMergeMode::ZEROING,
+            kPreciseDiv,
+        };
+    };
+#endif // __NPU_ARCH__
+
+    // Store tail shared by both core callees: fp32 stores directly; 16F narrows
+    // (per-output-type trait) and stores packed. storeMask is the store-side lane
+    // count: kPadToMxGroup callers pass a mask widened to nAligned so the ZEROING
+    // cast writes zeros into the tail of the final MX group instead of leaving
+    // stale UB data; plain callers pass mask itself.
+    template <typename DataTypeOut>
+    static __simd_callee__ inline void GeluStoreCallee(__ubuf__ DataTypeOut* dstAddr, uint32_t offset,
+                                                       AscendC::Reg::RegTensor<float>& vregOutput,
+                                                       AscendC::Reg::MaskReg& mask, AscendC::Reg::MaskReg& storeMask)
+    {
+        if constexpr (AscendC::IsSameType<DataTypeOut, float>::value) {
+            AscendC::Reg::StoreAlign<float, AscendC::Reg::StoreDist::DIST_NORM_B32>(dstAddr + offset, vregOutput, mask);
+        } else {
+            AscendC::Reg::RegTensor<DataTypeOut> vregOutputOut;
+            AscendC::Reg::Cast<DataTypeOut, float, GeluOutCastTrait<DataTypeOut>::VALUE>(vregOutputOut, vregOutput,
+                                                                                         mask);
+            AscendC::Reg::StoreAlign<DataTypeOut, AscendC::Reg::StoreDist::DIST_PACK_B32>(dstAddr + offset,
+                                                                                          vregOutputOut, storeMask);
+        }
+    }
+
+    // Load head shared by both Vf entries: fp32 loads directly; 16F unpacks and
+    // widens to fp32.
+    template <typename DataTypeIn>
+    static __simd_callee__ inline void GeluLoadCallee(AscendC::Reg::RegTensor<float>& vregInput,
+                                                      __ubuf__ DataTypeIn* srcAddr, uint32_t offset,
+                                                      AscendC::Reg::MaskReg& mask)
+    {
+        if constexpr (AscendC::IsSameType<DataTypeIn, float>::value) {
+            AscendC::Reg::LoadAlign<float, AscendC::Reg::LoadDist::DIST_NORM>(vregInput, srcAddr + offset);
+        } else {
+            AscendC::Reg::RegTensor<DataTypeIn> vregInput16;
+            AscendC::Reg::LoadAlign<DataTypeIn, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(vregInput16, srcAddr + offset);
+            AscendC::Reg::Cast<float, DataTypeIn, GeluCastTraits::CT_16F_TO_32F>(vregInput, vregInput16, mask);
+        }
+    }
+};
+
+// ===========================================================================
+// Gelu<GeluTanhTag> – tanh-approximation GELU
+//   0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))
+//   Equivalent sigmoid form: x / (1 + exp(-2*sqrt(2/pi)*(x+0.044715*x^3)))
+// ===========================================================================
+template <>
+class Gelu<GeluTanhTag> : private GeluImplBase {
+public:
+    // kPreciseDiv: tanh-only division mode (true = error-compensation division).
+    // kPadToMxGroup: widen the 16F store mask to nAligned so the ZEROING cast
+    // zero-fills the tail of the final MX group; requires bfloat16_t output.
+    template <bool kPreciseDiv = false, bool kPadToMxGroup = false, typename SrcTensor, typename DstTensor>
+    __aicore__ inline static void Run(const SrcTensor& srcTensor, const DstTensor& dstTensor)
+    {
+        CheckGeluTensors<SrcTensor, DstTensor>();
+        if ASCEND_IS_AIC {
+            return;
+        }
+        using DataTypeIn = asc::te::get_attribute_element_type<typename SrcTensor::element_type*>;
+        using DataTypeOut = asc::te::get_attribute_element_type<typename DstTensor::element_type*>;
+        static_assert(!kPadToMxGroup || AscendC::IsSameType<DataTypeOut, bfloat16_t>::value,
+                      "MX tail padding requires BF16 output with a zeroing cast.");
+        auto params = MakeGeluVfParams(srcTensor, dstTensor);
+        if (params.nSize % params.sizePerRepeat == 0) {
+            asc_vf_call<GeluTanhVf<DataTypeOut, DataTypeIn, kPreciseDiv, kPadToMxGroup, true>>(params);
+        } else {
+            asc_vf_call<GeluTanhVf<DataTypeOut, DataTypeIn, kPreciseDiv, kPadToMxGroup, false>>(params);
+        }
+    }
+
+private:
+    static constexpr float TANH_APPROX_FACTOR = 1.0f / 0.044715f;
+    static constexpr float NEG_SQRT_EIGHT_OVER_PI = -1.595769121f * 0.044715f;
+    static constexpr float GELU_ONE = 1.0f;
+
     /*!
      * Callee: fp32 input register → GELU (tanh) math → narrow to DataTypeOut → store.
-     * Shared by GeluTanhVf (fp32 input loaded directly) and GeluTanhCastInVf
-     * (16F input widened to fp32 before the call). Mirrors the
-     * __simd_callee__ composition pattern of gemm/tile/arch35/shift_w4_to_w8.h.
+     * Mirrors the __simd_callee__ composition pattern of gemm/tile/arch35/shift_w4_to_w8.h.
      */
+    template <typename DataTypeOut, bool kPreciseDiv>
     static __simd_callee__ inline void GeluTanhCoreCallee(AscendC::Reg::RegTensor<float>& vregInput,
                                                           AscendC::Reg::MaskReg& mask, AscendC::Reg::MaskReg& storeMask,
                                                           __ubuf__ DataTypeOut* dstAddr, uint32_t offset)
@@ -154,27 +257,21 @@ private:
         AscendC::Reg::Muls(vregInputCub, vregInputCub, NEG_SQRT_EIGHT_OVER_PI, mask);
         AscendC::Reg::Exp(vregInputCub, vregInputCub, mask);
         AscendC::Reg::Adds(vregInputCub, vregInputCub, GELU_ONE, mask);
-        AscendC::Reg::Div<float, &GELU_DIV_MODE>(vregOutput, vregInput, vregInputCub, mask);
-        if constexpr (AscendC::IsSameType<DataTypeOut, float>::value) {
-            AscendC::Reg::StoreAlign<float, AscendC::Reg::StoreDist::DIST_NORM_B32>(dstAddr + offset, vregOutput, mask);
-        } else {
-            AscendC::Reg::RegTensor<DataTypeOut> vregOutputOut;
-            AscendC::Reg::Cast<DataTypeOut, float, CT_32F_TO_OUT>(vregOutputOut, vregOutput, mask);
-            AscendC::Reg::StoreAlign<DataTypeOut, AscendC::Reg::StoreDist::DIST_PACK_B32>(dstAddr + offset,
-                                                                                          vregOutputOut, storeMask);
-        }
+        AscendC::Reg::Div<float, &GeluDivMode<kPreciseDiv>::VALUE>(vregOutput, vregInput, vregInputCub, mask);
+        GeluStoreCallee<DataTypeOut>(dstAddr, offset, vregOutput, mask, storeMask);
     }
 
     /*!
-     * VF: fp32 input → load → delegate to GeluTanhCoreCallee.
+     * VF: one launch covers the whole tile; load head (fp32 direct / 16F
+     * unpack+widen) delegates to GeluTanhCoreCallee. FULL_REPEAT (dispatched in
+     * Run when nSize % sizePerRepeat == 0) skips the per-repeat UpdateMask.
      */
-    template <bool FULL_REPEAT>
+    template <typename DataTypeOut, typename DataTypeIn, bool kPreciseDiv, bool kPadToMxGroup, bool FULL_REPEAT>
     static __simd_vf__ inline void GeluTanhVf(GeluVfParams<DataTypeOut, DataTypeIn> params)
     {
         AscendC::Reg::RegTensor<float> vregInput;
         auto mask = AscendC::Reg::CreateMask<float>();
 
-        __ubuf__ float* src = reinterpret_cast<__ubuf__ float*>(params.srcAddr);
         for (uint16_t mIdx = 0; mIdx < params.mSize; mIdx++) {
             uint32_t count = params.nSize;
             uint32_t storeCount = params.nAligned;
@@ -183,45 +280,62 @@ private:
                     mask = AscendC::Reg::UpdateMask<float>(count);
                 }
                 auto storeMask = mask;
-                if constexpr (kPadToMxGroup_ && !FULL_REPEAT) {
+                if constexpr (kPadToMxGroup && !FULL_REPEAT) {
                     storeMask = AscendC::Reg::UpdateMask<float>(storeCount);
                 }
                 uint32_t offset = mIdx * params.nAligned + vfIdx * params.sizePerRepeat;
-                AscendC::Reg::LoadAlign<float, AscendC::Reg::LoadDist::DIST_NORM>(vregInput, src + offset);
-                GeluTanhCoreCallee(vregInput, mask, storeMask, params.dstAddr, offset);
+                GeluLoadCallee<DataTypeIn>(vregInput, params.srcAddr, offset, mask);
+                GeluTanhCoreCallee<DataTypeOut, kPreciseDiv>(vregInput, mask, storeMask, params.dstAddr, offset);
             }
         }
     }
+};
 
-    /*!
-     * VF: 16F input → unpack + widen to fp32 → delegate to GeluTanhCoreCallee.
-     */
-    template <bool FULL_REPEAT>
-    static __simd_vf__ inline void GeluTanhCastInVf(GeluVfParams<DataTypeOut, DataTypeIn> params)
+// ===========================================================================
+// Gelu<GeluErfTag> – erf-based GELU
+//   0.5*x*(1+erf(x/sqrt(2)))
+//   Pure register pipeline: scale x/sqrt(2), subsection polynomial erf
+//   (ErfCallee) and (1+erf)*(0.5*x) assembly in a single Vf launch.
+// ===========================================================================
+template <>
+class Gelu<GeluErfTag> : private GeluImplBase {
+public:
+    // kPadToMxGroup: widen the 16F store mask to nAligned so the ZEROING cast
+    // zero-fills the tail of the final MX group; requires bfloat16_t output.
+    template <bool kPadToMxGroup = false, typename SrcTensor, typename DstTensor>
+    __aicore__ inline static void Run(const SrcTensor& srcTensor, const DstTensor& dstTensor)
     {
-        AscendC::Reg::RegTensor<float> vregInput;
-        AscendC::Reg::RegTensor<DataTypeIn> vregInput16;
-        auto mask = AscendC::Reg::CreateMask<float>();
-
-        for (uint16_t mIdx = 0; mIdx < params.mSize; mIdx++) {
-            uint32_t count = params.nSize;
-            uint32_t storeCount = params.nAligned;
-            for (uint16_t vfIdx = 0; vfIdx < params.oneRowRepeatTimes; vfIdx++) {
-                if constexpr (!FULL_REPEAT) {
-                    mask = AscendC::Reg::UpdateMask<float>(count);
-                }
-                auto storeMask = mask;
-                if constexpr (kPadToMxGroup_ && !FULL_REPEAT) {
-                    storeMask = AscendC::Reg::UpdateMask<float>(storeCount);
-                }
-                uint32_t offset = mIdx * params.nAligned + vfIdx * params.sizePerRepeat;
-                AscendC::Reg::LoadAlign<DataTypeIn, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(vregInput16,
-                                                                                             params.srcAddr + offset);
-                AscendC::Reg::Cast<float, DataTypeIn, CT_16F_TO_32F>(vregInput, vregInput16, mask);
-                GeluTanhCoreCallee(vregInput, mask, storeMask, params.dstAddr, offset);
-            }
+        CheckGeluTensors<SrcTensor, DstTensor>();
+        if ASCEND_IS_AIC {
+            return;
+        }
+        using DataTypeIn = asc::te::get_attribute_element_type<typename SrcTensor::element_type*>;
+        using DataTypeOut = asc::te::get_attribute_element_type<typename DstTensor::element_type*>;
+        static_assert(!kPadToMxGroup || AscendC::IsSameType<DataTypeOut, bfloat16_t>::value,
+                      "MX tail padding requires BF16 output with a zeroing cast.");
+        auto params = MakeGeluVfParams(srcTensor, dstTensor);
+        if (params.nSize % params.sizePerRepeat == 0) {
+            asc_vf_call<GeluErfVf<DataTypeOut, DataTypeIn, kPadToMxGroup, true>>(params);
+        } else {
+            asc_vf_call<GeluErfVf<DataTypeOut, DataTypeIn, kPadToMxGroup, false>>(params);
         }
     }
+
+private:
+    static constexpr float ONE_OVER_SQRT_TWO = 0.707106781f;
+    static constexpr float GELU_HALF = 0.5f;
+    static constexpr float GELU_ONE = 1.0f;
+
+#ifdef __NPU_ARCH__
+    // Erf subsection polynomial approximation coefficients (fp32 bit patterns),
+    // ported from impl/adv_api/detail/math/erf/erf_3510_impl.h (ErfAPI).
+    // P1: |x| >= ERF_C0 branch, P2: |x| < ERF_C0 branch.
+    static constexpr uint32_t ERF_C0 = 0x3F8060FE;
+    static constexpr uint32_t ERF_P1[] = {0x38EB4C3A, 0xBAAE005B, 0x3C09919F, 0xBD24D99A,
+                                          0x3E235519, 0x3F69B4F9, 0x3F210A14};
+    static constexpr uint32_t ERF_P2[] = {0x38B1E96A, 0xBA574D20, 0x3BAAD5EA, 0xBCDC1BE7,
+                                          0x3DE718AF, 0xBEC093AC, 0x3E0375D3};
+#endif // __NPU_ARCH__
 
     /*!
      * Callee: dst = cmpMask ? bitsAsFp32(hiBits) : bitsAsFp32(loBits).
@@ -310,9 +424,9 @@ private:
 
     /*!
      * Callee: fp32 input register → x/sqrt(2) → ErfCallee → (1+erf)*(0.5*x)
-     * → narrow to DataTypeOut → store. Shared by GeluErfVf (fp32 input loaded
-     * directly) and GeluErfCastInVf (16F input widened to fp32 before the call).
+     * → narrow to DataTypeOut → store.
      */
+    template <typename DataTypeOut>
     static __simd_callee__ inline void GeluErfCoreCallee(AscendC::Reg::RegTensor<float>& vregInput,
                                                          AscendC::Reg::MaskReg& mask, AscendC::Reg::MaskReg& storeMask,
                                                          __ubuf__ DataTypeOut* dstAddr, uint32_t offset)
@@ -327,26 +441,20 @@ private:
         AscendC::Reg::Adds(vregAdds, vregErf, GELU_ONE, mask);
         AscendC::Reg::Muls(vregMuls, vregInput, GELU_HALF, mask);
         AscendC::Reg::Mul(vregOutput, vregAdds, vregMuls, mask);
-        if constexpr (AscendC::IsSameType<DataTypeOut, float>::value) {
-            AscendC::Reg::StoreAlign<float, AscendC::Reg::StoreDist::DIST_NORM_B32>(dstAddr + offset, vregOutput, mask);
-        } else {
-            AscendC::Reg::RegTensor<DataTypeOut> vregOutputOut;
-            AscendC::Reg::Cast<DataTypeOut, float, CT_32F_TO_OUT>(vregOutputOut, vregOutput, mask);
-            AscendC::Reg::StoreAlign<DataTypeOut, AscendC::Reg::StoreDist::DIST_PACK_B32>(dstAddr + offset,
-                                                                                          vregOutputOut, storeMask);
-        }
+        GeluStoreCallee<DataTypeOut>(dstAddr, offset, vregOutput, mask, storeMask);
     }
 
     /*!
-     * VF: fp32 input → load → delegate to GeluErfCoreCallee.
+     * VF: one launch covers the whole tile; load head (fp32 direct / 16F
+     * unpack+widen) delegates to GeluErfCoreCallee. FULL_REPEAT (dispatched in
+     * Run when nSize % sizePerRepeat == 0) skips the per-repeat UpdateMask.
      */
-    template <bool FULL_REPEAT>
+    template <typename DataTypeOut, typename DataTypeIn, bool kPadToMxGroup, bool FULL_REPEAT>
     static __simd_vf__ inline void GeluErfVf(GeluVfParams<DataTypeOut, DataTypeIn> params)
     {
         AscendC::Reg::RegTensor<float> vregInput;
         auto mask = AscendC::Reg::CreateMask<float>();
 
-        __ubuf__ float* src = reinterpret_cast<__ubuf__ float*>(params.srcAddr);
         for (uint16_t mIdx = 0; mIdx < params.mSize; mIdx++) {
             uint32_t count = params.nSize;
             uint32_t storeCount = params.nAligned;
@@ -355,155 +463,15 @@ private:
                     mask = AscendC::Reg::UpdateMask<float>(count);
                 }
                 auto storeMask = mask;
-                if constexpr (kPadToMxGroup_ && !FULL_REPEAT) {
+                if constexpr (kPadToMxGroup && !FULL_REPEAT) {
                     storeMask = AscendC::Reg::UpdateMask<float>(storeCount);
                 }
                 uint32_t offset = mIdx * params.nAligned + vfIdx * params.sizePerRepeat;
-                AscendC::Reg::LoadAlign<float, AscendC::Reg::LoadDist::DIST_NORM>(vregInput, src + offset);
-                GeluErfCoreCallee(vregInput, mask, storeMask, params.dstAddr, offset);
-            }
-        }
-    }
-
-    /*!
-     * VF: 16F input → unpack + widen to fp32 → delegate to GeluErfCoreCallee.
-     */
-    template <bool FULL_REPEAT>
-    static __simd_vf__ inline void GeluErfCastInVf(GeluVfParams<DataTypeOut, DataTypeIn> params)
-    {
-        AscendC::Reg::RegTensor<float> vregInput;
-        AscendC::Reg::RegTensor<DataTypeIn> vregInput16;
-        auto mask = AscendC::Reg::CreateMask<float>();
-
-        for (uint16_t mIdx = 0; mIdx < params.mSize; mIdx++) {
-            uint32_t count = params.nSize;
-            uint32_t storeCount = params.nAligned;
-            for (uint16_t vfIdx = 0; vfIdx < params.oneRowRepeatTimes; vfIdx++) {
-                if constexpr (!FULL_REPEAT) {
-                    mask = AscendC::Reg::UpdateMask<float>(count);
-                }
-                auto storeMask = mask;
-                if constexpr (kPadToMxGroup_ && !FULL_REPEAT) {
-                    storeMask = AscendC::Reg::UpdateMask<float>(storeCount);
-                }
-                uint32_t offset = mIdx * params.nAligned + vfIdx * params.sizePerRepeat;
-                AscendC::Reg::LoadAlign<DataTypeIn, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(vregInput16,
-                                                                                             params.srcAddr + offset);
-                AscendC::Reg::Cast<float, DataTypeIn, CT_16F_TO_32F>(vregInput, vregInput16, mask);
-                GeluErfCoreCallee(vregInput, mask, storeMask, params.dstAddr, offset);
+                GeluLoadCallee<DataTypeIn>(vregInput, params.srcAddr, offset, mask);
+                GeluErfCoreCallee<DataTypeOut>(vregInput, mask, storeMask, params.dstAddr, offset);
             }
         }
     }
 };
-
-// ===========================================================================
-// GeluTanh – public interface
-// ===========================================================================
-template <typename DataTypeOut_, typename DataTypeIn_, bool kPreciseDiv_, bool kPadToMxGroup_>
-template <typename SrcTensor, typename DstTensor>
-__aicore__ inline void Gelu<DataTypeOut_, DataTypeIn_, kPreciseDiv_, kPadToMxGroup_>::GeluTanh(
-    const SrcTensor& srcTensor, const DstTensor& dstTensor, uint16_t mSize, uint16_t nSize)
-{
-    using SrcElementType = asc::te::get_attribute_element_type<typename SrcTensor::element_type*>;
-    using DstElementType = asc::te::get_attribute_element_type<typename DstTensor::element_type*>;
-    using SrcLayoutPattern = asc::te::get_layout_pattern<typename SrcTensor::layout_type>;
-    using DstLayoutPattern = asc::te::get_layout_pattern<typename DstTensor::layout_type>;
-    static_assert(AscendC::Std::is_same_v<DataTypeIn, float> || AscendC::Std::is_same_v<DataTypeIn, bfloat16_t> ||
-                      AscendC::Std::is_same_v<DataTypeIn, half>,
-                  "GeluTanh input must be float, bfloat16_t or half.");
-    static_assert(AscendC::Std::is_same_v<DataTypeOut, float> || AscendC::Std::is_same_v<DataTypeOut, bfloat16_t> ||
-                      AscendC::Std::is_same_v<DataTypeOut, half>,
-                  "GeluTanh output must be float, bfloat16_t or half.");
-    static_assert(
-        AscendC::Std::is_same_v<SrcElementType, DataTypeIn> && AscendC::Std::is_same_v<DstElementType, DataTypeOut>,
-        "GeluTanh tensor element types must match DataTypeIn/DataTypeOut.");
-    static_assert(AscendC::Std::is_same_v<asc::te::get_mem_location<SrcTensor>, asc::te::location::ub> &&
-                      AscendC::Std::is_same_v<asc::te::get_mem_location<DstTensor>, asc::te::location::ub>,
-                  "GeluTanh only supports UB tensors.");
-    static_assert(AscendC::Std::is_same_v<SrcLayoutPattern, asc::te::nd_ext_layout_ptn> &&
-                      AscendC::Std::is_same_v<DstLayoutPattern, asc::te::nd_ext_layout_ptn>,
-                  "GeluTanh only supports NDExt tensor layouts.");
-    if ASCEND_IS_AIC {
-        return;
-    }
-    constexpr uint16_t sizePerRepeat = static_cast<uint16_t>(asc_get_vf_len() / sizeof(float));
-    uint16_t oneRowRepeatTimes = Gemm::CeilDiv(static_cast<uint32_t>(nSize), static_cast<uint32_t>(sizePerRepeat));
-    uint32_t nAligned = Gemm::Align32(static_cast<uint32_t>(nSize));
-    GeluVfParams<DataTypeOut, DataTypeIn> params{reinterpret_cast<__ubuf__ DataTypeOut*>(dstTensor.data().get()),
-                                                 reinterpret_cast<__ubuf__ DataTypeIn*>(srcTensor.data().get()),
-                                                 mSize,
-                                                 nSize,
-                                                 sizePerRepeat,
-                                                 oneRowRepeatTimes,
-                                                 nAligned};
-    if constexpr (AscendC::IsSameType<DataTypeIn, float>::value) {
-        if (nSize % sizePerRepeat == 0) {
-            asc_vf_call<GeluTanhVf<true>>(params);
-        } else {
-            asc_vf_call<GeluTanhVf<false>>(params);
-        }
-    } else {
-        if (nSize % sizePerRepeat == 0) {
-            asc_vf_call<GeluTanhCastInVf<true>>(params);
-        } else {
-            asc_vf_call<GeluTanhCastInVf<false>>(params);
-        }
-    }
-}
-
-// ===========================================================================
-// GeluErf – public interface
-// ===========================================================================
-template <typename DataTypeOut_, typename DataTypeIn_, bool kPreciseDiv_, bool kPadToMxGroup_>
-template <typename SrcTensor, typename DstTensor>
-__aicore__ inline void Gelu<DataTypeOut_, DataTypeIn_, kPreciseDiv_, kPadToMxGroup_>::GeluErf(
-    const SrcTensor& srcTensor, const DstTensor& dstTensor, uint16_t mSize, uint16_t nSize)
-{
-    using SrcElementType = asc::te::get_attribute_element_type<typename SrcTensor::element_type*>;
-    using DstElementType = asc::te::get_attribute_element_type<typename DstTensor::element_type*>;
-    using SrcLayoutPattern = asc::te::get_layout_pattern<typename SrcTensor::layout_type>;
-    using DstLayoutPattern = asc::te::get_layout_pattern<typename DstTensor::layout_type>;
-    static_assert(AscendC::Std::is_same_v<DataTypeIn, float> || AscendC::Std::is_same_v<DataTypeIn, bfloat16_t> ||
-                      AscendC::Std::is_same_v<DataTypeIn, half>,
-                  "GeluErf input must be float, bfloat16_t or half.");
-    static_assert(AscendC::Std::is_same_v<DataTypeOut, float> || AscendC::Std::is_same_v<DataTypeOut, bfloat16_t> ||
-                      AscendC::Std::is_same_v<DataTypeOut, half>,
-                  "GeluErf output must be float, bfloat16_t or half.");
-    static_assert(
-        AscendC::Std::is_same_v<SrcElementType, DataTypeIn> && AscendC::Std::is_same_v<DstElementType, DataTypeOut>,
-        "GeluErf tensor element types must match DataTypeIn/DataTypeOut.");
-    static_assert(AscendC::Std::is_same_v<asc::te::get_mem_location<SrcTensor>, asc::te::location::ub> &&
-                      AscendC::Std::is_same_v<asc::te::get_mem_location<DstTensor>, asc::te::location::ub>,
-                  "GeluErf only supports UB tensors.");
-    static_assert(AscendC::Std::is_same_v<SrcLayoutPattern, asc::te::nd_ext_layout_ptn> &&
-                      AscendC::Std::is_same_v<DstLayoutPattern, asc::te::nd_ext_layout_ptn>,
-                  "GeluErf only supports NDExt tensor layouts.");
-    if ASCEND_IS_AIC {
-        return;
-    }
-    constexpr uint16_t sizePerRepeat = static_cast<uint16_t>(asc_get_vf_len() / sizeof(float));
-    uint16_t oneRowRepeatTimes = Gemm::CeilDiv(static_cast<uint32_t>(nSize), static_cast<uint32_t>(sizePerRepeat));
-    uint32_t nAligned = Gemm::Align32(static_cast<uint32_t>(nSize));
-    GeluVfParams<DataTypeOut, DataTypeIn> params{reinterpret_cast<__ubuf__ DataTypeOut*>(dstTensor.data().get()),
-                                                 reinterpret_cast<__ubuf__ DataTypeIn*>(srcTensor.data().get()),
-                                                 mSize,
-                                                 nSize,
-                                                 sizePerRepeat,
-                                                 oneRowRepeatTimes,
-                                                 nAligned};
-    if constexpr (AscendC::IsSameType<DataTypeIn, float>::value) {
-        if (nSize % sizePerRepeat == 0) {
-            asc_vf_call<GeluErfVf<true>>(params);
-        } else {
-            asc_vf_call<GeluErfVf<false>>(params);
-        }
-    } else {
-        if (nSize % sizePerRepeat == 0) {
-            asc_vf_call<GeluErfCastInVf<true>>(params);
-        } else {
-            asc_vf_call<GeluErfCastInVf<false>>(params);
-        }
-    }
-}
 
 } // namespace Blaze::Epilogue::Tile

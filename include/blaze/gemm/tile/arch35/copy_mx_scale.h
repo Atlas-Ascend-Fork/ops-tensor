@@ -191,13 +191,10 @@ struct CopyUB2L1MxScale {
 namespace asc {
 namespace te {
 
-template <typename Traits>
-struct copy_traits<Blaze::Gemm::Tile::CopyGM2UBMxScale, Traits>
-    : public copy_traits<Blaze::Gemm::Tile::CopyGM2UBMxScale, Traits, Blaze::Gemm::Tile::CopyGM2UBMxScale, Traits> {};
-
 template <>
 struct copy_traits<Blaze::Gemm::Tile::CopyGM2UBMxScale>
-    : public copy_traits<Blaze::Gemm::Tile::CopyGM2UBMxScale, gm_to_ub_trait_default> {};
+    : public copy_traits<Blaze::Gemm::Tile::CopyGM2UBMxScale, gm_to_ub_trait_default,
+                         Blaze::Gemm::Tile::CopyGM2UBMxScale, gm_to_ub_trait_default> {};
 
 template <>
 struct copy_traits<Blaze::Gemm::Tile::CopyUB2L1MxScale>

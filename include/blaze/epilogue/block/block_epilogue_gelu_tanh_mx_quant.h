@@ -282,8 +282,7 @@ private:
         auto dstTensor = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(activationUbOffset), layout);
         // kPreciseDiv=true 误差补偿除法
-        Tile::Gelu<bfloat16_t, DataTypeIn, /*kPreciseDiv=*/true> gelu;
-        gelu.GeluTanh(srcTensor, dstTensor, mSize, static_cast<uint16_t>(singleN_));
+        Tile::Gelu<Tile::GeluTanhTag>::Run</*kPreciseDiv=*/true>(srcTensor, dstTensor);
     }
 
     __aicore__ inline void RunDynamicMxQuant(uint16_t mSize, uint32_t slot)
