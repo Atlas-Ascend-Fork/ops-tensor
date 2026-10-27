@@ -39,13 +39,13 @@ FlatQuant BlockMmad 执行两阶段矩阵乘，中间结果通过 L1 暂存：
 | 参数 | 说明 |
 |------|------|
 | DispatchPolicy_ | 调度策略类型，固定为 `Attention::BlockFlatQuant<>` |
-| AType_ | A 矩阵数据类型（如 `bfloat16_t`） |
+| AType_ | 提供嵌套类型 `T` 的矩阵乘类型描述，如 `MatmulType<bfloat16_t>` |
 | LayoutA_ | A 矩阵布局类型 |
-| BType_ | B/P1/P2 矩阵数据类型 |
+| BType_ | B/P1/P2 的矩阵乘类型描述，须提供嵌套类型 `T` |
 | LayoutB_ | B/P1/P2 矩阵布局类型 |
-| OutType_ | Out 矩阵输出类型 |
+| OutType_ | Out 矩阵输出类型描述，须提供嵌套类型 `T` |
 | LayoutC_ | C 矩阵布局类型 |
-| CType_ | C 矩阵数据类型 |
+| CType_ | C 矩阵数据类型描述，须提供嵌套类型 `T` |
 | LayoutOut_ | Out 矩阵布局类型 |
 
 ## 类型别名
@@ -214,10 +214,16 @@ AL1Buf0 | AL1Buf1 | BL1Buf(P1+P2)
 
 ### 组件组装
 ```cpp
-using AType = bfloat16_t;
-using BType = bfloat16_t;
-using CType = bfloat16_t;
-using OutType = bfloat16_t;
+// 与 examples/flat_quant/flat_quant/flat_quant.cpp 使用同一类型描述方式。
+template <typename T_>
+struct MatmulType {
+    using T = T_;
+};
+
+using AType = MatmulType<bfloat16_t>;
+using BType = MatmulType<bfloat16_t>;
+using CType = MatmulType<bfloat16_t>;
+using OutType = MatmulType<bfloat16_t>;
 using LayoutA = asc::te::nd_ext_layout_ptn;
 using LayoutB = asc::te::nd_ext_layout_ptn;
 using LayoutC = asc::te::nd_ext_layout_ptn;
