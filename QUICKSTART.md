@@ -191,11 +191,14 @@ wget -O googletest-1.14.0.tar.gz https://cann-3rd.obs.cn-north-4.myhuaweicloud.c
 
 #### 3. 手动拉取 tensor_api
 
-`tensor_api` 是 `include/tensor_api` 下的 git 子模块，源仓库 `https://gitcode.com/cann/asc-devkit.git`，分支 `feature/tensor_api_from_9.0.0`。离线环境无法 `git submodule update`，需手动拉取：
+`tensor_api` 是 `include/tensor_api` 下的 git 子模块，源仓库 `https://gitcode.com/cann/asc-devkit.git`。离线环境无法 `git submodule update`，需在联网环境拉取**当前 ops-tensor 提交固定的子模块版本**，再拷贝到离线环境。只克隆分支最新提交可能得到与本仓固定版本不同的源码：
 
 ```bash
-# 联网环境克隆指定分支
-git clone -b feature/tensor_api_from_9.0.0 https://gitcode.com/cann/asc-devkit.git tensor_api
+# 联网环境，在 ops-tensor 仓库根目录执行
+TENSOR_API_REV="$(git ls-tree HEAD include/tensor_api | awk '{print $3}')"
+git clone -b feature/tensor_api_from_9.0.0 https://gitcode.com/cann/asc-devkit.git include/tensor_api
+git -C include/tensor_api checkout "$TENSOR_API_REV"
+test "$(git -C include/tensor_api rev-parse HEAD)" = "$TENSOR_API_REV"
 # 拷贝到离线环境 ops-tensor/include/tensor_api/（注意路径在 include/ 下，非 third_party/）
 ```
 
@@ -207,7 +210,7 @@ git submodule update --init --recursive include/tensor_api
 # 将 include/tensor_api/ 整目录拷贝到离线环境对应位置
 ```
 
-`build.sh`（`--opkernel -u`）执行前会检测 `include/tensor_api/` 是否已存在且非空，**已存在则自动跳过初始化**，手动拉取后即可直接编译。
+`build.sh`（`--opkernel -u` 或 `--examples`）执行前会检测 `include/tensor_api/` 是否已存在且非空，**已存在则自动跳过初始化和版本校验**。因此手动拉取时应先按上文切换到固定提交，再拷贝和编译。
 
 #### 4. 离线编译执行
 
