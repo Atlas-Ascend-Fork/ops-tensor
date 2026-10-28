@@ -3,6 +3,7 @@
 
 ## 功能说明
 在 AIV 上读取 AIC 经 Fixpipe 写入 UB 的 FP32/BF16 结果，执行 GELU 激活、BF16 舍入和动态 MX 量化，输出到 GM。支持 tanh、erf 两种激活算法，以及下述三种量化算法。
+
 <details>
 
 <summary><strong>激活计算公式</strong></summary>
@@ -44,6 +45,8 @@
         |  FLOAT4_E1M2  |  0   |
         | FLOAT8_E4M3FN |  8   |
         |  FLOAT8_E5M2  |  15  |
+
+    - 零值处理采用 `zeroScaleOnZeroExp=false`，见 [MxQuant](../tile/arch35/mx_quant.md)。
 
 - 场景2，当quantAlg为1时，只涉及FP8类型：
     - 将长向量按块分，每块长度为k，对每块单独计算一个块缩放因子$S_{fp32}^b$，再把块内所有元素用同一个$S_{fp32}^b$映射到目标低精度类型FP8。如果最后一块不足k个元素，把缺失值视为0，按照完整块处理。

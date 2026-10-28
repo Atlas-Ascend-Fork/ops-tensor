@@ -47,12 +47,16 @@ Block 在 `Init` 中保存标量配置，在计算函数内构造 `MxQuantConfig
 - 两者均按 32 个元素分组，区别在于 scale 的计算方式。
 
 ### OCP 零值处理（zeroScaleOnZeroExp）
+
+`sharedExp = max(maxExp, fpEmax) - fpEmax`，其中 `maxExp`、`fpEmax` 均为 BF16 指数域编码。
+
 | 配置 | 清零条件与范围 |
 | --- | --- |
 | `false` | `sharedExp == 0` 时将 reciprocal 置零 |
 | `true` | 原始 `maxExp == 0` 时将 yScale 和 reciprocal 置零 |
 
 当 `0 < maxExp <= fpEmax` 时，两种配置生成的 reciprocal 编码分别为 `0` 和 `0x7f00`。
+此时 yScale 的 E8M0 编码均为 `0x00`，表示 `2^-127`。
 各 Block 的配置见下文。DynDtypeRange 忽略此参数，在 `sharedExp == 0` 时将 reciprocal 置零。
 
 ### 张量约束
@@ -185,7 +189,7 @@ auto maxExpTensor = asc::te::make_tensor(
 MxQuantConfig cfg{};              // 函数体内组装（禁止作为 Block 类成员）
 cfg.alg = MxScaleAlg::OCP;
 cfg.fpEmax = fpEmax_;
-cfg.zeroScaleOnZeroExp = false;   // GELU tanh 实现；GELU MX/SwiGLU 为 true
+cfg.zeroScaleOnZeroExp = false;
 
 Blaze::Epilogue::Tile::MxQuant<DataTypeOut> mx;
 mx.GroupMaxExp(actTensor, maxExpTensor, totalData, false);
@@ -218,13 +222,13 @@ y（FP8/FP4, DIST_PACK4_B32 打包）        ↓ TransScaleLayout（ceil(N/32) �
 - [BlockEpilogueGeluTanhMxQuant](../../block/block_epilogue_gelu_tanh_mx_quant.md)：
   三算法全支持，`zeroScaleOnZeroExp = false`
 - [BlockEpilogueGeluMxQuant](../../block/block_epilogue_gelu_mx_quant.md)：
-  三算法 + FP4 输出转置（`TransFp4OutLayout`），`zeroScaleOnZeroExp = true`
+  三算法 + FP4 输出转置（`TransFp4OutLayout`），`zeroScaleOnZeroExp = false`
 - [BlockEpilogueFlatQuant](../../block/block_epilogue_flat_quant.md)：
   三算法全支持（dstTypeMax 0/6,7/其他 分派），`zeroScaleOnZeroExp = true`，
   eMax 的 abs/exp 路径由 dstTypeMax ∈ [6,12] 区间判定
 
 - [BlockEpilogueSwigluMxQuant](../../block/block_epilogue_swiglu_mx_quant.md)：
-  OCP/cuBLAS，`zeroScaleOnZeroExp = true`。
+  OCP/cuBLAS，`zeroScaleOnZeroExp = false`。
 
 - [BlockEpilogueSwishMxQuant](../../block/block_epilogue_swish_mx_quant.md)：
   OCP/cuBLAS、FP8 RINT，`zeroScaleOnZeroExp = false`。

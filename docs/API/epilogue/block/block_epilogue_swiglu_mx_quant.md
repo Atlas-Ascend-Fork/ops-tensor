@@ -65,6 +65,8 @@ struct Params {
 没有动态 dtype range 分支。调用方必须校验 `scaleAlg=0/1` 和 `dstTypeMax=0`，
 不能把共享 Tile 的 `DYN_DTYPE_RANGE` 能力作为 V3 WeightNZ 的公开能力。
 
+OCP 使用 `zeroScaleOnZeroExp=false`。
+
 ## Shape 与输出布局
 
 设当前 group 的矩阵乘完整宽度为 `NFull=2*NOut`：

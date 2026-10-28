@@ -235,8 +235,8 @@ public:
     }
 
 private:
-    static constexpr float TANH_APPROX_FACTOR = 1.0f / 0.044715f;
-    static constexpr float NEG_SQRT_EIGHT_OVER_PI = -1.595769121f * 0.044715f;
+    static constexpr float TANH_APPROX_FACTOR = 1.0 / 0.044715;
+    static constexpr float NEG_SQRT_EIGHT_OVER_PI = -1.595769121 * 0.044715;
     static constexpr float GELU_ONE = 1.0f;
 
     /*!

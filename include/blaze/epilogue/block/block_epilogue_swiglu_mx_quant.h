@@ -504,8 +504,9 @@ BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16
                                         dataLayout);
 
     const bool useCublas = params_->scaleAlg == Constant::SCALE_ALG_CUBLAS;
+    // OCP clears the reciprocal when sharedExp is zero.
     Tile::MxQuantConfig cfg{useCublas ? Tile::MxScaleAlg::CUBLAS : Tile::MxScaleAlg::OCP, fpEmax_, invDstTypeMax_,
-                            Constant::MX_SCALE_REDUCTION_MASK, true};
+                            Constant::MX_SCALE_REDUCTION_MASK, false};
     Tile::MxQuant<DataTypeOut> mx;
     mx.GroupMaxExp(gluResTensor, maxExpTensor, totalDataInUb, useCublas);
     mx.GenScale(maxExpTensor, yScaleTensor, reciprocalTensor, cfg, totalScaleInUb);

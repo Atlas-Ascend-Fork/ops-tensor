@@ -308,9 +308,9 @@ __aicore__ inline void BlockEpilogueGeluMxQuant<DataTypeOut_, DataTypeIn_>::VFDo
     auto quantOutputTensor = asc::te::make_tensor(
         asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(QUANT_OUTPUT_UB_OFFSET), dataLayout);
 
-    // In OCP mode, zero maxExp clears both the scale and reciprocal.
+    // OCP clears the reciprocal when sharedExp is zero.
     Tile::MxQuantConfig mxQuantConfig{static_cast<Tile::MxScaleAlg>(mxScaleAlg_), dstMaxExpBits_, invDstMaxValue_,
-                                      static_cast<uint16_t>(scaleAddValueBits_), true};
+                                      static_cast<uint16_t>(scaleAddValueBits_), false};
 
     Tile::MxQuant<DataTypeOut> mxQuant;
     mxQuant.GroupMaxExp(geluTensor, groupMaxTensor, elementCount, mxScaleAlg_ != static_cast<uint32_t>(QuantAlg::OCP));

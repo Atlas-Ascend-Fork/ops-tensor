@@ -217,8 +217,26 @@ def _convert_to_nz(data_nd, dtype, k, n, trans_b):
 # ---------------------------------------------------------------------------
 
 
+def _ftz_float32(values):
+    values = np.asarray(values, dtype=np.float32)
+    return np.where(
+        np.abs(values) < np.finfo(np.float32).tiny,
+        np.copysign(np.float32(0.0), values),
+        values,
+    )
+
+
 def gelu_tanh(x):
-    return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3)))
+    """Follow the kernel's FP32 sigmoid form, preserving the negative tail."""
+    values = np.asarray(x, dtype=np.float32)
+    tanh_approx_factor = np.float32(1.0 / 0.044715)
+    neg_sqrt_eight_over_pi = np.float32(-1.595769121 * 0.044715)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+        squared = values * values
+        cubed = squared * values
+        exponent = (cubed + values * tanh_approx_factor) * neg_sqrt_eight_over_pi
+        exp_neg = _ftz_float32(np.exp(_ftz_float32(exponent)))
+        return _ftz_float32(_ftz_float32(values) / (np.float32(1.0) + exp_neg))
 
 
 def swiglu(x):
@@ -240,7 +258,7 @@ def swish(x, beta=1.0):
     )
 
 
-def mx_quantize(data, emax, dtype_max, scale_alg, *, zero_scale_on_zero_exp=True):
+def mx_quantize(data, emax, dtype_max, scale_alg):
     """Quantize the last axis in 32-element blocks using OCP(0) or BLAS(1) scale."""
     values = np.asarray(data, dtype=np.float32)
     width = values.shape[-1]
@@ -263,8 +281,8 @@ def mx_quantize(data, emax, dtype_max, scale_alg, *, zero_scale_on_zero_exp=True
     normalized = np.ldexp(
         blocks.astype(np.float64), (127 - scale_codes.astype(np.int32))[..., None]
     )
-    if scale_alg == 0 and not zero_scale_on_zero_exp:
-        # Swish follows DynamicMxQuant: zero reciprocal when sharedExp == 0.
+    if scale_alg == 0:
+        # OCP clears the reciprocal when sharedExp == 0.
         normalized = np.where(
             scale_codes[..., None] == 0, np.copysign(0.0, blocks), normalized
         )
@@ -361,7 +379,6 @@ def generate(args):
         emax,
         dtype_max,
         args.scale_alg,
-        zero_scale_on_zero_exp=args.activation not in ("silu", "swish"),
     )
 
     if args.a_dtype == "fp4_e2m1":
