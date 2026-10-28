@@ -23,7 +23,7 @@ namespace Blaze::Epilogue::Tile {
 class Sigmoid {
 public:
     template <typename SrcTensor, typename DstTensor>
-    __aicore__ inline static void run(const SrcTensor& srcTensor, const DstTensor& dstTensor);
+    __aicore__ inline static void Run(const SrcTensor& srcTensor, const DstTensor& dstTensor);
 
 private:
     static constexpr AscendC::Reg::CastTrait CT_32F_TO_16F = {
@@ -86,7 +86,7 @@ private:
 };
 
 template <typename SrcTensor, typename DstTensor>
-__aicore__ inline void Sigmoid::run(const SrcTensor& srcTensor, const DstTensor& dstTensor)
+__aicore__ inline void Sigmoid::Run(const SrcTensor& srcTensor, const DstTensor& dstTensor)
 {
     using DataTypeIn = asc::te::get_attribute_element_type<typename SrcTensor::element_type*>;
     using DataTypeOut = asc::te::get_attribute_element_type<typename DstTensor::element_type*>;

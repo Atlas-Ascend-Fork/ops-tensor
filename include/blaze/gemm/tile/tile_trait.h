@@ -23,6 +23,13 @@ struct MmadTraitMX {
     using TraitType = asc::te::mmad_trait;
     static constexpr const TraitType value = MX_MMAD_TRAIT;
 };
+
+// Disable M padding to select the native M=1 GEMV mode.
+struct MmadTraitConfidenceHeadGemv {
+    using TraitType = asc::te::mmad_trait;
+    static constexpr TraitType value{0, false, false, false, asc::te::mmad_type::normal};
+};
+
 constexpr asc::te::l0c_to_ub_trait COPY_L0C2UB_SPLIT_M_TRAIT = asc::te::l0c_to_ub_trait{
     asc::te::round_mode::default_round, false, false, asc::te::dual_dst_mode::split_m};
 struct CopyL0C2UBTraitSplitM {

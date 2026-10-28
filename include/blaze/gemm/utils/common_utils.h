@@ -33,6 +33,8 @@ constexpr int32_t MNK_N = 1;
 constexpr int32_t MNK_K = 2;
 constexpr int32_t MNK_B = 3;
 constexpr int32_t MNK_SplitB = 4;
+constexpr uint32_t CONFIDENCE_HEAD_K_EMBED = 2;
+constexpr uint32_t CONFIDENCE_HEAD_K_MARKOV = 3;
 constexpr int32_t EVEN_NUMBER = 2;
 
 constexpr uint64_t A_FULL_LOAD_MODE = 1UL;

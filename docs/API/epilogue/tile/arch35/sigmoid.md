@@ -13,7 +13,7 @@ Tile 仅负责向量计算；UB 分配、跨核同步和 GM 输出由 Block 层�
 class Sigmoid {
 public:
     template <typename SrcTensor, typename DstTensor>
-    __aicore__ inline static void run(const SrcTensor& srcTensor, const DstTensor& dstTensor);
+    __aicore__ inline static void Run(const SrcTensor& srcTensor, const DstTensor& dstTensor);
 };
 ```
 
@@ -41,7 +41,7 @@ auto srcTensor = asc::te::make_tensor(
     asc::te::make_mem_ptr<asc::te::location::ub, float>(0), srcLayout);
 auto dstTensor = asc::te::make_tensor(
     asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(1024), dstLayout);
-Blaze::Epilogue::Tile::Sigmoid::run(srcTensor, dstTensor);
+Blaze::Epilogue::Tile::Sigmoid::Run(srcTensor, dstTensor);
 ```
 
 调用方先保证输入就绪，计算结束后安排后续同步和输出。

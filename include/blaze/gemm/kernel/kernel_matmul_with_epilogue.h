@@ -174,7 +174,6 @@ private:
 
     __aicore__ inline void Init(const Params& params)
     {
-        problemShape_ = params.problemShape;
         m_ = static_cast<uint64_t>(asc::te::get<MNK_M>(params.problemShape));
         n_ = static_cast<uint64_t>(asc::te::get<MNK_N>(params.problemShape));
         k_ = static_cast<uint64_t>(asc::te::get<MNK_K>(params.problemShape));
@@ -202,7 +201,6 @@ private:
     __gm__ AType* aGmAddr_{nullptr};
     __gm__ BType* bGmAddr_{nullptr};
     __gm__ BiasType* biasGmAddr_{nullptr};
-    TupleShape problemShape_{};
     uint64_t m_{1};
     uint64_t n_{1};
     uint64_t k_{1};

@@ -234,7 +234,7 @@ __aicore__ inline BlockShape GetBlockShape(int64_t blockIdx)
 
 ### GetBlockCoord
 ```cpp
-__aicore__ inline BlockCoord GetBlockCoord(int blockIdx)
+__aicore__ inline BlockCoord GetBlockCoord(int64_t blockIdx)
 ```
 功能：返回当前 block 的坐标。
 返回值：`BlockCoord {mOffset, nOffset, kOffset, batchIdx}`

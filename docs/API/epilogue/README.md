@@ -15,6 +15,7 @@
 | [block_epilogue_per_token_scale](./block/block_epilogue_per_token_scale.md) | 应用 per-token scale 和可选 row-sum offset 修正 |
 | [block_epilogue_finalize_routing](./block/block_epilogue_finalize_routing.md) | GroupedMatmulFinalizeRouting 通用后处理，完成 logit 融合、类型转换和 rowIndex 原子写回 |
 | [block_epilogue_fmm_with_scale_add](./block/block_epilogue_fmm_with_scale_add.md) | FusedMatMul scale_add 向量后处理，执行 alpha × (x1@x2) + beta × x3 |
+| [block_epilogue_confidence_head_fused](./block/block_epilogue_confidence_head_fused.md) | FP32 温度/clamp/sigmoid、K=0 bias 输入及 UB ping/pong 写回 |
 | [block_epilogue_matmul_with_sigmoid](./block/block_epilogue_matmul_with_sigmoid.md) | FusedMatMul sigmoid 向量后处理，执行 sigmoid(x1@x2 + bias) |
 | [block_epilogue_flat_quant](./block/block_epilogue_flat_quant.md) | FlatQuant AIV 侧 MX FP4 量化后处理，bf16→eMax→E8M0 scale→FP4 量化 |
 | [block_epilogue_gelu_mx_quant](./block/block_epilogue_gelu_mx_quant.md) | GELU 激活 + 动态 MXFP8/MXFP4 量化 |

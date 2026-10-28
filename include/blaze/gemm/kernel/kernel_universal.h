@@ -25,6 +25,7 @@
 
 #include "blaze/gemm/kernel/kernel_batch_matmul_broadcast.h"
 #include "blaze/gemm/kernel/kernel_batch_matmul_iterbatch_broadcast.h"
+#include "blaze/gemm/kernel/kernel_confidence_head_fused_mix.h"
 #include "blaze/gemm/kernel/kernel_grouped_matmul.h"
 #include "blaze/gemm/kernel/kernel_matmul_al1_full_load.h"
 #include "blaze/gemm/kernel/kernel_matmul_basic.h"

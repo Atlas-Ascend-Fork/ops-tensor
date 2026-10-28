@@ -37,6 +37,7 @@ struct KernelQbmmPertensorMultiBlockStreamK {};  // QBMM per-tensor StreamK sche
 struct KernelMmadMultiBlockBasic {};             // Multi-tile basic
 struct KernelMmadWithEpilogue {};                // Matmul with a dedicated AIV epilogue
 struct KernelMmadFmmWithScaleAdd {};             // Fused matmul with scale/add epilogue
+struct KernelConfidenceHeadMix {};               // GEMV with a confidence-head epilogue
 struct KernelMmadSyrk {};                        // Symmetric rank-k update, single nd2nz fetch per row-block
 struct KernelIterBatchBroadcast {};              // Multi-tile batchMatmul broadcast + iterbatch
 struct KernelIterBatch {};                       // Multi-tile batchMatmul iterbatch
@@ -233,6 +234,18 @@ struct MatmulMultiBlockBasic {
  */
 struct MatmulEmuSplitWeightPolicy {
     using ScheduleType = KernelMatmulEmuSplitWeight;
+};
+
+/**
+ * @struct ConfidenceHeadFusedPolicy
+ * @brief Full-load GEMV dispatch policy with optional Markov features and a confidence-head epilogue.
+ */
+template <uint32_t FullLoadMode_ = A_FULL_LOAD_MODE, bool IsAtomicAdd_ = false, bool HasMarkov_ = false>
+struct ConfidenceHeadFusedPolicy {
+    using ScheduleType = KernelConfidenceHeadMix;
+    static constexpr uint32_t FULL_LOAD_MODE = FullLoadMode_;
+    static constexpr bool IS_ATOMIC_ADD = IsAtomicAdd_;
+    static constexpr bool HAS_MARKOV = HasMarkov_;
 };
 
 /**

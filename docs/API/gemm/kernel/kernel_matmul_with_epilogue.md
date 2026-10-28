@@ -31,7 +31,7 @@ using ScaleAddDispatchPolicy = Blaze::Gemm::MatmulMultiBlockFixpipeOpti<
 ```cpp
 #include "blaze/epilogue/block/block_epilogue_matmul_with_sigmoid.h"
 #include "blaze/gemm/block/block_scheduler_matmul_basic.h"
-#include "blaze/gemm/kernel/kernel_matmul_with_epilogue.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 
 using DispatchPolicy = SigmoidDispatchPolicy;
 using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
@@ -41,13 +41,12 @@ using BlockScheduler = Blaze::Gemm::Block::BlockSchedulerMatmulBasic<
 using BlockMmad = Blaze::Gemm::Block::BlockMmad<
     DispatchPolicy, ElementType, LayoutA, ElementType, LayoutB,
     float, LayoutC, BiasType, LayoutC>;
-using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueMatmulWithSigmoid<
-    DispatchPolicy, ElementType>;
+using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueMatmulWithSigmoid<ElementType>;
 using MatmulKernel = Blaze::Gemm::Kernel::GemmUniversal<
     ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 ```
 
-兼容入口 `blaze/gemm/kernel/kernel_matmul_with_scale_add.h` 继续聚合原有 scale_add epilogue 与公共 Kernel，不包含独立实现。直接使用公共接口时，scale_add 组装显式包含 `blaze/epilogue/block/block_epilogue_fmm_with_scale_add.h` 与公共 Kernel 头，选择 `ScaleAddDispatchPolicy` 和 `BlockEpilogueFmmWithScaleAdd<DispatchPolicy, ElementType>`。输入布局、数据类型及分块参数由对应场景配置。
+兼容入口 `blaze/gemm/kernel/kernel_matmul_with_scale_add.h` 继续聚合原有 scale_add epilogue 与公共 Kernel，不包含独立实现。直接使用公共接口时，scale_add 组装显式包含 `blaze/epilogue/block/block_epilogue_fmm_with_scale_add.h` 与 `blaze/gemm/kernel/kernel_universal.h`，选择 `ScaleAddDispatchPolicy` 和 `BlockEpilogueFmmWithScaleAdd<DispatchPolicy, ElementType>`。输入布局、数据类型及分块参数由对应场景配置。
 
 ## Epilogue 调用接口
 

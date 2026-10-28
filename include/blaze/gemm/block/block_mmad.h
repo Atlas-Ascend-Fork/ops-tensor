@@ -21,6 +21,7 @@
 
 #include "blaze/gemm/block/block_mmad_a8w8_fixpipe_quant.h"
 #include "blaze/gemm/block/block_mmad_a8w8_mix.h"
+#include "blaze/gemm/block/block_mmad_confidence_head_fused.h"
 #include "blaze/gemm/block/block_mmad_iterbatch_broadcast.h"
 #include "blaze/gemm/block/block_mmad_matmul_al1_full_load.h"
 #include "blaze/gemm/block/block_mmad_matmul_basic.h"

@@ -28,7 +28,7 @@
 #include "acl/acl.h"
 #include "blaze/epilogue/block/block_epilogue_matmul_with_sigmoid.h"
 #include "blaze/gemm/block/block_scheduler_matmul_basic.h"
-#include "blaze/gemm/kernel/kernel_matmul_with_epilogue.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 #include "data_utils.h"
 #include "kernel_basic_intf.h"
 
@@ -149,7 +149,7 @@ __global__ __aicore__ void fused_mat_mul_sigmoid_kernel(GM_ADDR aGM, GM_ADDR bGM
                                                                     Blaze::Gemm::KernelMmadWithEpilogue>;
     using BlockMmad = Blaze::Gemm::Block::BlockMmad<DispatchPolicy, ElementType, LayoutA, ElementType, LayoutB, float,
                                                     LayoutC, BiasType, LayoutC>;
-    using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueMatmulWithSigmoid<DispatchPolicy, ElementType>;
+    using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueMatmulWithSigmoid<ElementType>;
     using MatmulKernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
     using Params = typename MatmulKernel::Params;
 

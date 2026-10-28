@@ -62,8 +62,8 @@ public:
         isHf32_ = params.isHf32;
         int64_t m = asc::te::get<MNK_M>(shape);
         int64_t n = asc::te::get<MNK_N>(shape);
-        mBlockNums_ = CeilDiv(static_cast<uint32_t>(m), params.mL1);
-        nBlockNums_ = CeilDiv(static_cast<uint32_t>(n), params.nL1);
+        mBlockNums_ = CeilDiv(m, static_cast<int64_t>(params.mL1));
+        nBlockNums_ = CeilDiv(n, static_cast<int64_t>(params.nL1));
         blockNum_ = AscendC::GetBlockNum();
         if (blockNum_ <= 0) {
             return;
@@ -169,7 +169,7 @@ public:
         return {splitBlkM, splitBlkN, k_, batch_};
     }
 
-    __aicore__ inline BlockCoord GetBlockCoord(int blockIdx)
+    __aicore__ inline BlockCoord GetBlockCoord(int64_t blockIdx)
     {
         UpdateMNBlockIdx(blockIdx);
         int64_t batchIdx = 0;

@@ -8,6 +8,7 @@
 
 | 组件名 | 说明 |
 | :--- | :---: |
+| [kernel_confidence_head_fused_mix](./kernel_confidence_head_fused_mix.md) | ConfidenceHeadFused GEMV，Cube bias、可选 markov 与 FP32 温度/clamp/sigmoid 后处理 |
 | [kernel_matmul_basic](./kernel_matmul_basic.md) | 基础矩阵乘 Kernel，仅 AIC 计算，无 workspace |
 | [kernel_matmul_bl1_full_load](./kernel_matmul_bl1_full_load.md) | B 矩阵 L1 全载 Kernel，支持 ON_THE_FLY（AIC 直销）和 Fixpipe（AIC+AIV 双核）两种输出 |
 | [kernel_matmul_fixpipe_opti](./kernel_matmul_fixpipe_opti.md) | Fixpipe 非全载 Kernel，AIC+AIV 双核，根据 FULL_LOAD_MODE 自动选择非全载/B全载 calc BlockMmad |

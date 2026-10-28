@@ -9,6 +9,7 @@
 ### BlockMmad（矩阵乘计算）
 | 组件名 | 描述 |
 | :----------------------------------------------------------- | :------: |
+| [block_mmad_confidence_head_fused](./block_mmad_confidence_head_fused.md) | M=1 GEMV Cube Block，权重全载、K 分段及首轮 BiasTable 累加 |
 | [block_mmad_matmul_basic](./block_mmad_matmul_basic.md) | 基础矩阵乘 Block，基于 Tensor API，支持 L1/L0 双缓冲 |
 | [block_mmad_matmul_bl1_full_load](./block_mmad_matmul_bl1_full_load.md) | B L1 全载矩阵乘 Block，B 常驻 L1，支持 ON_THE_FLY 直销和 Fixpipe（L0C→UB）两种输出 |
 | [block_mmad_matmul_fixpipe_opti](./block_mmad_matmul_fixpipe_opti.md) | Fixpipe 非全载矩阵乘 Block，A/B 均流水，输出固定 L0C→UB，用于 Fixpipe1v1/fixpipe1v2 场景 |

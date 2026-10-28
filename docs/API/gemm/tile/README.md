@@ -5,6 +5,7 @@
 | 组件名 | 描述 |
 | :----------------------------------------------------------- | :------: |
 | [tile_developer_guide](./tile_developer_guide.md) | Tile 层编写指导（文件结构、Copy/Compute/Trait Tile 编写模式） |
+| [tile_mmad_confidence_head_fused](./tile_mmad_confidence_head_fused.md) | ConfidenceHeadFused native M=1 GEMV MMAD Trait |
 | [tile_mmad_mx](./tile_mmad_mx.md) | MX Mmad Trait 定义，用于量化矩阵乘计算 |
 | [pad_mx_k_l1](./pad_mx_kl1.md) | MX K 轴 Padding，用于 L1 数据对齐补零 |
 | [copy_gm_to_l1](./copy_gm_to_l1.md) | A 矩阵 ND slice 非连续搬运，以及 SwiGLU MX 左右 B/ScaleB 半区拼接与 NZ/ZN 快速搬运 |

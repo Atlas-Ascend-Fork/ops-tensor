@@ -189,6 +189,8 @@ private:
     static constexpr uint16_t AIC_SYNC_AIV_FLAG = 6;
     using VfParams = Detail::FmmWithScaleAddVfParams<ElementType_>;
 
+    // Review BlockEpilogueMatmulWithSigmoid::ProcessTile when changing UB alignment, stage sizing,
+    // buffer reuse or UB-to-GM copies here. Preserve the SYRK staging and x3 event dependencies.
     template <typename TensorC>
     __aicore__ inline void ProcessTile(TensorC& ubTensor, int64_t localRows, int64_t accumulatorRows, int64_t tileN,
                                        int64_t tileGmOffset, int64_t stagingBaseOffset, int64_t stagingBytes,

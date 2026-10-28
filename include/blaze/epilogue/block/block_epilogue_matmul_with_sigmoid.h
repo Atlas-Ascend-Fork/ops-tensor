@@ -23,10 +23,9 @@ namespace Blaze {
 namespace Epilogue {
 namespace Block {
 
-template <class DispatchPolicy_, class ElementType_>
+template <class ElementType_>
 class BlockEpilogueMatmulWithSigmoid {
 public:
-    using DispatchPolicy = DispatchPolicy_;
     using L0CDataType = float;
     using OutputType = ElementType_;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
@@ -92,6 +91,8 @@ public:
     }
 
 private:
+    // Review BlockEpilogueFmmWithScaleAdd::ProcessTile when changing UB alignment, stage sizing,
+    // buffer reuse or UB-to-GM copies here. Event dependencies are specific to each epilogue.
     template <typename TensorC>
     __aicore__ inline void ProcessTile(TensorC& ubTensor, int64_t localRows, int64_t accumulatorRows, int64_t tileN,
                                        int64_t tileGmOffset)
@@ -131,7 +132,7 @@ private:
             auto inputLayout = Blaze::Gemm::MakeNDExtLayout<float>(rowsThisStage, tileN,
                                                                    static_cast<int64_t>(nAlignAcc));
             auto inputUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub>(inputAddr), inputLayout);
-            Tile::Sigmoid::run(inputUb, outputUb);
+            Tile::Sigmoid::Run(inputUb, outputUb);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(OUTPUT_EVENT);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(OUTPUT_EVENT);
 

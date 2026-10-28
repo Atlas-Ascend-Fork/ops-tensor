@@ -6,6 +6,7 @@
 | :----------------------------------------------------------- | :------: |
 | [compute](./compute.md) | Tile 计算组件的架构派发入口，Block 层唯一的 include 路径 |
 | [arch35/gelu](./arch35/gelu.md) | Tile 级 GELU 激活，支持 tanh、erf 两种算法 |
+| [arch35/confidence_head_fused](./arch35/confidence_head_fused.md) | FP32 logits 的温度/clamp/sigmoid，仅公开静态 Run |
 | [arch35/sigmoid](./arch35/sigmoid.md) | Tile 级 sigmoid，FP32 输入与 float/FP16/BF16 输出，源和目的可使用不同的行跨度 |
 | [arch35/swish](./arch35/swish.md) | FP32 Swish → BF16 RINT，尾部补零到 32 元素边界 |
 | [arch35/dequant](./arch35/dequant.md) | Tile 级反量化（双轴 API：类模板 tag 选量化对象、Run 模板 `DequantMode` 选粒度）：Fp4ToFp8Tag per-group 权重 → FP8；B32ToFpTag int32/fp32 ×scale + bias → fp32/bf16/fp16 |

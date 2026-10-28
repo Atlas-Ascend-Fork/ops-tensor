@@ -116,6 +116,7 @@ endmacro()
 
 add_subdirectory(mat_mul)
 add_subdirectory(fused_mat_mul)
+add_subdirectory(confidence_head_fused)
 add_subdirectory(batch_mat_mul)
 add_subdirectory(block_attn_res_prepare)
 add_subdirectory(transpose_batch_mat_mul)

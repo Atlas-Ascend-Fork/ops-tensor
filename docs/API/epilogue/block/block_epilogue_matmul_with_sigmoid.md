@@ -33,7 +33,6 @@ FP32 累加器放在 UB 起始位置，输出缓冲区放在实际累加器数�
 
 | 类型 | 说明 |
 |------|------|
-| DispatchPolicy | BlockMmad 调度策略 |
 | L0CDataType | 累加类型，固定为 float |
 | OutputType | 输出类型 |
 | Tile::Sigmoid | [Tile 级 sigmoid](../tile/arch35/sigmoid.md)，对 FP32 输入执行激活和输出转换 |
@@ -74,7 +73,7 @@ __aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShap
 
 1. 根据初始化保存的 `splitM` 计算当前 AIV 的有效行数与行偏移。
 2. 以 `((batch * M + coordM + localRowOffset) * N + coordN)` 计算输出偏移，并等待 AIC 当前 tile 就绪。
-3. 将当前分段的输入、输出 UB Tensor 交给 `Tile::Sigmoid::run`；Tile 从输入 Tensor 的 shape 获取有效行列数，分别从输入、输出 layout 读取行跨度，以 FP32 执行 sigmoid 和输出转换。
+3. 将当前分段的输入、输出 UB Tensor 交给 `Tile::Sigmoid::Run`；Tile 从输入 Tensor 的 shape 获取有效行列数，分别从输入、输出 layout 读取行跨度，以 FP32 执行 sigmoid 和输出转换。
 4. 转换为输出类型，写回 GM，并通知 AIC 当前缓冲区可复用。
 
 ## 数据流

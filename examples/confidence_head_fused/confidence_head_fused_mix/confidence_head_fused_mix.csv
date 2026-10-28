@@ -1,0 +1,9 @@
+casename,n,k_embed,k_markov,batch,dtype,has_markov,temperature,bias,clamp_low,clamp_high
+fp16_basic,128,128,0,1,float16,false,none,false,none,none
+bf16_markov_multik_batch,129,257,273,3,bfloat16,true,2,true,none,none
+bf16_markov_only_bias,33,0,257,2,bfloat16,true,none,true,none,none
+fp16_empty_markov,17,33,0,2,float16,true,none,true,none,none
+bf16_k0_bias,129,0,0,2,bfloat16,true,0,true,-0.25,0.25
+fp16_k0_no_bias,17,0,0,1,float16,false,none,false,none,none
+bf16_low_only,33,65,7,1,bfloat16,true,0.5,true,0,none
+fp16_empty_n,0,17,7,2,float16,true,none,false,none,none
