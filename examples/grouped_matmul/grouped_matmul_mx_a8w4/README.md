@@ -123,3 +123,30 @@ kernel 执行和 golden 校验。验证脚本以非零退出码报告文件大�
 tests/ut/op_kernel/grouped_matmul_mx_a8w4 提供 tikicpulib 单核 smoke UT，
 覆盖公共模板实例化与连续/TensorList 地址路径。tikicpulib 不建模该路径的
 FP8×FP4 MMAD/Fixpipe 数值，因此数值精度以本示例的 NPU golden 结果为准。
+
+## 统一 BlockMmad 接口和数据流
+
+两条数据流通过 policy 区分：本例的 `GroupedMatmulWithWeightQuantMx` 接收 GMM Kernel 动态选择的 ka/kb/k0，
+ScaleB 由 AIV 转换并写入 L1；QBMM 示例使用固定 K 分块，由 AIC 搬运 ScaleB。
+公共 BlockMmad 接口和参数约束见 [统一 BlockMmad 文档](../../../docs/API/gemm/block/block_mmad_weight_prologue_mx.md)。
+
+`grouped_matmul_mx_a8w4.cpp` 通过以下字段指定输入、量化 Scale 和输出地址：
+
+```cpp
+typename BlockMmad::Params mmParams{};
+mmParams.aGmAddr = aGm;
+mmParams.scaleAGmAddr = scaleAGm;
+mmParams.scaleBGmAddr = scaleBGm;
+mmParams.biasGmAddr = biasGm;
+mmParams.cGmAddr = cGm;
+```
+
+调用方通过 `Params.mmad` 提供上述 GM 地址；L1 分区、缓冲容量及 ready/free 协议由 GMM Kernel 配置。
+AIC 与 AIV prologue 使用相同的 L1 地址配置，分别完成矩阵计算和 Weight/ScaleB 前处理。
+Kernel 根据当前 tile 计算 ka/kb/k0，再调用
+`blockMmad(tensorA, tensorScaleA, tensorScaleB, tensorC, ka, kb, k0)`；bias 是否启用由构造参数决定。
+此处 ScaleB GM Tensor 为接口参数，AIC 直接消费 AIV 已转换并写入 L1 的 ScaleB。
+
+GMM Kernel 内的 `CalcDynamicKBlock` 以当前 tile 的实际 M/N 选择 kb 和 k0，再选择 kb 整数倍的 ka。A 在一个 ka 窗口内
+只搬入 L1 一次，供多个 kb 权重块使用；每个 kb 块完成后释放对应 B 槽位，A 在 ka 窗口结束后切换槽位。
+ScaleA 使用独立的 4096 元素 K 窗口，其槽位切换不依赖 ka；ScaleB 的转换与 L1 写入由 AIV 完成。

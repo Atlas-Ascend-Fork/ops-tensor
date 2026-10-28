@@ -22,6 +22,7 @@
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/tile/compute.h"
 #include "blaze/gemm/tile/datamove.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_struct.h"
@@ -231,13 +232,13 @@ private:
     template <uint64_t FLAG>
     __aicore__ inline void WaitWeightFlag() const
     {
-        AscendC::CrossCoreWaitFlag<SyncProtocol::MODE, PIPE_MTE3>(FLAG);
+        Sync::WaitForCube<SyncProtocol::MODE, PIPE_MTE3>(FLAG);
     }
 
     template <uint64_t FLAG>
     __aicore__ inline void SetWeightFlag() const
     {
-        AscendC::CrossCoreSetFlag<SyncProtocol::MODE, PIPE_MTE3>(FLAG);
+        Sync::NotifyCube<SyncProtocol::MODE, PIPE_MTE3>(FLAG);
     }
 
     __aicore__ inline bool UpdateUbSliceForCurrentSubBlock(SliceContext& slice, const BlockContext& block)

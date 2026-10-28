@@ -62,7 +62,12 @@ __aicore__ inline void Run(GM_ADDR aGm, GM_ADDR bGm, GM_ADDR biasGm, GM_ADDR sca
     using KernelImpl = Blaze::Gemm::Kernel::GmmWeightQuantMxKernel<ProblemShape, BlockMmad, BlockScheduler, void,
                                                                    BlockPrologue, IsSingleMultiSingle_>;
 
-    typename BlockMmad::Params mmParams{aGm, scaleAGm, scaleBGm, biasGm, cGm};
+    typename BlockMmad::Params mmParams{};
+    mmParams.aGmAddr = aGm;
+    mmParams.scaleAGmAddr = scaleAGm;
+    mmParams.scaleBGmAddr = scaleBGm;
+    mmParams.biasGmAddr = biasGm;
+    mmParams.cGmAddr = cGm;
     typename BlockScheduler::Params schedulerParams{inputTiling.mainBlockCount,
                                                     inputTiling.mainBlockSize,
                                                     inputTiling.firstTailBlockCount,

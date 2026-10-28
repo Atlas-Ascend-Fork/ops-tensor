@@ -423,7 +423,12 @@ __global__ __aicore__ void GroupedMatmulMxA8W4Kernel(GM_ADDR aGm, GM_ADDR bGm, G
     using KernelImpl = Blaze::Gemm::Kernel::GmmWeightQuantMxKernel<ProblemShape, BlockMmad, BlockScheduler, void,
                                                                    BlockPrologue, IsSingleMultiSingle_>;
 
-    typename BlockMmad::Params mmParams{aGm, scaleAGm, scaleBGm, biasGm, cGm};
+    typename BlockMmad::Params mmParams{};
+    mmParams.aGmAddr = aGm;
+    mmParams.scaleAGmAddr = scaleAGm;
+    mmParams.scaleBGmAddr = scaleBGm;
+    mmParams.biasGmAddr = biasGm;
+    mmParams.cGmAddr = cGm;
     typename BlockScheduler::Params schedulerParams{inputTiling->mainBlockCount,
                                                     inputTiling->mainBlockSize,
                                                     inputTiling->firstTailBlockCount,

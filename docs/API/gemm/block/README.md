@@ -18,7 +18,7 @@
 | [block_mmad_qgmm_mx](./block_mmad_qgmm_mx.md) | MX 量化 Grouped Matmul Block，支持 ScaleA/ScaleB 及 SwiGLU 的左右 N 半区拼接、NZ/ZN 双源输入 |
 | [block_mmad_qbmm_mx_l0c_pingpong](./block_mmad_qbmm_mx_l0c_pingpong.md) | MX 量化矩阵乘 L0C PingPong Block，支持 N 方向拆分、Scale 复用和 SplitK 写回控制 |
 | [block_mmad_matmul_streamk](./block_mmad_matmul_streamk.md) | StreamK 矩阵乘 Block，支持 workspace 输出、K 轴切分 |
-| [block_mmad_weight_prologue_mx](./block_mmad_weight_prologue_mx.md) | AIV 已写入 B/Bias L1 后的 MX AIC BlockMmad |
+| [block_mmad_weight_prologue_mx](./block_mmad_weight_prologue_mx.md) | QBMM/GMM 共用的 MX AIC BlockMmad，策略区分固定/动态 K 及 ScaleB 来源，Kernel 确定 K 分块 |
 | [block_mmad_wqmm_mix_prologue_fixpipe_quant](./block_mmad_wqmm_mix_prologue_fixpipe_quant.md) | AIV 反量化 B 写入 L1 后的 T-CG per-group A8W4 AIC BlockMmad，Fixpipe 乘 yScale 输出 |
 | [block_mmad_wqmm_mix_weight_prologue](./block_mmad_wqmm_mix_weight_prologue.md) | 权重反量化矩阵乘的 AIC 计算、L1 空间划分及缓冲同步 |
 | [block_mmad_matmul_iterbatch](./block_mmad_matmul_iterbatch.md) | IterBatch 矩阵乘 Block，多 batch 驻留 L1、跨 tile 预取流水，ON_THE_FLY / ND_FIXPIPE_1_2 两种输出 |
@@ -68,7 +68,8 @@ BlockMmad
     │       ├── MatmulWithScaleFixpipeQuant (Fixpipe 反量化输出)
     │       ├── MatmulWithScaleMx (QBMM MX 量化)
     │       ├── MatmulWithScaleMix (QBMM MIX A8W8 量化)
-    │       ├── MatmulWithWeightQuantMx (MXA8W4 权重前处理)
+    │       ├── MatmulWithWeightQuantMx (QBMM MXA8W4 固定 K、AIC ScaleB)
+    │       ├── GroupedMatmulWithWeightQuantMx (GMM MXA8W4 动态 K、AIV ScaleB)
     │       ├── MatmulWithScaleMxL0CPingpong (QBMM MX L0C PingPong)
     │       └── GroupedMatmulWithScaleMx (QGMM MX 量化)
     ├── 数据类型 (AType, BType, CType, BiasType)
@@ -93,7 +94,7 @@ BlockMmad
 | BlockMmadA8W8Mix | MatmulWithScaleMix | UB (L0C→UB) | int8 (A8W8) | 不在本层（由 epilogue 处理） | 可配置 (2 或 4) | 可配置 | 不在本层 | 无（Kernel 层处理） | QBMM MIX Kernel |
 | BlockMmadQGmmMx | GroupedMatmulWithScaleMx | GM 或拼接 UB | MxFP4/MxFP8；SwiGLU 路径为 MXFP8 | ScaleA + ScaleB | 可配置双/三缓冲 | 可配置 | 支持；SwiGLU 路径无 Bias | Kernel 层同步 | QGMM MX / SwiGLU MX Kernel |
 | BlockMmadMxL0CPingpong | MatmulWithScaleMxL0CPingpong | GM | MxFP4/MxFP8 | ScaleA + ScaleB | 可配置 (2、3 或 4) | 固定双缓冲 | 支持 | 无 | QBMM MX L0C PingPong Kernel |
-| BlockMmadWeightPrologueMx | MatmulWithWeightQuantMx | GM | FP8 + packed FP4 | ScaleA + ScaleB | 2 或 4 | 固定单缓冲 | AIV 提供 | 有（Kernel 层 ready/free 标志） | MXA8W4 Weight ND/NZ |
+| BlockMmad（MX 权重前处理） | MatmulWithWeightQuantMx / GroupedMatmulWithWeightQuantMx | GM | FP8 + packed FP4 | ScaleA + ScaleB | 2 或 4 | 固定单缓冲 | AIV 提供 | 有（Kernel 层 ready/free 标志） | QBMM Weight ND/NZ；GMM Weight NZ、A 跨 B 块复用 |
 | BlockMmadMatmulIterbatch | MatmulIterBatch | GM 或 UB | 不支持 | 不支持 | 整组双缓冲 | 可配置 | 支持 | 有（Fixpipe 模式） | IterBatch Matmul |
 
 ## 使用流程

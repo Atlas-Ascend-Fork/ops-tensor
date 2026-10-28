@@ -109,7 +109,7 @@ gmm@ops-tensor:
         - ops/ops-tensor/include/blaze/epilogue/block/block_epilogue_per_token_scale.h
         - ops/ops-tensor/include/blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h
         - ops/ops-tensor/include/blaze/gemm/block/block_mmad_qgmm_mx.h
-        - ops/ops-tensor/include/blaze/gemm/block/block_mmad_wqgmm_mx_mix.h
+        - ops/ops-tensor/include/blaze/gemm/block/block_mmad_weight_prologue_mx.h
         - ops/ops-tensor/include/blaze/epilogue/block/block_epilogue_swiglu_mx_quant.h
         - ops/ops-tensor/include/blaze/gemm/kernel/kernel_gmm_fixpipe_quant.h
         - ops/ops-tensor/include/blaze/gemm/kernel/kernel_qgmm_mix_fixpipe_quant.h

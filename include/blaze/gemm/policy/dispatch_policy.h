@@ -111,13 +111,25 @@ struct MatmulWithScaleMx {
     static constexpr bool CONCAT_N = ConcatN_;
 };
 
+enum class WeightPrologueMxKSchedule : std::uint8_t { FIXED, DYNAMIC };
+enum class WeightPrologueMxScaleBSource : std::uint8_t { AIC, AIV };
+
 /**
- * @struct MatmulWithWeightQuantMx
- * @brief Weight-only MX matrix multiplication with AIV weight conversion.
+ * @struct WeightQuantMxPolicy
+ * @brief MX 权重前处理策略，只声明调度类型、K 调度方式和 ScaleB 生产方。
  */
-struct MatmulWithWeightQuantMx {
-    using ScheduleType = KernelMixWithWeightPrologue;
+template <class ScheduleType_, WeightPrologueMxKSchedule KSchedule_, WeightPrologueMxScaleBSource ScaleBSource_>
+struct WeightQuantMxPolicy {
+    using ScheduleType = ScheduleType_;
+    static constexpr auto K_SCHEDULE = KSchedule_;
+    static constexpr auto SCALE_B_SOURCE = ScaleBSource_;
 };
+
+/**
+ * @brief QBMM MX weight prologue with fixed K blocking and AIC ScaleB loads.
+ */
+using MatmulWithWeightQuantMx = WeightQuantMxPolicy<KernelMixWithWeightPrologue, WeightPrologueMxKSchedule::FIXED,
+                                                    WeightPrologueMxScaleBSource::AIC>;
 
 /**
  * @struct MatmulWithWeightQuantPergroup
@@ -137,13 +149,11 @@ struct MatmulWithWeightQuantPergroup {
 };
 
 /**
- * @struct GroupedMatmulWithWeightQuantMx
  * @brief Dispatch policy for grouped MX weight-quant matrix
  * multiplication.
  */
-struct GroupedMatmulWithWeightQuantMx {
-    using ScheduleType = KernelWqgmmMxMix;
-};
+using GroupedMatmulWithWeightQuantMx = WeightQuantMxPolicy<KernelWqgmmMxMix, WeightPrologueMxKSchedule::DYNAMIC,
+                                                           WeightPrologueMxScaleBSource::AIV>;
 
 /**
  * @struct GroupedMatmulWithScaleMx

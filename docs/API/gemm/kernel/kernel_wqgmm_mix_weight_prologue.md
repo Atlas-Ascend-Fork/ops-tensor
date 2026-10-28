@@ -37,7 +37,7 @@ kernel(params);
 | 参数 | 说明 |
 | :--- | :--- |
 | ProblemShape | 四维 shape，依次保存占位 M、K、N、groupNum |
-| BlockMmad | 共享 MX Weight-Prologue Block MMAD 特化 |
+| BlockMmad | `GroupedMatmulWithWeightQuantMx` 策略下的共享 MX Weight-Prologue Block MMAD 特化 |
 | BlockScheduler | Kernel 层 N-resplit 调度器 |
 | BlockEpilogue | 当前路径保留为 void |
 | BlockPrologue | Kernel 层 FP4→FP8、ScaleB、Bias 前处理 |
@@ -90,6 +90,64 @@ N 三段 block 必须无遗漏覆盖 N。Kernel 对每个 expert 按 baseM 继�
 - hasBias 必须与 bias 地址是否有效一致；
 - packed FP4 和 FP8 UB 布局必须按 Align16(N) 建立物理尾块，不能按 N/8 独立分裂；
 - BlockMmad 和 BlockPrologue 必须使用同一编译期 grouped schedule policy 和 ready/free 协议。
+
+## BlockMmad 参数和 K 流水
+
+BlockMmad 的接口见 [MX Weight-Prologue 文档](../block/block_mmad_weight_prologue_mx.md)。
+算子或 example 通过以下字段指定 A、ScaleA、ScaleB、Bias 和 C 的地址：
+
+```cpp
+typename BlockMmad::Params mmParams{};
+mmParams.aGmAddr = xAddr;
+mmParams.scaleAGmAddr = perTokenScale;
+mmParams.scaleBGmAddr = scaleBAddr;
+mmParams.biasGmAddr = biasAddr;
+mmParams.cGmAddr = yAddr;
+```
+
+Kernel 负责 BlockMmad 的完整构造参数，包括 GM 地址、L1 分区、缓冲容量及同步配置。
+AIC 计算实例通过带参构造函数初始化；每个 tile 的 ka/kb/k0 由 Kernel 根据实际 M/N 和缓冲容量确定。
+AIC 使用 ka/kb/k0 执行计算，AIV prologue 使用相同分块规则确定的 kb 转换 Weight 和 ScaleB 并写入 L1。
+AIC 在 ka 窗口内跨 kb 块复用 A，每个 kb 块完成后释放 B 槽位，
+并在 ka 窗口结束后切换 A 槽位。
+AIC 与 AIV 使用同一份 L1 地址配置，动态 K 的物理容量约束取自该配置中的 A 缓冲容量。
+地址配置的生命周期覆盖 AIV prologue 的执行过程；ready/free 标志遵循配套协作协议。
+
+### 动态 K 分块选择
+
+Kernel 私有方法 `CalcDynamicKBlock` 根据当前 tile 的 M/N 和缓冲容量选择 ka/kb/k0，
+BlockMmad 根据传入的分块执行计算。以下为 Kernel 内部调用示意：
+
+```cpp
+uint64_t kaL1Size = 0;
+uint64_t kbL1Size = 0;
+uint64_t l0KSize = 0;
+CalcDynamicKBlock(mL1Size, nL1Size, kaL1Size, kbL1Size, l0KSize);
+blockMmad(tensorBlockAGm, tensorBlockScaleAGm, tensorScaleBGm, tensorBlockCGm,
+          kaL1Size, kbL1Size, l0KSize);
+```
+
+GMM 以当前 scheduler tile 的实际 M/N 选择 K 分块：M≤160 且 N≤128 时 kb=512，否则 kb=256；
+M≤128 且 N≤128 时 k0=256，否则 k0=128。ka 是 kb 的整数倍，按 N 与 Align16(M) 的比例选择复用深度，
+同时按 `sizeof(AType)` 将模型容量与实际 A buffer 容量换算为元素数，取两者允许的最小复用深度；
+模型容量为 80 KiB，实际容量为 128 KiB 减去可选 bias 的 4 KiB。
+A 的槽位独立于 B 槽位，在同一 ka 窗口内跨多个 kb 块复用。
+ScaleA 使用独立的 Scale 窗口，窗口长度为 4096 个 K 元素，不随 ka 窗口切换。
+AIV 使用同一辅助函数计算 kb，确保 producer 和 consumer 的 K 序列一致。
+
+复用深度按如下公式计算，其中 M/N 是当前非空 tile 的实际尺寸，配套 scheduler 保证 M/N≤256：
+
+```text
+alignedM = Align16(M)
+depth = max(1, CeilDiv(N, 2 * alignedM))
+modelMaxDepth = (80 * 1024 / sizeof(AType)) / (alignedM * kb)
+actualMaxDepth = ((128 * 1024 - (hasBias ? 4 * 1024 : 0)) / sizeof(AType)) / (alignedM * kb)
+maxDepth = max(1, min(modelMaxDepth, actualMaxDepth))  // 整数除法
+ka = min(depth, maxDepth) * kb
+```
+
+例如 M=16、N=256 时，kb=256、k0=128、ka=2048；同一 A 窗口可供 8 个 B 块使用。
+每个 B 块完成后释放自己的槽位，A 槽位在 ka 窗口结束后切换。Scale 窗口独立推进，GMM 的窗口长度为 4096。
 
 ## 仓内验证
 

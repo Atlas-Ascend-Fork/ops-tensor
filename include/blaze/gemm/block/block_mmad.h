@@ -36,6 +36,5 @@
 #include "blaze/gemm/block/block_mmad_qbmm_mx_l0c_pingpong.h"
 #include "blaze/gemm/block/block_mmad_qgmm_mx.h"
 #include "blaze/gemm/block/block_mmad_weight_prologue_mx.h"
-#include "blaze/gemm/block/block_mmad_wqgmm_mx_mix.h"
 #include "blaze/gemm/block/block_mmad_wqmm_mix_prologue_fixpipe_quant.h"
 #include "blaze/gemm/block/block_mmad_wqmm_mix_weight_prologue.h"

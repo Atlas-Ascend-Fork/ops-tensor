@@ -62,6 +62,16 @@ bash examples/common/run.sh --ops=weight_quant_batch_matmul_mx --target=weight_q
 
 ### 测试用例定义
 
+本例使用统一 BlockMmad 的 `MatmulWithWeightQuantMx` 策略：按 host tiling 固定 K 分块，ScaleB 由 AIC
+从 GM 搬运。GMM 使用同一实现的动态 K 策略与 AIV ScaleB producer，见
+[统一 BlockMmad 文档](../../../docs/API/gemm/block/block_mmad_weight_prologue_mx.md)。
+
+QBMM 从 tiling 填写 `l1TileShape`、`l0TileShape`、`l1BufferNum` 和 `hasBias`，
+以 `BlockMmad(params.mmadParams)` 创建实例，再调用固定 K 的四 Tensor 接口
+`blockMmad(tensorA, tensorScaleA, tensorScaleB, tensorC)`。
+AIV 转换 B 和可选 bias 后写入共享 L1，AIC 搬运 A、ScaleA、ScaleB 并执行 MMAD。
+固定 K 路径中 A 与 B 按同一个 L1 K 块推进；GMM 由 Kernel 传入 ka/kb/k0，用独立 ka/kb 窗口复用 A。
+
 测试用例定义在 `weight_quant_batch_matmul_mx_swat.csv` 中，格式如下：
 
 ```csv

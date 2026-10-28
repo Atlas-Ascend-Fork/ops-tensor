@@ -20,19 +20,18 @@
 #include "kernel_operator_list_tensor_intf.h"
 #include "tensor_api/tensor.h"
 
-#include "blaze/gemm/block/block_mmad_wqgmm_mx_mix.h"
+#include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/tile/compute.h"
 #include "blaze/gemm/tile/datamove.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_struct.h"
+#include "blaze/gemm/utils/sync.h"
 
 namespace Blaze {
 namespace Gemm {
 namespace Kernel {
 
-using AscendC::CrossCoreSetFlag;
-using AscendC::CrossCoreWaitFlag;
 using AscendC::GetSubBlockIdx;
 using AscendC::HardEvent;
 using AscendC::SetFlag;
@@ -194,16 +193,16 @@ public:
         __gm__ InType* ptrB;
     };
 
-    __aicore__ inline explicit GroupedWeightPrologueMx(bool hasBias = false);
+    template <typename MmadParams>
+    __aicore__ inline explicit GroupedWeightPrologueMx(const MmadParams& params);
     template <typename GMWeightTensorType_, typename GMScaleBTensorType_, typename GMBiasTensorType_>
     __aicore__ inline void operator()(const GMWeightTensorType_& gmWeightTensor,
                                       const GMScaleBTensorType_& gmScaleBTensor, const GMBiasTensorType_& gmBiasTensor,
-                                      uint64_t mL1Size, uint64_t kSize, uint64_t nL1Size, uint64_t nOffset,
+                                      uint64_t kbL1Size, uint64_t kSize, uint64_t nL1Size, uint64_t nOffset,
                                       uint64_t nAlign);
     __aicore__ inline ~GroupedWeightPrologueMx();
 
 private:
-    __aicore__ inline uint64_t CalcDynamicKBlock(uint64_t mL1Size, uint64_t nL1Size) const;
     __aicore__ inline void SetAivToAic();
     __aicore__ inline void WaitAicToAiv();
     template <typename GMWeightTensorType_, typename GMScaleBTensorType_, typename GMBiasTensorType_>
@@ -259,10 +258,6 @@ private:
 
     // === Buffer Size Unit ===
     static constexpr uint64_t KB = 1024;
-    static constexpr uint64_t WEIGHT_L1_INIT_OFFSET = 0;
-    static constexpr uint64_t WEIGHT_L1_DB_OFFSET = 384 * KB;
-    static constexpr uint64_t L1_WEIGHT_OFFSETS[DOUBLE_BUFFER_COUNT] = {WEIGHT_L1_INIT_OFFSET * sizeof(OutType),
-                                                                        WEIGHT_L1_DB_OFFSET * sizeof(OutType)};
 
     // === Pipeline Buffer Configuration ===
     static constexpr uint64_t WEIGHT_8BIT_BUFFER_NUM = QUADRUPLE_BUFFER_NUM; // 4
@@ -321,27 +316,29 @@ private:
     // In 1:2 AIC:AIV MIX mode, mode 4 maps the same AIV-local flag ID to the
     // AIC flag at the base ID for AIV0 and at the base ID + 16 for AIV1.
     static constexpr uint8_t SYNC_AIC_AIV_MODE = 4;
-    static constexpr uint64_t SYNC_AIV_AIC_FLAG = 0;
-    static constexpr uint64_t SYNC_AIC_AIV_FLAG = 1;
 
-    // === Dynamic Tiling Configuration ===
-    static constexpr uint64_t MX_A8W4_L1_K_CONFIG_256 = 256;
-    static constexpr uint64_t MX_A8W4_L1_K_CONFIG_512 = 512;
-    static constexpr uint64_t MX_A8W4_L1_K_DYNAMIC_CONFIG_N_THRESHOLD = 128;
-    static constexpr uint64_t MX_A8W4_L1_K_DYNAMIC_CONFIG_M_THRESHOLD = 160;
-
-    static constexpr uint64_t BIAS_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {64 * KB, 380 * KB};
-    static constexpr uint64_t SCALE_B_L1_INIT_OFFSET = 96 * KB;
-    static constexpr uint64_t SCALE_B_L1_DB_OFFSET = 384 * KB;
-    static constexpr uint64_t BIAS_L1_SINGLE_BUFFER_SIZE = 4 * KB;
-    static constexpr uint64_t MX_SCALE_K_WINDOW_SIZE = 4096;
     static constexpr uint64_t MX_GROUP_SIZE = 32;
 
+    // Read-only views into the owning kernel's L1 configuration.
+    const uint64_t* weightOffsets_;
+    const uint64_t* biasOffsets_;
+    const uint64_t* scaleBOffsets_;
+    uint64_t scaleKWindowSize_;
+    uint16_t readyFlag_;
+    uint16_t freeFlag_;
     bool hasBias_ = false;
 };
 
 WQGMM_MX_PROLOGUE_TEMPLATE_PARAM
-__aicore__ inline WQGMM_MX_PROLOGUE_CLASS::GroupedWeightPrologueMx(bool hasBias) : hasBias_(hasBias)
+template <typename MmadParams>
+__aicore__ inline WQGMM_MX_PROLOGUE_CLASS::GroupedWeightPrologueMx(const MmadParams& params)
+    : weightOffsets_(params.weightOffsets),
+      biasOffsets_(params.biasOffsets),
+      scaleBOffsets_(params.scaleBOffsets),
+      scaleKWindowSize_(AscendC::Std::get<3>(params.l1TileShape)),
+      readyFlag_(params.readyFlag),
+      freeFlag_(params.freeFlag),
+      hasBias_(params.hasBias)
 {
     for (uint16_t idx = 0; idx < UB_MTE2_BUFFER_NUM; idx++) {
         SetFlag<HardEvent::V_MTE2>(VEC_EVENT_ID_V_TO_MTE2 + idx);
@@ -364,14 +361,6 @@ __aicore__ inline WQGMM_MX_PROLOGUE_CLASS::GroupedWeightPrologueMx(bool hasBias)
     asc::te::copy(copyGM2UB, transIdUb, transIdGm);
     SetFlag<HardEvent::MTE2_V>(EVENT_ID_MTE2_TO_V);
     WaitFlag<HardEvent::MTE2_V>(EVENT_ID_MTE2_TO_V);
-}
-
-WQGMM_MX_PROLOGUE_TEMPLATE_PARAM
-__aicore__ inline uint64_t WQGMM_MX_PROLOGUE_CLASS::CalcDynamicKBlock(uint64_t mL1Size, uint64_t nL1Size) const
-{
-    return (mL1Size <= MX_A8W4_L1_K_DYNAMIC_CONFIG_M_THRESHOLD && nL1Size <= MX_A8W4_L1_K_DYNAMIC_CONFIG_N_THRESHOLD) ?
-               MX_A8W4_L1_K_CONFIG_512 :
-               MX_A8W4_L1_K_CONFIG_256;
 }
 
 WQGMM_MX_PROLOGUE_TEMPLATE_PARAM
@@ -452,7 +441,7 @@ __aicore__ inline void WQGMM_MX_PROLOGUE_CLASS::HandleMxScale(const WeightProlog
                                                               const GMScaleBTensorType_& gmScaleBTensor,
                                                               uint64_t kOffset)
 {
-    if (kOffset % MX_SCALE_K_WINDOW_SIZE != 0) {
+    if (kOffset % scaleKWindowSize_ != 0) {
         return;
     }
 
@@ -466,8 +455,8 @@ __aicore__ inline void WQGMM_MX_PROLOGUE_CLASS::HandleMxScale(const WeightProlog
         return;
     }
 
-    uint64_t scaleWindowK = Min(MX_SCALE_K_WINDOW_SIZE, param.kSize - kOffset);
-    uint64_t scaleKReal = CeilDiv(scaleWindowK, MX_GROUP_SIZE);
+    uint64_t scaleWindowK = Min(scaleKWindowSize_, param.kSize - kOffset);
+    uint64_t scaleKReal = Align64(scaleWindowK) / MX_GROUP_SIZE;
     auto gmScaleSlice = gmScaleBTensor.slice(asc::te::make_coord(kOffset / MX_GROUP_SIZE, param.nOffset + vecNOffset),
                                              asc::te::make_shape(scaleKReal, vecNSize));
 
@@ -499,8 +488,7 @@ __aicore__ inline void WQGMM_MX_PROLOGUE_CLASS::HandleMxScale(const WeightProlog
     SetFlag<HardEvent::V_MTE3>(0);
     WaitFlag<HardEvent::V_MTE3>(0);
 
-    uint64_t scaleL1Base = SCALE_B_L1_INIT_OFFSET + scaleL1Buf * SCALE_B_L1_DB_OFFSET +
-                           ((hasBias_ && scaleL1Buf == 0) ? BIAS_L1_SINGLE_BUFFER_SIZE : 0);
+    uint64_t scaleL1Base = scaleBOffsets_[scaleL1Buf];
     // MX ScaleB uses the hardware NN scale layout whose C0 is two E8M0
     // elements.  The generic data-type trait would select the ordinary
     // 32-byte cube C0 and is therefore not valid for nn_layout_ptn.
@@ -522,7 +510,7 @@ WQGMM_MX_PROLOGUE_TEMPLATE_PARAM
 template <typename GMWeightTensorType_, typename GMScaleBTensorType_, typename GMBiasTensorType_>
 __aicore__ inline void WQGMM_MX_PROLOGUE_CLASS::operator()(const GMWeightTensorType_& gmWeightTensor,
                                                            const GMScaleBTensorType_& gmScaleBTensor,
-                                                           const GMBiasTensorType_& gmBiasTensor, uint64_t mL1Size,
+                                                           const GMBiasTensorType_& gmBiasTensor, uint64_t kbL1Size,
                                                            uint64_t kSize, uint64_t nL1Size, uint64_t nOffset,
                                                            uint64_t nAlign)
 {
@@ -539,7 +527,7 @@ __aicore__ inline void WQGMM_MX_PROLOGUE_CLASS::operator()(const GMWeightTensorT
     offsetParam.kSize = kSize;
     offsetParam.nL1Size = nL1Size;
     offsetParam.nOffset = nOffset;
-    offsetParam.kbL1Size = CalcDynamicKBlock(mL1Size, nL1Size);
+    offsetParam.kbL1Size = kbL1Size;
     offsetParam.nAlign = nAlign;
     ComputeBasicBlockAivNdKnNzNk(offsetParam, gmWeightTensor, gmScaleBTensor, gmBiasTensor);
 }
@@ -557,13 +545,13 @@ __aicore__ inline WQGMM_MX_PROLOGUE_CLASS::~GroupedWeightPrologueMx()
 WQGMM_MX_PROLOGUE_TEMPLATE_PARAM
 __aicore__ inline void WQGMM_MX_PROLOGUE_CLASS::SetAivToAic()
 {
-    CrossCoreSetFlag<SYNC_AIC_AIV_MODE, PIPE_MTE3>(SYNC_AIC_AIV_FLAG);
+    Sync::NotifyCube<SYNC_AIC_AIV_MODE, PIPE_MTE3>(readyFlag_);
 }
 
 WQGMM_MX_PROLOGUE_TEMPLATE_PARAM
 __aicore__ inline void WQGMM_MX_PROLOGUE_CLASS::WaitAicToAiv()
 {
-    CrossCoreWaitFlag<SYNC_AIC_AIV_MODE, PIPE_MTE3>(SYNC_AIV_AIC_FLAG);
+    Sync::WaitForCube<SYNC_AIC_AIV_MODE, PIPE_MTE3>(freeFlag_);
 }
 
 WQGMM_MX_PROLOGUE_TEMPLATE_PARAM
@@ -707,9 +695,9 @@ __aicore__ inline auto WQGMM_MX_PROLOGUE_CLASS::MakeL1WeightTensor(uint64_t mte2
 {
     auto l1BaseLayout = asc::te::make_frame_layout<asc::te::zn_layout_ptn, asc::te::layout_trait_default<OutType>>(
         mte2RealK, nL1Size);
-    auto l1BaseTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, OutType>(
-                                                 L1_WEIGHT_OFFSETS[cvLoopIdx_ & (DOUBLE_BUFFER_COUNT - 1)]),
-                                             l1BaseLayout);
+    auto l1BaseTensor = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::l1, OutType>(weightOffsets_[cvLoopIdx_ & (DOUBLE_BUFFER_COUNT - 1)]),
+        l1BaseLayout);
     return l1BaseTensor.slice(asc::te::make_coord(l1SplitOffset, 0), asc::te::make_shape(mte2RealK, nL1Size));
 }
 
@@ -718,10 +706,9 @@ __aicore__ inline auto WQGMM_MX_PROLOGUE_CLASS::MakeL1BiasTensor(uint64_t nL1Siz
 {
     auto layout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
         1, CeilAlign(nL1Size, static_cast<uint64_t>(BLOCK_CUBE)));
-    return asc::te::make_tensor(
-        asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(BIAS_L1_OFFSETS[cvLoopIdx_ & (DOUBLE_BUFFER_COUNT - 1)] +
-                                                               nOffset * sizeof(BiasType)),
-        layout);
+    return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(
+                                    biasOffsets_[cvLoopIdx_ & (DOUBLE_BUFFER_COUNT - 1)] + nOffset * sizeof(BiasType)),
+                                layout);
 }
 
 #undef WQGMM_MX_PROLOGUE_CLASS
@@ -809,6 +796,44 @@ public:
     __aicore__ inline void operator()(const Params& params);
 
 private:
+    typename BlockMmad::Params mmadParams_{};
+
+    // Select K blocking for both the AIC consumer and AIV producer.
+    __aicore__ inline void CalcDynamicKBlock(uint64_t mL1Size, uint64_t nL1Size, uint64_t& kaL1Size, uint64_t& kbL1Size,
+                                             uint64_t& l0KSize) const
+    {
+        constexpr uint64_t L1_K_CONFIG_512 = 512;
+        constexpr uint64_t L1_K_CONFIG_256 = 256;
+        constexpr uint64_t L1_K_DYNAMIC_CONFIG_N_THRESHOLD = 128;
+        constexpr uint64_t L0_K_SMALL_TILE_THRESHOLD = 128;
+        constexpr uint64_t L0_K_SMALL_TILE_SIZE = 256;
+        constexpr uint64_t L0_K_LARGE_TILE_SIZE = 128;
+        constexpr uint64_t A_L1_MODEL_SINGLE_BUF_SIZE = 80 * 1024;
+        constexpr uint64_t A_B_LOAD_BALANCE_FACTOR = 2;
+        constexpr uint64_t L1_K_DYNAMIC_CONFIG_M_THRESHOLD = (A_L1_MODEL_SINGLE_BUF_SIZE / sizeof(AType) /
+                                                              L1_K_CONFIG_512 / AscendC::BLOCK_CUBE) *
+                                                             AscendC::BLOCK_CUBE;
+
+        kbL1Size = (mL1Size <= L1_K_DYNAMIC_CONFIG_M_THRESHOLD && nL1Size <= L1_K_DYNAMIC_CONFIG_N_THRESHOLD) ?
+                       L1_K_CONFIG_512 :
+                       L1_K_CONFIG_256;
+
+        uint64_t mL1Align = CeilAlign(mL1Size, static_cast<uint64_t>(AscendC::BLOCK_CUBE));
+        uint64_t kaDepth = CeilDiv(nL1Size, mL1Align * A_B_LOAD_BALANCE_FACTOR);
+        kaDepth = kaDepth == 0 ? 1 : kaDepth;
+
+        uint64_t modelMaxKaDepth = (A_L1_MODEL_SINGLE_BUF_SIZE / sizeof(AType)) / (mL1Align * kbL1Size);
+        uint64_t actualMaxKaDepth = (mmadParams_.aBufferBytes / sizeof(AType)) / (mL1Align * kbL1Size);
+        uint64_t maxKaDepth = modelMaxKaDepth < actualMaxKaDepth ? modelMaxKaDepth : actualMaxKaDepth;
+        // The scheduler guarantees one kb tile fits; preserve the original zero-depth guard.
+        maxKaDepth = maxKaDepth == 0 ? 1 : maxKaDepth;
+        kaDepth = kaDepth < maxKaDepth ? kaDepth : maxKaDepth;
+        kaL1Size = kaDepth * kbL1Size;
+        l0KSize = (mL1Size <= L0_K_SMALL_TILE_THRESHOLD && nL1Size <= L0_K_SMALL_TILE_THRESHOLD) ?
+                      L0_K_SMALL_TILE_SIZE :
+                      L0_K_LARGE_TILE_SIZE;
+    }
+
     static constexpr uint32_t GROUP_LIST_TYPE_OFFSET = 0U;
     static constexpr uint32_t GROUP_LIST_TYPE_LENGTH = 1U;
     static constexpr uint32_t GROUP_LIST_TYPE_SPARSE = 2U;
@@ -866,20 +891,62 @@ private:
 GROUPED_MATMUL_RESPLIT_KERNEL_TEMPLATE_PARAM
 __aicore__ inline void GROUPED_MATMUL_RESPLIT_KERNEL_CLASS::operator()(const Params& params)
 {
+    // Prepare the shared AIC/AIV parameters before constructing either block.
+    const bool hasBias = params.hasBias != 0;
+    constexpr uint64_t L1_M = 256;
+    constexpr uint64_t L1_N = 256;
+    constexpr uint64_t L1_K_CONFIG_256 = 256;
+    constexpr uint64_t L0_K_CONFIG_128 = 128;
+    constexpr uint64_t MX_SCALE_K_WINDOW_SIZE = 4096;
+    constexpr uint16_t SYNC_AIV_AIC_FLAG = 0;
+    constexpr uint16_t SYNC_AIC_AIV_FLAG = 1;
+    constexpr uint64_t SCALE_AL1_OFFSET = 64 * 1024;
+    constexpr uint64_t SCALE_BL1_OFFSET = 96 * 1024;
+    constexpr uint64_t A_L1_OFFSET = 128 * 1024;
+    constexpr uint64_t L1_BUF_OFFSET = 384 * 1024;
+    constexpr uint64_t A_L1_BUF_OFFSET = 128 * 1024;
+    constexpr uint64_t A_L1_SINGLE_BUF_SIZE = 128 * 1024;
+    constexpr uint64_t B_L1_SINGLE_BUF_SIZE = 64 * 1024;
+    constexpr uint64_t BIAS_L1_SINGLE_BUF_SIZE = 4 * 1024;
+    constexpr uint64_t BIAS_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {64 * 1024, 380 * 1024};
+    mmadParams_.aGmAddr = params.mmad.aGmAddr;
+    mmadParams_.scaleAGmAddr = params.mmad.scaleAGmAddr;
+    mmadParams_.scaleBGmAddr = params.mmad.scaleBGmAddr;
+    mmadParams_.biasGmAddr = params.mmad.biasGmAddr;
+    mmadParams_.cGmAddr = params.mmad.cGmAddr;
+    mmadParams_.aBufferBytes = A_L1_SINGLE_BUF_SIZE - (hasBias ? BIAS_L1_SINGLE_BUF_SIZE : 0);
+    mmadParams_.bBufferBytes = B_L1_SINGLE_BUF_SIZE;
+    for (uint64_t i = 0; i < DOUBLE_BUFFER_COUNT; ++i) {
+        const uint64_t biasShift = hasBias && i == 0 ? BIAS_L1_SINGLE_BUF_SIZE : 0;
+        mmadParams_.weightOffsets[i] = i * L1_BUF_OFFSET;
+        mmadParams_.biasOffsets[i] = BIAS_L1_OFFSETS[i];
+        mmadParams_.aOffsets[i] = A_L1_OFFSET + i * A_L1_BUF_OFFSET + biasShift;
+        mmadParams_.scaleAOffsets[i] = SCALE_AL1_OFFSET + i * L1_BUF_OFFSET + biasShift;
+        mmadParams_.scaleBOffsets[i] = SCALE_BL1_OFFSET + i * L1_BUF_OFFSET + biasShift;
+    }
+    // Actual K blocking is selected for each scheduler tile.
+    mmadParams_.l1TileShape = {L1_M, L1_N, L1_K_CONFIG_256, MX_SCALE_K_WINDOW_SIZE};
+    mmadParams_.l0TileShape = {L1_M, L1_N, L0_K_CONFIG_128};
+    mmadParams_.l1BufferNum = DOUBLE_BUFFER_COUNT;
+    mmadParams_.hasBias = hasBias;
+    mmadParams_.explicitL1Offsets = true;
+    mmadParams_.readyFlag = SYNC_AIC_AIV_FLAG;
+    mmadParams_.freeFlag = SYNC_AIV_AIC_FLAG;
+    mmadParams_.seedWeightCredits = false;
     groupListType_ = params.groupListType;
     preOffset_ = 0;
     // ScaleB is consumed by AIC MMAD and by the AIV prologue that fills ScaleB L1.
-    antiquantScaleGm_ = reinterpret_cast<__gm__ typename BlockMmad::ScaleBType*>(params.mmad.ptrScaleB);
+    antiquantScaleGm_ = reinterpret_cast<__gm__ typename BlockMmad::ScaleBType*>(mmadParams_.scaleBGmAddr);
     // AIC branch consumes A / scales and performs MMAD accumulation.
     if ASCEND_IS_AIC {
-        xGm_ = reinterpret_cast<__gm__ typename BlockMmad::AType*>(params.mmad.ptrA);
-        perTokenScaleGm_ = reinterpret_cast<__gm__ typename BlockMmad::ScaleAType*>(params.mmad.ptrScaleA);
-        yGm_ = reinterpret_cast<__gm__ typename BlockMmad::CType*>(params.mmad.ptrC);
+        xGm_ = reinterpret_cast<__gm__ typename BlockMmad::AType*>(mmadParams_.aGmAddr);
+        perTokenScaleGm_ = reinterpret_cast<__gm__ typename BlockMmad::ScaleAType*>(mmadParams_.scaleAGmAddr);
+        yGm_ = reinterpret_cast<__gm__ typename BlockMmad::CType*>(mmadParams_.cGmAddr);
     }
     // AIV branch prepares transformed weights through the prologue path.
     if ASCEND_IS_AIV {
         weightGm_ = reinterpret_cast<__gm__ typename BlockPrologue::InType*>(params.prologue.ptrB);
-        biasGm_ = reinterpret_cast<__gm__ typename BlockMmad::BiasType*>(params.mmad.ptrBias);
+        biasGm_ = reinterpret_cast<__gm__ typename BlockMmad::BiasType*>(mmadParams_.biasGmAddr);
     }
     BlockScheduler scheduler(params.scheduler);
     groupListGm_ = reinterpret_cast<__gm__ int64_t*>(params.ptrGroupList);
@@ -901,7 +968,7 @@ __aicore__ inline void GROUPED_MATMUL_RESPLIT_KERNEL_CLASS::operator()(const Par
         using MakeLayoutC = asc::te::frame_layout_format<typename BlockMmad::LayoutC>;
         using MakeLayoutScaleA = asc::te::frame_layout_format<typename BlockMmad::LayoutScaleA,
                                                               AscendC::Std::Int<SCALE_C0>>;
-        BlockMmad blockMmad{};
+        BlockMmad blockMmad(mmadParams_);
         // ScaleB is now produced by AIV directly in L1. Keep one GM tensor for the BlockMmad API contract; AIC does
         // not resolve, slice, or dereference it in the group/tile loops.
         auto tensorScaleBGm = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(antiquantScaleGm_),
@@ -939,7 +1006,12 @@ __aicore__ inline void GROUPED_MATMUL_RESPLIT_KERNEL_CLASS::operator()(const Par
                                                                     asc::te::make_shape(mL1Size, scaleKSize));
                     auto tensorBlockCGm = tensorCGm.slice(asc::te::make_coord(mOffset, nOffset),
                                                           asc::te::make_shape(mL1Size, nL1Size));
-                    blockMmad(tensorBlockAGm, tensorBlockScaleAGm, tensorScaleBGm, tensorBlockCGm, params.hasBias != 0);
+                    uint64_t kaL1Size = 0;
+                    uint64_t kbL1Size = 0;
+                    uint64_t l0KSize = 0;
+                    CalcDynamicKBlock(mL1Size, nL1Size, kaL1Size, kbL1Size, l0KSize);
+                    blockMmad(tensorBlockAGm, tensorBlockScaleAGm, tensorScaleBGm, tensorBlockCGm, kaL1Size, kbL1Size,
+                              l0KSize);
                 }
             }
         }
@@ -952,7 +1024,7 @@ __aicore__ inline void GROUPED_MATMUL_RESPLIT_KERNEL_CLASS::operator()(const Par
         constexpr uint64_t FP4_CACHE_LINE_ELEMENT_NUM = 256;
         const bool isWeightCacheLineAligned = kSize % FP4_CACHE_LINE_ELEMENT_NUM == 0;
         const uint64_t baseM = static_cast<uint64_t>(params.scheduler.baseM);
-        BlockPrologue blockPrologue(params.hasBias != 0);
+        BlockPrologue blockPrologue(mmadParams_);
         for (uint32_t loopIdx = 0; loopIdx < groupNum; ++loopIdx) {
             const int64_t groupM = GetSplitValueFromGroupList(tensorGroupListGm, loopIdx);
             if (groupListType_ == GROUP_LIST_TYPE_SPARSE && groupM <= 0) {
@@ -997,7 +1069,11 @@ __aicore__ inline void GROUPED_MATMUL_RESPLIT_KERNEL_CLASS::operator()(const Par
                     auto nOffset = AscendC::Std::get<1>(blockCoord);
                     auto mL1Size = AscendC::Std::get<0>(blockShape);
                     auto nL1Size = AscendC::Std::get<1>(blockShape);
-                    blockPrologue(weightGmTensor, scaleBGmTensor, biasGmTensor, mL1Size, kSize, nL1Size, nOffset,
+                    uint64_t kaL1Size = 0;
+                    uint64_t kbL1Size = 0;
+                    uint64_t l0KSize = 0;
+                    CalcDynamicKBlock(mL1Size, nL1Size, kaL1Size, kbL1Size, l0KSize);
+                    blockPrologue(weightGmTensor, scaleBGmTensor, biasGmTensor, kbL1Size, kSize, nL1Size, nOffset,
                                   nAlign);
                 }
             }

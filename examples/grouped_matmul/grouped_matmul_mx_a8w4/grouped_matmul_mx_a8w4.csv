@@ -8,3 +8,4 @@ e2m1_three_n_segments_tensorlist_bias_bf16,3,48,448,128,float4_e2m1,bfloat16,32,
 e1m2_three_n_segments_tensorlist_bias_bf16,2,29,448,1216,float4_e1m2,bfloat16,32,1,0,0,7;29,256,1,128,1,64,1,4,3
 e1m2_long_k_contiguous_count_no_bias_fp16,3,33,256,2048,float4_e1m2,float16,16,0,1,1,1;16;16,256,1,0,0,0,0,2,1
 e2m1_sparse_contiguous_bias_bf16,4,17,64,128,float4_e2m1,bfloat16,16,1,2,1,1;7;3;10;0;0;2;0,64,1,0,0,0,0,2,1
+e2m1_scale_window_k4160_bias_bf16,2,193,448,4160,float4_e2m1,bfloat16,48,1,1,1,97;96,256,1,128,1,64,1,4,3
