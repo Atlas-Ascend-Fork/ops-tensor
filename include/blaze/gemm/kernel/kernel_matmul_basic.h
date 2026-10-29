@@ -153,16 +153,16 @@ private:
             auto batchIdxA = IS_A_FULL_LOAD ? 0L : curBatchIdx_;
             auto coordMA = IS_A_FULL_LOAD ? 0L : coordM;
             auto shapeMA = IS_A_FULL_LOAD ? m_ : shapeM;
-            auto subTensorA = gmA.slice(AscendC::MakeCoord(batchIdxA, AscendC::MakeCoord(coordMA, 0L)),
-                                        AscendC::MakeShape(1L, AscendC::MakeShape(shapeMA, shapeK)));
+            auto subTensorA = gmA.slice(asc::te::make_coord(batchIdxA, asc::te::make_coord(coordMA, 0L)),
+                                        asc::te::make_shape(1L, asc::te::make_shape(shapeMA, shapeK)));
             auto gmBlockA = asc::te::squeeze<0>(subTensorA);
-            auto subTensorB = gmB.slice(AscendC::MakeCoord(curBatchIdx_, AscendC::MakeCoord(0L, coordN)),
-                                        AscendC::MakeShape(1L, AscendC::MakeShape(shapeK, shapeN)));
+            auto subTensorB = gmB.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(0L, coordN)),
+                                        asc::te::make_shape(1L, asc::te::make_shape(shapeK, shapeN)));
             auto gmBlockB = asc::te::squeeze<0>(subTensorB);
-            auto subTensorC = gmC.slice(AscendC::MakeCoord(curBatchIdx_, AscendC::MakeCoord(coordM, coordN)),
-                                        AscendC::MakeShape(1L, AscendC::MakeShape(shapeM, shapeN)));
+            auto subTensorC = gmC.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(coordM, coordN)),
+                                        asc::te::make_shape(1L, asc::te::make_shape(shapeM, shapeN)));
             auto gmBlockC = asc::te::squeeze<0>(subTensorC);
-            auto gmBlockBias = gmBias.slice(AscendC::MakeCoord(0L, coordN), AscendC::MakeShape(1L, shapeN));
+            auto gmBlockBias = gmBias.slice(asc::te::make_coord(0L, coordN), asc::te::make_shape(1L, shapeN));
             blockMmad(gmBlockA, gmBlockB, gmBlockBias, gmBlockC, blockShape);
         }
     }

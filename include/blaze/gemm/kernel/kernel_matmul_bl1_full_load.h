@@ -188,8 +188,8 @@ private:
                 preBatchIdx = curBatchIdx_;
                 SetL2Cache(gmA, gmB, params.schParams.l2CacheMode);
             }
-            auto gmBlockA = gmA.slice(AscendC::MakeCoord(coordM, 0L), AscendC::MakeShape(shapeM, shapeK));
-            auto gmBlockC = gmC.slice(AscendC::MakeCoord(coordM, 0), AscendC::MakeShape(shapeM, n_));
+            auto gmBlockA = gmA.slice(asc::te::make_coord(coordM, 0L), asc::te::make_shape(shapeM, shapeK));
+            auto gmBlockC = gmC.slice(asc::te::make_coord(coordM, 0L), asc::te::make_shape(shapeM, n_));
             blockMmad(gmBlockA, gmB, gmBias, gmBlockC, tileShape);
         }
     }
@@ -231,7 +231,7 @@ private:
             TupleShape validBlockShape{shapeM, shapeN, shapeK, asc::te::get<MNK_B>(tileShape)};
             auto layoutUB = MakeLayoutC{}(shapeM, shapeN);
             auto ubLocal = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0), layoutUB);
-            auto gmBlockA = gmA.slice(AscendC::MakeCoord(coordM, 0L), AscendC::MakeShape(shapeM, shapeK));
+            auto gmBlockA = gmA.slice(asc::te::make_coord(coordM, 0L), asc::te::make_shape(shapeM, shapeK));
             if ASCEND_IS_AIC {
                 blockMmad(gmBlockA, gmB, gmBias, ubLocal, validBlockShape);
             }

@@ -50,4 +50,11 @@ struct CopyGM2L1TraitPreAllocation {
     static constexpr const TraitType value = asc::te::gm_to_l1_trait{true};
 };
 
+constexpr asc::te::l0c_to_gm_trait COPY_L0C2GM_RELU_TRAIT = asc::te::l0c_to_gm_trait{asc::te::round_mode::default_round,
+                                                                                     true, false};
+struct CopyL0C2GMTraitRelu {
+    using TraitType = asc::te::l0c_to_gm_trait;
+    static constexpr const TraitType value = COPY_L0C2GM_RELU_TRAIT;
+};
+
 } // namespace Blaze::Gemm::Tile

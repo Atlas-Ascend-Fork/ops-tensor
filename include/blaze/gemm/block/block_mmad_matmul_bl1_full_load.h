@@ -46,6 +46,7 @@ public:
     using LayoutC = LayoutC_;
     using LayoutBias = LayoutBias_;
     using DispatchPolicy = MatmulMultiBlockBFullLoad<L0COutModel_, FusedOpType_, KernelSchedule_>;
+    static constexpr uint64_t FUSED_OP_TYPE = DispatchPolicy::FUSED_OP_TYPE;
     using TupleShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using TileShape = asc::te::shape<int64_t, int64_t, int64_t>;
 
@@ -316,8 +317,14 @@ private:
             cvPingPong_++;
         } else {
             auto tensorGmC = tensorC.slice(asc::te::make_coord(0, iterN * curBaseN_), asc::te::make_shape(curM, tileN));
-            auto copyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
-            asc::te::copy(copyL0C2GM.with(fixpParams), tensorGmC, tensorL0C);
+            if constexpr (FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_RELU) {
+                auto copyL0C2GMRelu = asc::te::make_copy(asc::te::copy_l0c_to_gm{},
+                                                         Blaze::Gemm::Tile::CopyL0C2GMTraitRelu{});
+                asc::te::copy(copyL0C2GMRelu.with(fixpParams), tensorGmC, tensorL0C);
+            } else {
+                auto copyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
+                asc::te::copy(copyL0C2GM.with(fixpParams), tensorGmC, tensorL0C);
+            }
         }
     }
 

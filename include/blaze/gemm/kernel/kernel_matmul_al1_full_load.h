@@ -128,12 +128,12 @@ private:
             auto coordN = asc::te::get<MNK_N>(blockCoord);
             curBatchIdx_ = static_cast<uint64_t>(asc::te::get<MNK_B>(blockCoord));
             // Block offset
-            auto subTensorB = gmB.slice(AscendC::MakeCoord(curBatchIdx_, AscendC::MakeCoord(0L, coordN)),
-                                        AscendC::MakeShape(1L, AscendC::MakeShape(shapeK, shapeN)));
+            auto subTensorB = gmB.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(0L, coordN)),
+                                        asc::te::make_shape(1L, asc::te::make_shape(shapeK, shapeN)));
             auto gmBlockB = asc::te::squeeze<0>(subTensorB);
-            auto gmBlockBias = gmBias.slice(AscendC::MakeCoord(0L, coordN), AscendC::MakeShape(1L, shapeN));
-            auto subTensorC = gmC.slice(AscendC::MakeCoord(curBatchIdx_, AscendC::MakeCoord(0L, coordN)),
-                                        AscendC::MakeShape(1L, AscendC::MakeShape(m_, shapeN)));
+            auto gmBlockBias = gmBias.slice(asc::te::make_coord(0L, coordN), asc::te::make_shape(1L, shapeN));
+            auto subTensorC = gmC.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(0L, coordN)),
+                                        asc::te::make_shape(1L, asc::te::make_shape(m_, shapeN)));
             auto gmBlockC = asc::te::squeeze<0>(subTensorC);
             blockMmad(gmA, gmBlockB, gmBlockBias, gmBlockC, blockShape);
         }

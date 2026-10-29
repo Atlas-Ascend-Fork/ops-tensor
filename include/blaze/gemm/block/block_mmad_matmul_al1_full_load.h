@@ -42,6 +42,7 @@ public:
     using LayoutBias = LayoutBias_;
     using DispatchPolicy = MatmulMultiBlockAFullLoad<FullLoadMode_, FusedOpType_, KernelSchedule_>;
     static constexpr uint64_t NON_CONTIGUOUS_TYPE = DispatchPolicy::NON_CONTIGUOUS_TYPE;
+    static constexpr uint64_t FUSED_OP_TYPE = DispatchPolicy::FUSED_OP_TYPE;
     using TupleShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using TripleShape = asc::te::shape<int64_t, int64_t, int64_t>;
 
@@ -199,10 +200,15 @@ public:
             }
             // 数据搬出到GM
             asc::te::l0c_to_gm_params fixpParams{asc::te::unit_flag_mode::enable_update};
-            auto copyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
             auto tensorgmC = gmC.slice(asc::te::make_coord(iterM * baseM_, 0), asc::te::make_shape(tileM, curN));
-            asc::te::copy(copyL0C2GM.with(fixpParams), tensorgmC, tensorL0C);
-
+            if constexpr (FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_RELU) {
+                auto copyL0C2GMRelu = asc::te::make_copy(asc::te::copy_l0c_to_gm{},
+                                                         Blaze::Gemm::Tile::CopyL0C2GMTraitRelu{});
+                asc::te::copy(copyL0C2GMRelu.with(fixpParams), tensorgmC, tensorL0C);
+            } else {
+                auto copyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
+                asc::te::copy(copyL0C2GM.with(fixpParams), tensorgmC, tensorL0C);
+            }
             if (enableL0cPingPong_) {
                 l0cPingPong_++;
             }
