@@ -141,7 +141,7 @@ __aicore__ inline void operator()(const Params& params);
 
 ## 调用示例
 
-以下类型组合与 `examples/weight_quant_batch_matmul_mx/weight_quant_batch_matmul_mx_swat` 一致。`m`、`n`、`k` 为
+以下类型组合与 `examples/acl/weight_quant_batch_matmul_mx/weight_quant_batch_matmul_mx_swat` 一致。`m`、`n`、`k` 为
 `int64_t`，tiling 尺寸为 `uint64_t`：
 
 ```cpp

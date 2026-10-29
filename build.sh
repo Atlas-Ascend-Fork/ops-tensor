@@ -674,7 +674,7 @@ build_examples() {
     fi
 
     # 2. Delegate to common/run.sh (handles discovery, build, run, and summary)
-    local common_run="${SCRIPT_DIR}/examples/common/run.sh"
+    local common_run="${SCRIPT_DIR}/examples/acl/common/run.sh"
     local run_args=()
     if [ -n "$BUILD_OPERATORS" ] && [ "$BUILD_OPERATORS" != "all" ]; then
         run_args+=("--ops=${BUILD_OPERATORS}")

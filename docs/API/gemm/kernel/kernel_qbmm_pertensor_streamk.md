@@ -183,7 +183,7 @@ all-SK 约束。候选调度一旦包含 DP block，就回退非 StreamK MIX，�
 ## 组件组装示例
 
 完整可编译、可运行并带 golden 校验的示例见
-[quant_batch_matmul_cube](../../../../examples/quant_batch_matmul/quant_batch_matmul_cube/README.md)，
+[quant_batch_matmul_cube](../../../../examples/acl/quant_batch_matmul/quant_batch_matmul_cube/README.md)，
 对应 CSV 场景为 `qbmm_pertensor_streamk`。
 
 ```cpp

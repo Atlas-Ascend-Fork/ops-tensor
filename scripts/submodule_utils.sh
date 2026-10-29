@@ -16,7 +16,7 @@
 # submodule (include/tensor_api) to the pinned commit recorded in the
 # superproject. Consumed by:
 #   - build.sh                 (--opkernel -u / --examples modes)
-#   - examples/common/run.sh   (unified examples runner)
+#   - examples/acl/common/run.sh   (unified examples runner)
 #
 # Usage:
 #   source "${REPO_ROOT}/scripts/submodule_utils.sh"

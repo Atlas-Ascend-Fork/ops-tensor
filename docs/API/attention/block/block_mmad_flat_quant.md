@@ -214,7 +214,7 @@ AL1Buf0 | AL1Buf1 | BL1Buf(P1+P2)
 
 ### 组件组装
 ```cpp
-// 与 examples/flat_quant/flat_quant/flat_quant.cpp 使用同一类型描述方式。
+// 与 examples/acl/flat_quant/flat_quant/flat_quant.cpp 使用同一类型描述方式。
 template <typename T_>
 struct MatmulType {
     using T = T_;

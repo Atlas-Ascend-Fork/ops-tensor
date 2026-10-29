@@ -76,5 +76,5 @@ ND/NZ、A/B dtype 和转置由 Cube 组件及上层 Host 校验；本 Epilogue �
 
 ## Example 与测试
 
-- [CSV Example](../../../../examples/quant_matmul_activation_quant/quant_matmul_activation_quant/README.md)
+- [CSV Example](../../../../examples/acl/quant_matmul_activation_quant/quant_matmul_activation_quant/README.md)
 - [Kernel UT](../../../../tests/ut/op_kernel/quant_matmul_activation_quant/test_quant_matmul_activation_quant.cpp)

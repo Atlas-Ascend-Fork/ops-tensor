@@ -40,7 +40,7 @@ Host Tiling 负责形状、容量和切分合法性，Kernel 不重复执行 `Ha
 ## 调用示例
 
 完整可编译、可运行并带三路输出 golden 校验的示例见
-[block_attn_res_prepare](../../../../examples/block_attn_res_prepare/block_attn_res_prepare/README.md)。
+[block_attn_res_prepare](../../../../examples/acl/block_attn_res_prepare/block_attn_res_prepare/README.md)。
 
 以下代码展示在算子 Kernel entry 中如何把 host tiling 和 GM 地址完整映射到公开组合别名。
 该 Kernel 使用一个 AIC 和两个 AIV 的 MIX 任务组，因此入口必须声明

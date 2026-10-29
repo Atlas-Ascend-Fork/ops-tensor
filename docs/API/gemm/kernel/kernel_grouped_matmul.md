@@ -133,4 +133,4 @@ operator()
 ## 使用示例
 
 完整 CSV 驱动的端到端样例（数据生成/tiling 构造/ACL 启动/精度验证）见
-`examples/grouped_matmul/grouped_matmul_no_quant/`，覆盖全部场景矩阵。
+`examples/acl/grouped_matmul/grouped_matmul_no_quant/`，覆盖全部场景矩阵。

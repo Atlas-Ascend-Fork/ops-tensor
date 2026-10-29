@@ -98,4 +98,4 @@ AIV 补零路径(split-K k=0 组):
 
 ## 使用示例
 
-见 `examples/grouped_matmul/grouped_matmul_no_quant/`（全部场景矩阵的 tiling 构造与启动）。
+见 `examples/acl/grouped_matmul/grouped_matmul_no_quant/`（全部场景矩阵的 tiling 构造与启动）。

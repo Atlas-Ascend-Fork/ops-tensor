@@ -19,4 +19,4 @@ bash build.sh --opkernel -u --ops=confidence_head_fused
 | 空输出 | 1 | N=0 时直接返回，不进入调度和跨核同步。 |
 | Sigmoid | 1 | FP32/FP16/BF16 输出实例化。 |
 
-共 9 条用例。Kernel 用例检查启动与同步，保留 batch bias、N 尾块和空输出覆盖。CPU 模拟器不完整模拟 MMAD/Reg 数值，设备精度由 [端到端示例](../../../../examples/confidence_head_fused/confidence_head_fused_mix/README.md) 和 NN ST 校验。
+共 9 条用例。Kernel 用例检查启动与同步，保留 batch bias、N 尾块和空输出覆盖。CPU 模拟器不完整模拟 MMAD/Reg 数值，设备精度由 [端到端示例](../../../../examples/acl/confidence_head_fused/confidence_head_fused_mix/README.md) 和 NN ST 校验。

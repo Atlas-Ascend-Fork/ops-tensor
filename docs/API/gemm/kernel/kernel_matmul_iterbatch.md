@@ -13,7 +13,7 @@ IterBatch MatMul Kernel，支持 ON_THE_FLY（仅 AIC）和 ND_FIXPIPE_1_2（AIC
 | BlockMmad | [block_mmad_matmul_iterbatch.h](../../../../include/blaze/gemm/block/block_mmad_matmul_iterbatch.h)（[文档](../block/block_mmad_matmul_iterbatch.md)） |
 | BlockScheduler | [block_scheduler_matmul_iterbatch.h](../../../../include/blaze/gemm/block/block_scheduler_matmul_iterbatch.h)（[文档](../block/block_scheduler_matmul_iterbatch.md)） |
 | BlockEpilogue | [block_epilogue_iterbatch.h](../../../../include/blaze/epilogue/block/block_epilogue_iterbatch.h)（[文档](../../epilogue/block/block_epilogue_iterbatch.md)，仅 ND_FIXPIPE_1_2） |
-| 示例 | `examples/batch_mat_mul/mat_mul_iterbatch/` |
+| 示例 | `examples/acl/batch_mat_mul/mat_mul_iterbatch/` |
 
 ## Params 参数结构
 

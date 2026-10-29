@@ -49,7 +49,7 @@ add_compile_options(
 
 set(OPS_TENSOR_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(BLAZE_INCLUDE_DIR ${OPS_TENSOR_ROOT}/include)
-set(EXAMPLES_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/common)
+set(EXAMPLES_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/acl/common)
 
 include(${OPS_TENSOR_ROOT}/cmake/variables.cmake)
 set(ASCEND_ARCH_DIR "${ARCH}-linux")
@@ -112,21 +112,24 @@ endmacro()
 
 ##############################################################################
 # 7. Load Operator Subdirectories
+#
+# C++ (ACL 直调) 样例统一收在 acl/ 子目录；torch/ 下的 Python 样例为可选
+# 依赖（torch/torch_npu），各自独立构建，不在此处加载。
 ##############################################################################
 
-add_subdirectory(mat_mul)
-add_subdirectory(fused_mat_mul)
-add_subdirectory(confidence_head_fused)
-add_subdirectory(batch_mat_mul)
-add_subdirectory(block_attn_res_prepare)
-add_subdirectory(transpose_batch_mat_mul)
-add_subdirectory(quant_batch_matmul)
-add_subdirectory(weight_quant_matmul)
-add_subdirectory(weight_quant_batch_matmul_mx)
-add_subdirectory(weight_quant_batch_matmul)
-add_subdirectory(grouped_matmul)
-add_subdirectory(quant_matmul_activation_quant)
-add_subdirectory(transpose_quant_batch_matmul)
-add_subdirectory(gemm_syrk)
-add_subdirectory(flat_quant)
-add_subdirectory(rotate_quant)
+add_subdirectory(acl/mat_mul)
+add_subdirectory(acl/fused_mat_mul)
+add_subdirectory(acl/confidence_head_fused)
+add_subdirectory(acl/batch_mat_mul)
+add_subdirectory(acl/block_attn_res_prepare)
+add_subdirectory(acl/transpose_batch_mat_mul)
+add_subdirectory(acl/quant_batch_matmul)
+add_subdirectory(acl/weight_quant_matmul)
+add_subdirectory(acl/weight_quant_batch_matmul_mx)
+add_subdirectory(acl/weight_quant_batch_matmul)
+add_subdirectory(acl/grouped_matmul)
+add_subdirectory(acl/quant_matmul_activation_quant)
+add_subdirectory(acl/transpose_quant_batch_matmul)
+add_subdirectory(acl/gemm_syrk)
+add_subdirectory(acl/flat_quant)
+add_subdirectory(acl/rotate_quant)

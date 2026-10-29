@@ -10,7 +10,7 @@ import numpy as np
 import ml_dtypes
 
 root = pathlib.Path(__file__).resolve().parents[4]
-scripts = root / "examples/grouped_matmul/scripts"
+scripts = root / "examples/acl/grouped_matmul/scripts"
 verify = scripts / "verify_result_cubeonly.py"
 count = 0
 with tempfile.TemporaryDirectory() as d:
@@ -90,7 +90,7 @@ with tempfile.TemporaryDirectory() as d:
         count += 1
     csv_path = (
         root
-        / "examples/grouped_matmul/quant_grouped_matmul_cubeonly/quant_grouped_matmul_cubeonly.csv"
+        / "examples/acl/grouped_matmul/quant_grouped_matmul_cubeonly/quant_grouped_matmul_cubeonly.csv"
     )
     with csv_path.open() as f:
         rows = list(csv.DictReader(f))

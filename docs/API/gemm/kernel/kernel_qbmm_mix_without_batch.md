@@ -83,7 +83,7 @@ __aicore__ inline void Run(const Params& params, BlockScheduler& bs)
 ## 调用示例
 
 完整可编译、可运行并带 golden 校验的示例见
-[quant_batch_matmul_mix](../../../../examples/quant_batch_matmul/quant_batch_matmul_mix/README.md)，
+[quant_batch_matmul_mix](../../../../examples/acl/quant_batch_matmul/quant_batch_matmul_mix/README.md)，
 对应 CSV 场景为 `qbmm_mix_without_batch`。
 
 以下示例与带 Batch 版本使用相同的 MMAD、Scheduler 和 Epilogue 组件，但通过

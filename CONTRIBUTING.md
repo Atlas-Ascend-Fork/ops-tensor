@@ -63,7 +63,7 @@ docs/API/                                # Blaze 接口文档
 ├── epilogue/                            # Epilogue 层 API 文档（按需）
 └── README.md                            # Blaze 接口总览
 
-examples/                                # 端到端样例（Host 侧 runner + device kernel 实例化）
+examples/acl/                            # 端到端样例（Host 侧 runner + device kernel 实例化）
 └── ${op}/                               # 算子级目录
     ├── CMakeLists.txt                   #   通过 ops_example_add_executable 注册样例
     ├── scripts/
@@ -71,7 +71,7 @@ examples/                                # 端到端样例（Host 侧 runner + d
     │   └── verify_result.py             #   NPU 输出 vs CPU golden 精度比对
     └── ${op}_${variant}/                #   样例级目录
         ├── ${op}_${variant}.cpp         #   样例源码（host 侧 ACL 内存管理 + kernel 调度）
-        ├── ${op}_${variant}.conf        #   执行参数配置（INI 格式，见 examples/common/CONF_FORMAT.md）
+        ├── ${op}_${variant}.conf        #   执行参数配置（INI 格式，见 examples/acl/common/CONF_FORMAT.md）
         ├── ${op}_${variant}.csv         #   CSV 测试用例表
         └── README.md                    #   样例说明文档
 
@@ -97,7 +97,7 @@ tests/ut/op_kernel/                      # Kernel UT（基于 Google Test + tiki
 | `include/blaze/epilogue/block/`               | 新算子的 Epilogue 后处理；无后处理时复用`BlockEpilogueEmpty`      | 按需                 |
 | `include/blaze/gemm/utils/`                   | 新算子需要的通用工具（Layout 推导、常量等）                         | 按需                 |
 | `docs/API/`                                   | 新增 Kernel/Block/Tile/Epilogue 组件的接口文档                      | 必选（有新增组件时） |
-| `examples/${op}/`                             | 端到端样例（含 gen_data.py、verify_result.py、CSV 用例、README.md） | 必选                 |
+| `examples/acl/${op}/`                         | 端到端样例（含 gen_data.py、verify_result.py、CSV 用例、README.md） | 必选                 |
 | `tests/ut/op_kernel/${op}/`                   | Kernel UT（gtest + tikicpulib 模拟器执行）                          | 必选                 |
 
 代码上库要求：

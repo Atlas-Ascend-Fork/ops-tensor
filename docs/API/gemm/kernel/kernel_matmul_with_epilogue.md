@@ -107,4 +107,4 @@ struct Params {
 - [BlockMmadMatmulFixpipeOpti](../block/block_mmad_matmul_fixpipe_opti.md)
 - [BlockEpilogueMatmulWithSigmoid](../../epilogue/block/block_epilogue_matmul_with_sigmoid.md)
 - [BlockEpilogueFmmWithScaleAdd](../../epilogue/block/block_epilogue_fmm_with_scale_add.md)
-- [fused_mat_mul_sigmoid 样例](../../../../examples/fused_mat_mul/fused_mat_mul_sigmoid/README.md)
+- [fused_mat_mul_sigmoid 样例](../../../../examples/acl/fused_mat_mul/fused_mat_mul_sigmoid/README.md)

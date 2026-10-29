@@ -175,7 +175,7 @@ MatmulKernel kernel;
 kernel(params);   // 框架内部在 AIV 侧调用 epilogue(blockShape, offsetC, splitM, baseM, baseN, ubDB)
 ```
 
-> 完整示例参见 `examples/mat_mul/mat_mul_fixpipe_opti/mat_mul_fixpipe_opti.cpp`。
+> 完整示例参见 `examples/acl/mat_mul/mat_mul_fixpipe_opti/mat_mul_fixpipe_opti.cpp`。
 
 ## 数据流
 

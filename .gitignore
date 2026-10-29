@@ -35,6 +35,8 @@ V*_onnx_plugin_model.onnx
 
 # cann tmp
 kernel_meta/
+# ccec/asc compiler dump (host stub objects, generated next to the build CWD)
+extra-info/
 
 # Jetbrain
 .idea

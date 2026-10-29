@@ -159,4 +159,4 @@ using Kernel = Blaze::Gemm::Kernel::GemmUniversal<Shape, Block, void, Scheduler>
 
 填充 `Kernel::Params` 后在混合核入口调用 `Kernel{}(params)`。
 完整的参数组装和运行方式见
-[权重反量化样例](../../../../examples/weight_quant_batch_matmul/weight_quant_batch_matmul_antiquant/README.md)。
+[权重反量化样例](../../../../examples/acl/weight_quant_batch_matmul/weight_quant_batch_matmul_antiquant/README.md)。

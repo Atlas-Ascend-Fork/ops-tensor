@@ -63,4 +63,4 @@ Kernel kernel;
 kernel(params);
 ```
 
-完整参数组装见 [ConfidenceHeadFused 示例](../../../../examples/confidence_head_fused/confidence_head_fused_mix/README.md)。
+完整参数组装见 [ConfidenceHeadFused 示例](../../../../examples/acl/confidence_head_fused/confidence_head_fused_mix/README.md)。

@@ -24,7 +24,7 @@ out = 1 / (1 + exp(u))
 
 温度缩放和可选 clamp 完成后，本 Tile 内联执行 `Exp → Adds(1) → Div`，计算 `1 / (1 + exp(u))`。最后一步使用默认的非精确 Div；Sigmoid 使用 `preciseDiv=true`，两者不要求逐位一致。
 
-Golden 保持 FP32 参考计算，设备结果按 [端到端示例](../../../../../examples/confidence_head_fused/confidence_head_fused_mix/README.md)及 NN ST 配置的容差校验，不通过改用精确 Div 或放宽阈值消除差异。
+Golden 保持 FP32 参考计算，设备结果按 [端到端示例](../../../../../examples/acl/confidence_head_fused/confidence_head_fused_mix/README.md)及 NN ST 配置的容差校验，不通过改用精确 Div 或放宽阈值消除差异。
 
 ## Params 参数结构
 

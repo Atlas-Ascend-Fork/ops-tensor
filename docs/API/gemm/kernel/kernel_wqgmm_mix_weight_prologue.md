@@ -151,7 +151,7 @@ ka = min(depth, maxDepth) * kb
 
 ## 仓内验证
 
-[grouped_matmul_mx_a8w4 example](../../../../examples/grouped_matmul/grouped_matmul_mx_a8w4/README.md)
+[grouped_matmul_mx_a8w4 example](../../../../examples/acl/grouped_matmul/grouped_matmul_mx_a8w4/README.md)
 使用 example-local 适配代码直接实例化通用 Kernel，保留确定性数据生成、NPU 执行和原精度阈值。
 Transformer 的生产适配和 host tiling 映射位于 ops-transformer 的
 `gmm_weight_quant_tensor_api_mx_kernel.h`。

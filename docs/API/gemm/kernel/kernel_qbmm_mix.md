@@ -158,7 +158,7 @@ __aicore__ inline void ProcessSingleBatch(
 ## 调用示例
 
 完整可编译、可运行并带 golden 校验的示例见
-[quant_batch_matmul_mix](../../../../examples/quant_batch_matmul/quant_batch_matmul_mix/README.md)，
+[quant_batch_matmul_mix](../../../../examples/acl/quant_batch_matmul/quant_batch_matmul_mix/README.md)，
 对应 CSV 场景为 `qbmm_mix`。
 
 以下示例以单路 `int8` 输入、`bfloat16_t` 输出为例。GM 地址和切分参数由上层 host tiling

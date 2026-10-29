@@ -143,7 +143,7 @@ __aicore__ inline void SetBL2Cache(
 ## 调用示例
 
 完整可编译、可运行并带 golden 校验的示例见
-[quant_batch_matmul_mx](../../../../examples/quant_batch_matmul/quant_batch_matmul_mx/README.md)，
+[quant_batch_matmul_mx](../../../../examples/acl/quant_batch_matmul/quant_batch_matmul_mx/README.md)，
 对应 CSV 场景为 `qbmm_mx_without_batch`。
 
 ```cpp

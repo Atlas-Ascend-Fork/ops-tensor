@@ -242,7 +242,7 @@ Samples 测试用于验证算子样例在 NPU 上的编译、执行和精度正�
 ./build.sh --examples
 ```
 
-`build.sh` 会自动发现 `examples/` 下所有样例目录中的同名 CSV 文件（`{example}.csv`），以 `--case` 参数委托各样例的 `run.sh` 执行。
+`build.sh` 会自动发现 `examples/acl/` 下所有样例目录中的同名 CSV 文件（`{example}.csv`），以 `--case` 参数委托各样例的 `run.sh` 执行。
 
 ### 2. 执行指定算子的样例
 
@@ -257,7 +257,7 @@ Samples 测试用于验证算子样例在 NPU 上的编译、执行和精度正�
 ### 3. 通过 run.sh 执行
 
 ```bash
-bash examples/common/run.sh --ops=mat_mul --target=mat_mul_streamk
+bash examples/acl/common/run.sh --ops=mat_mul --target=mat_mul_streamk
 ```
 
 ### 4. CSV 测试用例格式
