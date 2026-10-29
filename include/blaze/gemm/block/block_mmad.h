@@ -39,3 +39,4 @@
 #include "blaze/gemm/block/block_mmad_weight_prologue_mx.h"
 #include "blaze/gemm/block/block_mmad_wqmm_mix_prologue_fixpipe_quant.h"
 #include "blaze/gemm/block/block_mmad_wqmm_mix_weight_prologue.h"
+#include "blaze/gemm/block/block_mmad_rotate_quant.h"

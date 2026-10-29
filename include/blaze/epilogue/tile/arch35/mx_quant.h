@@ -14,8 +14,12 @@
  *
  * Pipeline (each stage is an independent public entry):
  *   1. GroupMaxExp        : per-32-element-group max exponent / max absolute codepoint
+ *   1'. GroupMaxExp(clamp): per-group absMax * alpha limit + maxExp variant
+ *                           (rotate-quant lineage)
  *   2. GenScale           : E8M0 yScale + u16 reciprocal (OCP / cuBLAS / DynDtypeRange)
  *   3. Quantize           : src * reciprocal -> saturated FP8/FP4 cast, packed int8 store
+ *   3'. Quantize(clamp)   : src symmetrically clamped to +/-limit before the
+ *                           reciprocal multiply (rotate-quant lineage)
  *   4. TransScaleLayout   : packed yScale -> 32B-row-block layout for MTE copy
  *      PadScaleRows       : packed yScale -> 32B rows with explicit zero padding
  *   4'. TransFp4OutLayout : FP4 packed output re-layout (Align16 -> Align32 row pitch)
@@ -28,6 +32,9 @@
  *   - OCP zeroScaleOnZeroExp=true: zero maxExp clears yScale and the reciprocal.
  *     For 0 < maxExp <= fpEmax, the reciprocal is 0 or 0x7f00, respectively.
  *   - DynDtypeRange ignores this option and clears the reciprocal when sharedExp is zero.
+ *   - Clamped overloads (rotate-quant lineage): GroupMaxExp additionally
+ *     emits limit = absMax * alpha per group (bf16, for the Quantize clamp);
+ *     Quantize clamps src to [-limit, +limit] before the reciprocal multiply.
  */
 
 #pragma once
@@ -58,6 +65,8 @@ struct MxQuantConfig {
     float invDstTypeMax{1.0f};      // cuBLAS: 1/dstTypeMax (host may override)
     uint16_t addValueBits{0x003f};  // Dyn: dstTypeMax==7 ? 0x001f : 0x003f
     bool zeroScaleOnZeroExp{false}; // OCP zeroMask predicate/scope (see file header)
+    // Preserve existing callers; RotateQuant FP4 opts out of FP8 subnormal rounding.
+    bool roundSubnormalScaleUp{true};
 };
 
 // ---------------------------------------------------------------------------
@@ -111,6 +120,27 @@ public:
                                     MxQuantFp4RoundMode fp4RoundMode = MxQuantFp4RoundMode::RINT);
 
     /*!
+     * Stage 1' (clamped, rotate-quant lineage): per-group max extraction with
+     * an alpha-scaled symmetric limit. limitTensor receives absMax * alpha as
+     * bf16; maxExp receives the exponent field of the limit (useExp=true, OCP)
+     * or its full codepoint (useExp=false, cuBLAS).
+     */
+    template <typename SrcTensor, typename MaxExpTensor, typename LimitTensor>
+    __aicore__ inline void GroupMaxExp(const SrcTensor& srcTensor, const MaxExpTensor& maxExpTensor,
+                                       const LimitTensor& limitTensor, uint32_t totalCount, bfloat16_t alpha,
+                                       bool useExp);
+
+    /*!
+     * Stage 3' (clamped, rotate-quant lineage): same as Quantize except src is
+     * symmetrically clamped to [-limit, +limit] (per-group bf16 limit from the
+     * clamped GroupMaxExp) before the reciprocal multiply.
+     */
+    template <typename SrcTensor, typename ReciprocalTensor, typename LimitTensor, typename YTensor>
+    __aicore__ inline void Quantize(const SrcTensor& srcTensor, const ReciprocalTensor& reciprocalTensor,
+                                    const LimitTensor& limitTensor, const YTensor& yTensor, uint32_t totalCount,
+                                    MxQuantFp4RoundMode fp4RoundMode = MxQuantFp4RoundMode::RINT);
+
+    /*!
      * Stage 4: yScale layout transpose. src holds scaleBlockN contiguous valid
      * scales per row; dst is an mSize x 32B row-block buffer. The Block zeroes
      * dst beforehand when stale bytes beyond the valid prefix are observable.
@@ -153,6 +183,7 @@ private:
     static constexpr uint16_t NAN_CUSTOMIZATION = 0x7f81;
     static constexpr uint16_t SPECIAL_EXP_THRESHOLD = 0x0040;
     static constexpr uint16_t ABS_MASK_FOR_16BIT = 0x7fff;
+    static constexpr uint16_t SIGN_MASK_FOR_BF16 = 0x8000;
     static constexpr uint32_t MAN_MASK_FLOAT = 0x007fffff;
     static constexpr uint32_t MAX_EXP_FOR_FP32 = 0x7f800000;
     static constexpr uint32_t FP32_EXP_BIAS_CUBLAS = 0x00007f00;
@@ -188,6 +219,16 @@ private:
         uint32_t totalCount;
     };
 
+    struct MxMaxExpClampedVfParams {
+        __ubuf__ bfloat16_t* srcAddr;
+        __ubuf__ uint16_t* maxExpAddr;
+        __ubuf__ bfloat16_t* limitAddr;
+        bfloat16_t alpha;
+        bool useExp;
+        uint16_t loopCount;
+        uint32_t totalCount;
+    };
+
     struct MxScaleVfParams {
         __ubuf__ uint16_t* maxExpAddr;
         __ubuf__ uint16_t* yScaleAddr; // E8M0 packed into an int8 buffer, written as u16
@@ -197,11 +238,21 @@ private:
         uint16_t addValueBits;
         uint32_t totalScale;
         float invDstTypeMax;
+        bool roundSubnormalScaleUp;
     };
 
     struct MxQuantizeVfParams {
         __ubuf__ bfloat16_t* srcAddr;
         __ubuf__ uint16_t* reciprocalAddr;
+        __ubuf__ int8_t* yAddr;
+        uint16_t loopCount;
+        uint32_t totalCount;
+    };
+
+    struct MxQuantizeClampedVfParams {
+        __ubuf__ bfloat16_t* srcAddr;
+        __ubuf__ uint16_t* reciprocalAddr;
+        __ubuf__ bfloat16_t* limitAddr;
         __ubuf__ int8_t* yAddr;
         uint16_t loopCount;
         uint32_t totalCount;
@@ -266,6 +317,30 @@ private:
                                                                                         vlHalf, mask);
     }
 
+    // ---- Shared symmetric clamp step (rotate-quant lineage) ----
+    // Fuses the per-group limit load (E2B_B16, one bf16 limit per 32-element
+    // group) and the symmetric clamp x = min(max(x, -limit), +limit) ahead of
+    // the caller's reciprocal multiply. limitAddr must be a reference: the
+    // load's POST_MODE_UPDATE advances the pointer in place, and the
+    // advancement has to accumulate across the caller's loop iterations (see
+    // ScaleReciprocalTailCallee).
+    static __simd_callee__ inline void ClampSymmetricCallee(
+        AscendC::Reg::RegTensor<bfloat16_t>& value0, AscendC::Reg::RegTensor<bfloat16_t>& value1,
+        AscendC::Reg::MaskReg& maskEven, AscendC::Reg::MaskReg& maskOdd, AscendC::Reg::RegTensor<bfloat16_t>& limit,
+        AscendC::Reg::RegTensor<bfloat16_t>& negLimit, AscendC::Reg::RegTensor<uint16_t>& signMask,
+        __ubuf__ bfloat16_t*& limitAddr)
+    {
+        constexpr uint16_t ELEMENT_AFTER_REDUCE = static_cast<uint16_t>(asc_get_vf_len() / BLOCK_SIZE);
+        AscendC::Reg::LoadAlign<bfloat16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                AscendC::Reg::LoadDist::DIST_E2B_B16>(limit, limitAddr, ELEMENT_AFTER_REDUCE);
+        AscendC::Reg::Xor(reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(negLimit),
+                          reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(limit), signMask, maskEven);
+        AscendC::Reg::Max(value0, value0, negLimit, maskEven);
+        AscendC::Reg::Max(value1, value1, negLimit, maskOdd);
+        AscendC::Reg::Min(value0, value0, limit, maskEven);
+        AscendC::Reg::Min(value1, value1, limit, maskOdd);
+    }
+
     // ---- Vf implementations (static __simd_vf__ inline, defined in-class) ----
     template <bool FULL_BLOCK, bool USE_ABS, bool EVEN_COUNT>
     static __simd_vf__ inline void MaxExpVf(MxMaxExpVfParams params)
@@ -315,6 +390,65 @@ private:
                 maxExpAddr, groupMaxValue, unalign, ELEMENT_AFTER_REDUCE);
         }
         AscendC::Reg::StoreUnAlignPost(maxExpAddr, unalign, 0);
+    }
+
+    // Rotate-quant lineage: per-group absMax, limit = absMax * alpha (bf16);
+    // maxExp receives the exponent field of limit (useExp=true, OCP) or its
+    // full codepoint (useExp=false, cuBLAS); limitTensor receives limit.
+    static __simd_vf__ inline void MaxExpClampedVf(MxMaxExpClampedVfParams params)
+    {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
+        constexpr uint16_t ELEMENT_AFTER_REDUCE = static_cast<uint16_t>(asc_get_vf_len() / BLOCK_SIZE);
+        AscendC::Reg::RegTensor<bfloat16_t> value0;
+        AscendC::Reg::RegTensor<bfloat16_t> value1;
+        AscendC::Reg::RegTensor<bfloat16_t> limit;
+        AscendC::Reg::RegTensor<uint16_t> maxValue;
+        AscendC::Reg::RegTensor<uint16_t> expExtract;
+        AscendC::Reg::RegTensor<uint16_t> absMask;
+        AscendC::Reg::RegTensor<uint16_t> expMask;
+        AscendC::Reg::RegTensor<bfloat16_t> alphaReg;
+        AscendC::Reg::MaskReg mask0;
+        AscendC::Reg::MaskReg mask1;
+        AscendC::Reg::MaskReg maskEven;
+        AscendC::Reg::MaskReg maskOdd;
+        AscendC::Reg::UnalignRegForStore unalignExp;
+        AscendC::Reg::UnalignRegForStore unalignLimit;
+        AscendC::Reg::Duplicate(absMask, ABS_MASK_FOR_16BIT);
+        if (params.useExp) {
+            AscendC::Reg::Duplicate(expMask, MAX_EXP_FOR_BF16);
+        }
+        AscendC::Reg::Duplicate(alphaReg, params.alpha);
+        uint32_t remainingData = params.totalCount;
+        for (uint16_t i = 0; i < params.loopCount; ++i) {
+            mask0 = AscendC::Reg::UpdateMask<bfloat16_t>(remainingData);
+            mask1 = AscendC::Reg::UpdateMask<bfloat16_t>(remainingData);
+            AscendC::Reg::MaskDeInterleave<bfloat16_t>(maskEven, maskOdd, mask0, mask1);
+            AscendC::Reg::LoadAlign<bfloat16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                    AscendC::Reg::LoadDist::DIST_DINTLV_B16>(value0, value1, params.srcAddr,
+                                                                             VL_FOR_16F * INTERLEAVED_REG_FACTOR);
+            AscendC::Reg::And(reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(value0),
+                              reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(value0), absMask, maskEven);
+            AscendC::Reg::And(reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(value1),
+                              reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(value1), absMask, maskOdd);
+            AscendC::Reg::Max(maxValue, reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(value0),
+                              reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(value1), mask0);
+            AscendC::Reg::ReduceMaxWithDataBlock(maxValue, maxValue, mask0);
+            AscendC::Reg::Mul(limit, reinterpret_cast<AscendC::Reg::RegTensor<bfloat16_t>&>(maxValue), alphaReg, mask0);
+            if (params.useExp) {
+                AscendC::Reg::And(expExtract, reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(limit), expMask,
+                                  mask0);
+                AscendC::Reg::StoreUnAlign<uint16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
+                    params.maxExpAddr, expExtract, unalignExp, ELEMENT_AFTER_REDUCE);
+            } else {
+                AscendC::Reg::StoreUnAlign<uint16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
+                    params.maxExpAddr, reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(limit), unalignExp,
+                    ELEMENT_AFTER_REDUCE);
+            }
+            AscendC::Reg::StoreUnAlign<bfloat16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
+                params.limitAddr, limit, unalignLimit, ELEMENT_AFTER_REDUCE);
+        }
+        AscendC::Reg::StoreUnAlignPost(params.maxExpAddr, unalignExp, 0);
+        AscendC::Reg::StoreUnAlignPost(params.limitAddr, unalignLimit, 0);
     }
 
     template <bool ZERO_SCALE_ON_ZERO_EXP, bool FULL_BLOCK>
@@ -438,6 +572,15 @@ private:
             AscendC::Reg::CompareScalar<uint32_t, AscendC::CMPMODE::GT>(predicate2, mantissa32, NUMBER_ZERO, maskFloat);
             AscendC::Reg::MaskAnd(predicate0, predicate0, predicate1, maskFloat);
             AscendC::Reg::MaskAnd(predicate0, predicate0, predicate2, maskFloat);
+            if (!params.roundSubnormalScaleUp) {
+                // RotateQuant FP4 opts out of the subnormal scale round-up: the
+                // predicate above folds that case in (max32 > NUMBER_HALF also
+                // matches denormalized maxima with a fraction above 1/2), so
+                // additionally require a normalized maximum (exp32 > 0) to
+                // exclude it.
+                AscendC::Reg::CompareScalar<uint32_t, AscendC::CMPMODE::GT>(predicate1, exp32, NUMBER_ZERO, maskFloat);
+                AscendC::Reg::MaskAnd(predicate0, predicate0, predicate1, maskFloat);
+            }
 
             AscendC::Reg::Adds(expAddOne32, exp32, 1, maskFloat);
             AscendC::Reg::Select(extractExp, expAddOne32, exp32, predicate0);
@@ -578,6 +721,81 @@ private:
         }
     }
 
+    // Rotate-quant lineage: same as QuantizeFp8Vf with src symmetrically
+    // clamped to [-limit, +limit] before the reciprocal multiply.
+    static __simd_vf__ inline void QuantizeFp8ClampedVf(MxQuantizeClampedVfParams params)
+    {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
+        constexpr uint16_t ELEMENT_AFTER_REDUCE = static_cast<uint16_t>(asc_get_vf_len() / BLOCK_SIZE);
+        uint32_t remainingData = params.totalCount;
+        AscendC::Reg::MaskReg mask0;
+        AscendC::Reg::MaskReg mask1;
+        AscendC::Reg::MaskReg mask2;
+        AscendC::Reg::MaskReg mask3;
+        AscendC::Reg::MaskReg maskEven;
+        AscendC::Reg::MaskReg maskOdd;
+        AscendC::Reg::RegTensor<uint16_t> scale;
+        AscendC::Reg::RegTensor<uint16_t> signMask;
+        AscendC::Reg::RegTensor<bfloat16_t> value0;
+        AscendC::Reg::RegTensor<bfloat16_t> value1;
+        AscendC::Reg::RegTensor<bfloat16_t> limit;
+        AscendC::Reg::RegTensor<bfloat16_t> negLimit;
+        AscendC::Reg::RegTensor<float> fp32Value00;
+        AscendC::Reg::RegTensor<float> fp32Value01;
+        AscendC::Reg::RegTensor<float> fp32Value10;
+        AscendC::Reg::RegTensor<float> fp32Value11;
+        AscendC::Reg::RegTensor<DataTypeOut> fp8Value00;
+        AscendC::Reg::RegTensor<DataTypeOut> fp8Value01;
+        AscendC::Reg::RegTensor<DataTypeOut> fp8Value10;
+        AscendC::Reg::RegTensor<DataTypeOut> fp8Value11;
+        AscendC::Reg::Duplicate(signMask, SIGN_MASK_FOR_BF16);
+
+        for (uint16_t i = 0; i < params.loopCount; ++i) {
+            uint32_t expandedRemaining = remainingData * INTERLEAVED_REG_FACTOR;
+            mask0 = AscendC::Reg::UpdateMask<bfloat16_t>(remainingData);
+            mask1 = AscendC::Reg::UpdateMask<bfloat16_t>(remainingData);
+            mask2 = AscendC::Reg::UpdateMask<bfloat16_t>(expandedRemaining);
+            mask3 = AscendC::Reg::UpdateMask<bfloat16_t>(expandedRemaining);
+            AscendC::Reg::MaskDeInterleave<bfloat16_t>(maskEven, maskOdd, mask0, mask1);
+            AscendC::Reg::LoadAlign<bfloat16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                    AscendC::Reg::LoadDist::DIST_DINTLV_B16>(value0, value1, params.srcAddr,
+                                                                             VL_FOR_16F * INTERLEAVED_REG_FACTOR);
+            AscendC::Reg::LoadAlign<uint16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                    AscendC::Reg::LoadDist::DIST_E2B_B16>(scale, params.reciprocalAddr,
+                                                                          ELEMENT_AFTER_REDUCE);
+            ClampSymmetricCallee(value0, value1, maskEven, maskOdd, limit, negLimit, signMask, params.limitAddr);
+            AscendC::Reg::Mul(value0, value0, reinterpret_cast<AscendC::Reg::RegTensor<bfloat16_t>&>(scale), maskEven);
+            AscendC::Reg::Mul(value1, value1, reinterpret_cast<AscendC::Reg::RegTensor<bfloat16_t>&>(scale), maskOdd);
+            AscendC::Reg::Interleave(value0, value1, value0, value1);
+            AscendC::Reg::Cast<float, bfloat16_t, CT_16F_TO_32F_ZERO>(fp32Value00, value0, mask0);
+            AscendC::Reg::Cast<float, bfloat16_t, CT_16F_TO_32F_ONE>(fp32Value01, value0, mask0);
+            AscendC::Reg::Interleave(fp32Value00, fp32Value01, fp32Value00, fp32Value01);
+            AscendC::Reg::Cast<float, bfloat16_t, CT_16F_TO_32F_ZERO>(fp32Value10, value1, mask1);
+            AscendC::Reg::Cast<float, bfloat16_t, CT_16F_TO_32F_ONE>(fp32Value11, value1, mask1);
+            AscendC::Reg::Interleave(fp32Value10, fp32Value11, fp32Value10, fp32Value11);
+            AscendC::Reg::Cast<DataTypeOut, float, CT_32F_TO_FP8_SAT>(fp8Value00, fp32Value00, mask2);
+            AscendC::Reg::Cast<DataTypeOut, float, CT_32F_TO_FP8_SAT>(fp8Value01, fp32Value01, mask2);
+            AscendC::Reg::Cast<DataTypeOut, float, CT_32F_TO_FP8_SAT>(fp8Value10, fp32Value10, mask3);
+            AscendC::Reg::Cast<DataTypeOut, float, CT_32F_TO_FP8_SAT>(fp8Value11, fp32Value11, mask3);
+            AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                     AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                params.yAddr, reinterpret_cast<AscendC::Reg::RegTensor<int8_t>&>(fp8Value00), OUT_ELE_NUM_ONE_BLK,
+                mask2);
+            AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                     AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                params.yAddr, reinterpret_cast<AscendC::Reg::RegTensor<int8_t>&>(fp8Value01), OUT_ELE_NUM_ONE_BLK,
+                mask2);
+            AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                     AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                params.yAddr, reinterpret_cast<AscendC::Reg::RegTensor<int8_t>&>(fp8Value10), OUT_ELE_NUM_ONE_BLK,
+                mask3);
+            AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                     AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                params.yAddr, reinterpret_cast<AscendC::Reg::RegTensor<int8_t>&>(fp8Value11), OUT_ELE_NUM_ONE_BLK,
+                mask3);
+        }
+    }
+
     template <AscendC::RoundMode ROUND_MODE>
     static __simd_vf__ inline void QuantizeFp4Vf(MxQuantizeVfParams params)
     {
@@ -593,9 +811,9 @@ private:
         AscendC::Reg::RegTensor<bfloat16_t> value1;
         AscendC::Reg::RegTensor<DataTypeOut> fp4Value0;
         AscendC::Reg::RegTensor<DataTypeOut> fp4Value1;
-        static constexpr AscendC::Reg::CastTrait castFp4 = {AscendC::Reg::RegLayout::ZERO,
-                                                            AscendC::Reg::SatMode::UNKNOWN,
-                                                            AscendC::Reg::MaskMergeMode::ZEROING, ROUND_MODE};
+        static constexpr AscendC::Reg::CastTrait CAST_FP4 = {AscendC::Reg::RegLayout::ZERO,
+                                                             AscendC::Reg::SatMode::UNKNOWN,
+                                                             AscendC::Reg::MaskMergeMode::ZEROING, ROUND_MODE};
 
         for (uint16_t i = 0; i < params.loopCount; ++i) {
             mask0 = AscendC::Reg::UpdateMask<bfloat16_t>(remainingData);
@@ -609,8 +827,60 @@ private:
             AscendC::Reg::Mul(value0, value0, reinterpret_cast<AscendC::Reg::RegTensor<bfloat16_t>&>(scale), fullB16);
             AscendC::Reg::Mul(value1, value1, reinterpret_cast<AscendC::Reg::RegTensor<bfloat16_t>&>(scale), fullB16);
             AscendC::Reg::Interleave(value0, value1, value0, value1);
-            AscendC::Reg::Cast<DataTypeOut, bfloat16_t, castFp4>(fp4Value0, value0, mask0);
-            AscendC::Reg::Cast<DataTypeOut, bfloat16_t, castFp4>(fp4Value1, value1, mask1);
+            AscendC::Reg::Cast<DataTypeOut, bfloat16_t, CAST_FP4>(fp4Value0, value0, mask0);
+            AscendC::Reg::Cast<DataTypeOut, bfloat16_t, CAST_FP4>(fp4Value1, value1, mask1);
+            AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                     AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                params.yAddr, reinterpret_cast<AscendC::Reg::RegTensor<int8_t>&>(fp4Value0), OUT_ELE_NUM_ONE_BLK,
+                mask0);
+            AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                     AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                params.yAddr, reinterpret_cast<AscendC::Reg::RegTensor<int8_t>&>(fp4Value1), OUT_ELE_NUM_ONE_BLK,
+                mask1);
+        }
+    }
+
+    // Rotate-quant lineage: same as QuantizeFp4Vf with src symmetrically
+    // clamped to [-limit, +limit] before the reciprocal multiply.
+    template <AscendC::RoundMode ROUND_MODE>
+    static __simd_vf__ inline void QuantizeFp4ClampedVf(MxQuantizeClampedVfParams params)
+    {
+        constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
+        constexpr uint16_t ELEMENT_AFTER_REDUCE = static_cast<uint16_t>(asc_get_vf_len() / BLOCK_SIZE);
+        uint32_t remainingData = params.totalCount;
+        AscendC::Reg::MaskReg mask0;
+        AscendC::Reg::MaskReg mask1;
+        AscendC::Reg::MaskReg maskEven;
+        AscendC::Reg::MaskReg maskOdd;
+        AscendC::Reg::RegTensor<uint16_t> scale;
+        AscendC::Reg::RegTensor<uint16_t> signMask;
+        AscendC::Reg::RegTensor<bfloat16_t> value0;
+        AscendC::Reg::RegTensor<bfloat16_t> value1;
+        AscendC::Reg::RegTensor<bfloat16_t> limit;
+        AscendC::Reg::RegTensor<bfloat16_t> negLimit;
+        AscendC::Reg::RegTensor<DataTypeOut> fp4Value0;
+        AscendC::Reg::RegTensor<DataTypeOut> fp4Value1;
+        static constexpr AscendC::Reg::CastTrait CAST_FP4 = {AscendC::Reg::RegLayout::ZERO,
+                                                             AscendC::Reg::SatMode::UNKNOWN,
+                                                             AscendC::Reg::MaskMergeMode::ZEROING, ROUND_MODE};
+        AscendC::Reg::Duplicate(signMask, SIGN_MASK_FOR_BF16);
+
+        for (uint16_t i = 0; i < params.loopCount; ++i) {
+            mask0 = AscendC::Reg::UpdateMask<bfloat16_t>(remainingData);
+            mask1 = AscendC::Reg::UpdateMask<bfloat16_t>(remainingData);
+            AscendC::Reg::MaskDeInterleave<bfloat16_t>(maskEven, maskOdd, mask0, mask1);
+            AscendC::Reg::LoadAlign<bfloat16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                    AscendC::Reg::LoadDist::DIST_DINTLV_B16>(value0, value1, params.srcAddr,
+                                                                             VL_FOR_16F * INTERLEAVED_REG_FACTOR);
+            AscendC::Reg::LoadAlign<uint16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                    AscendC::Reg::LoadDist::DIST_E2B_B16>(scale, params.reciprocalAddr,
+                                                                          ELEMENT_AFTER_REDUCE);
+            ClampSymmetricCallee(value0, value1, maskEven, maskOdd, limit, negLimit, signMask, params.limitAddr);
+            AscendC::Reg::Mul(value0, value0, reinterpret_cast<AscendC::Reg::RegTensor<bfloat16_t>&>(scale), maskEven);
+            AscendC::Reg::Mul(value1, value1, reinterpret_cast<AscendC::Reg::RegTensor<bfloat16_t>&>(scale), maskOdd);
+            AscendC::Reg::Interleave(value0, value1, value0, value1);
+            AscendC::Reg::Cast<DataTypeOut, bfloat16_t, CAST_FP4>(fp4Value0, value0, mask0);
+            AscendC::Reg::Cast<DataTypeOut, bfloat16_t, CAST_FP4>(fp4Value1, value1, mask1);
             AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
                                      AscendC::Reg::StoreDist::DIST_PACK4_B32>(
                 params.yAddr, reinterpret_cast<AscendC::Reg::RegTensor<int8_t>&>(fp4Value0), OUT_ELE_NUM_ONE_BLK,
@@ -731,6 +1001,45 @@ __aicore__ inline void MxQuant<DataTypeOut_>::GroupMaxExp(const SrcTensor& srcTe
 }
 
 // ===========================================================================
+// GroupMaxExp (clamped) – public high-level
+// ===========================================================================
+template <typename DataTypeOut_>
+template <typename SrcTensor, typename MaxExpTensor, typename LimitTensor>
+__aicore__ inline void MxQuant<DataTypeOut_>::GroupMaxExp(const SrcTensor& srcTensor, const MaxExpTensor& maxExpTensor,
+                                                          const LimitTensor& limitTensor, uint32_t totalCount,
+                                                          bfloat16_t alpha, bool useExp)
+{
+    using SrcElementType = asc::te::get_attribute_element_type<typename SrcTensor::element_type*>;
+    using MaxExpElementType = asc::te::get_attribute_element_type<typename MaxExpTensor::element_type*>;
+    using LimitElementType = asc::te::get_attribute_element_type<typename LimitTensor::element_type*>;
+    using SrcLayoutPattern = asc::te::get_layout_pattern<typename SrcTensor::layout_type>;
+    using MaxExpLayoutPattern = asc::te::get_layout_pattern<typename MaxExpTensor::layout_type>;
+    using LimitLayoutPattern = asc::te::get_layout_pattern<typename LimitTensor::layout_type>;
+    static_assert(AscendC::Std::is_same_v<SrcElementType, bfloat16_t>, "GroupMaxExp src must be bfloat16_t.");
+    static_assert(AscendC::Std::is_same_v<MaxExpElementType, uint16_t>, "GroupMaxExp maxExp must be uint16_t.");
+    static_assert(AscendC::Std::is_same_v<LimitElementType, bfloat16_t>, "GroupMaxExp limit must be bfloat16_t.");
+    static_assert(AscendC::Std::is_same_v<asc::te::get_mem_location<SrcTensor>, asc::te::location::ub> &&
+                      AscendC::Std::is_same_v<asc::te::get_mem_location<MaxExpTensor>, asc::te::location::ub> &&
+                      AscendC::Std::is_same_v<asc::te::get_mem_location<LimitTensor>, asc::te::location::ub>,
+                  "GroupMaxExp only supports UB tensors.");
+    static_assert(AscendC::Std::is_same_v<SrcLayoutPattern, asc::te::nd_ext_layout_ptn> &&
+                      AscendC::Std::is_same_v<MaxExpLayoutPattern, asc::te::nd_ext_layout_ptn> &&
+                      AscendC::Std::is_same_v<LimitLayoutPattern, asc::te::nd_ext_layout_ptn>,
+                  "GroupMaxExp only supports NDExt tensor layouts.");
+    if ASCEND_IS_AIC {
+        return;
+    }
+    MxMaxExpClampedVfParams params{reinterpret_cast<__ubuf__ bfloat16_t*>(srcTensor.data().get()),
+                                   reinterpret_cast<__ubuf__ uint16_t*>(maxExpTensor.data().get()),
+                                   reinterpret_cast<__ubuf__ bfloat16_t*>(limitTensor.data().get()),
+                                   alpha,
+                                   useExp,
+                                   DataLoopCount(totalCount),
+                                   totalCount};
+    asc_vf_call<MaxExpClampedVf>(params);
+}
+
+// ===========================================================================
 // GenScale – public high-level
 // ===========================================================================
 template <typename DataTypeOut_>
@@ -768,7 +1077,8 @@ __aicore__ inline void MxQuant<DataTypeOut_>::GenScale(const MaxExpTensor& maxEx
                            cfg.fpEmax,
                            cfg.addValueBits,
                            totalScale,
-                           cfg.invDstTypeMax};
+                           cfg.invDstTypeMax,
+                           cfg.roundSubnormalScaleUp};
     if (cfg.alg == MxScaleAlg::OCP) {
         if (cfg.zeroScaleOnZeroExp) {
             if (totalScale % VL_FOR_16F == 0) {
@@ -846,6 +1156,61 @@ __aicore__ inline void MxQuant<DataTypeOut_>::Quantize(const SrcTensor& srcTenso
             asc_vf_call<QuantizeFp4Vf<AscendC::RoundMode::CAST_ROUND>>(params);
         } else {
             asc_vf_call<QuantizeFp4Vf<AscendC::RoundMode::CAST_RINT>>(params);
+        }
+    }
+}
+
+// ===========================================================================
+// Quantize (clamped) – public high-level
+// ===========================================================================
+template <typename DataTypeOut_>
+template <typename SrcTensor, typename ReciprocalTensor, typename LimitTensor, typename YTensor>
+__aicore__ inline void MxQuant<DataTypeOut_>::Quantize(const SrcTensor& srcTensor,
+                                                       const ReciprocalTensor& reciprocalTensor,
+                                                       const LimitTensor& limitTensor, const YTensor& yTensor,
+                                                       uint32_t totalCount, MxQuantFp4RoundMode fp4RoundMode)
+{
+    using SrcElementType = asc::te::get_attribute_element_type<typename SrcTensor::element_type*>;
+    using ReciprocalElementType = asc::te::get_attribute_element_type<typename ReciprocalTensor::element_type*>;
+    using LimitElementType = asc::te::get_attribute_element_type<typename LimitTensor::element_type*>;
+    using YElementType = asc::te::get_attribute_element_type<typename YTensor::element_type*>;
+    using SrcLayoutPattern = asc::te::get_layout_pattern<typename SrcTensor::layout_type>;
+    using ReciprocalLayoutPattern = asc::te::get_layout_pattern<typename ReciprocalTensor::layout_type>;
+    using LimitLayoutPattern = asc::te::get_layout_pattern<typename LimitTensor::layout_type>;
+    using YLayoutPattern = asc::te::get_layout_pattern<typename YTensor::layout_type>;
+    static_assert(AscendC::Std::is_same_v<SrcElementType, bfloat16_t>, "Quantize src must be bfloat16_t.");
+    static_assert(AscendC::Std::is_same_v<ReciprocalElementType, uint16_t>, "Quantize reciprocal must be uint16_t.");
+    static_assert(AscendC::Std::is_same_v<LimitElementType, bfloat16_t>, "Quantize limit must be bfloat16_t.");
+    static_assert(AscendC::Std::is_same_v<YElementType, int8_t>, "Quantize y must be int8_t.");
+    static_assert(AscendC::Std::is_same_v<asc::te::get_mem_location<SrcTensor>, asc::te::location::ub> &&
+                      AscendC::Std::is_same_v<asc::te::get_mem_location<ReciprocalTensor>, asc::te::location::ub> &&
+                      AscendC::Std::is_same_v<asc::te::get_mem_location<LimitTensor>, asc::te::location::ub> &&
+                      AscendC::Std::is_same_v<asc::te::get_mem_location<YTensor>, asc::te::location::ub>,
+                  "Quantize only supports UB tensors.");
+    static_assert(AscendC::Std::is_same_v<SrcLayoutPattern, asc::te::nd_ext_layout_ptn> &&
+                      AscendC::Std::is_same_v<ReciprocalLayoutPattern, asc::te::nd_ext_layout_ptn> &&
+                      AscendC::Std::is_same_v<LimitLayoutPattern, asc::te::nd_ext_layout_ptn> &&
+                      AscendC::Std::is_same_v<YLayoutPattern, asc::te::nd_ext_layout_ptn>,
+                  "Quantize only supports NDExt tensor layouts.");
+    if ASCEND_IS_AIC {
+        return;
+    }
+    MxQuantizeClampedVfParams params{reinterpret_cast<__ubuf__ bfloat16_t*>(srcTensor.data().get()),
+                                     reinterpret_cast<__ubuf__ uint16_t*>(reciprocalTensor.data().get()),
+                                     reinterpret_cast<__ubuf__ bfloat16_t*>(limitTensor.data().get()),
+                                     reinterpret_cast<__ubuf__ int8_t*>(yTensor.data().get()),
+                                     DataLoopCount(totalCount),
+                                     totalCount};
+    if constexpr (AscendC::IsSameType<DataTypeOut, fp8_e4m3fn_t>::value ||
+                  AscendC::IsSameType<DataTypeOut, fp8_e5m2_t>::value) {
+        asc_vf_call<QuantizeFp8ClampedVf>(params);
+    } else {
+        if (fp4RoundMode == MxQuantFp4RoundMode::FLOOR) {
+            asc_vf_call<QuantizeFp4ClampedVf<AscendC::RoundMode::CAST_FLOOR>>(params);
+        } else if (fp4RoundMode == MxQuantFp4RoundMode::ROUND) {
+            asc_vf_call<QuantizeFp4ClampedVf<AscendC::RoundMode::CAST_ROUND>>(params);
+        } else {
+            asc_vf_call<QuantizeFp4ClampedVf<AscendC::RoundMode::CAST_RINT>>(params);
         }
     }
 }

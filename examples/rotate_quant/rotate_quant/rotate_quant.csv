@@ -1,0 +1,15 @@
+casename,M,N,K,B,dtype,groupListType,groupList,alpha
+rotate_shared_bf16,65,512,128,1,bfloat16,1,none,none
+rotate_per_segment_fp16,35,384,128,3,float16,0,none,none
+rotate_shared_k32_padding,35,96,32,1,bfloat16,1,none,1
+rotate_per_segment_k32_padding,35,96,32,3,float16,1,none,none
+rotate_shared_k64_clamp,67,256,64,1,float16,1,none,0.75
+rotate_shared_k256,65,512,256,1,bfloat16,1,none,none
+rotate_per_segment_k256,35,768,256,3,float16,0,none,none
+group_shared_count,133,512,128,1,bfloat16,1,33;0;47;53,0.75
+group_per_segment_cumsum,65,384,128,3,float16,0,17;17;40;65,0.5
+group_shared_partial_padding,67,96,32,1,bfloat16,1,13;0;29,none
+group_per_segment_partial_padding,67,96,32,3,float16,1,13;0;29,0.75
+group_per_segment_k256,33,512,256,2,bfloat16,1,7;0;26,1
+group_all_empty,7,64,32,1,bfloat16,0,0;0;0,none
+group_single_zero_alpha,17,128,64,2,float16,0,17,0

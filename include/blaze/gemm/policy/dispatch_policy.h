@@ -59,6 +59,14 @@ struct KernelQgmmMxMixFinalizeRouting {};        // MIX AIC+AIV schedule for Gro
 struct KernelGroupedMmadNoQuant {};              // Grouped multi-block without quantization
 struct KernelMmadAPrefetchBAntiquant {};         // AIV weight dequantization and AIC matrix multiplication
 
+struct KernelRotateQuant {}; // Rotate quantization single-matmul with MXFP4/FP8 AIC+AIV
+
+template <class KernelSchedule_ = KernelRotateQuant>
+struct BlockRotateQuant {
+    using ScheduleType = KernelSchedule_;
+    static constexpr bool ENABLE_INPUT_DATA_LEN_CHECK = false;
+};
+
 enum class MatmulOutputMode : std::uint8_t { OVERWRITE = 0, INPLACE_ADD = 1 };
 enum class MatMulL0C2Out : std::uint8_t { ON_THE_FLY = 0, ND_FIXPIPE_1_1 = 1, ND_FIXPIPE_1_2 = 2 };
 

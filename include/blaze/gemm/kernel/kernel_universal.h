@@ -58,3 +58,4 @@
 #include "blaze/gemm/kernel/kernel_tqbmm.h"
 #include "blaze/gemm/kernel/kernel_wqmm_mix_antiquant.h"
 #include "blaze/gemm/kernel/kernel_wqmm_mix_pergroup.h"
+#include "blaze/gemm/kernel/kernel_rotate_quant.h"
