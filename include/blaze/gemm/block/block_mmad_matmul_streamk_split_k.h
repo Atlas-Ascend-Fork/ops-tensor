@@ -18,6 +18,7 @@
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
+#include "blaze/gemm/tile/tile_trait.h"
 #include "blaze/gemm/block/block_mmad_decl.h"
 #include "tensor_api/tensor.h"
 
@@ -242,7 +243,7 @@ private:
         uint64_t curN = asc::te::get<MNK_N>(l1Shape);
         uint64_t curKL1 = asc::te::get<MNK_K>(l1Shape);
 
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
 
         auto layoutAL1 = MakeLayoutAL1{}(curM, curKL1);
         auto tensorAL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Buffer_[l1BufId]),

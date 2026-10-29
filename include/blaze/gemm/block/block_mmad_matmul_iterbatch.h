@@ -27,6 +27,7 @@
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
+#include "blaze/gemm/tile/tile_trait.h"
 #include "blaze/gemm/block/block_mmad_decl.h"
 #include "tensor_api/tensor.h"
 
@@ -240,7 +241,7 @@ private:
                                         const BufferSlot& biasL1Slot, const TensorA& gmA, const TensorB& gmB,
                                         const TensorBias& gmBias, uint64_t iterBatchL1)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         {
             auto lock = aL1Slot.LockMte2();
             asc::te::copy(copyGM2L1, MakeL1TensorA(aL1Slot.Addr(), iterBatchL1), gmA);
