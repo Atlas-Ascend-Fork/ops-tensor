@@ -281,6 +281,26 @@ private:
         return offset;
     }
 
+    template <typename TensorAL0, typename TensorBL0, typename TensorASlice, typename TensorBSlice,
+              typename TensorBiasL0>
+    __aicore__ inline void CopyL1ToL0(const TensorAL0& tensorAL0, const TensorBL0& tensorBL0,
+                                      const TensorASlice& aSlice, const TensorBSlice& bSlice,
+                                      const TensorBiasL0& tensorBiasL0, bool needBias)
+    {
+        uint64_t bank = cvLoopIdx_ & 1U;
+        uint64_t l0Buffer = l0LoopIdx_ & 1U;
+        auto l0Lock = l0Slots_[l0Buffer].LockMte1();
+        asc::te::copy(asc::te::make_copy(asc::te::copy_l1_to_l0a{}), tensorAL0, aSlice);
+        asc::te::copy(asc::te::make_copy(asc::te::copy_l1_to_l0b{}), tensorBL0, bSlice);
+        if (needBias) {
+            auto tensorBiasL1 = asc::te::make_tensor(
+                asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(biasL1Slots_[bank].Addr()),
+                asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, nL1Size_));
+            auto btLock = btSlots_[l0Buffer].LockMte1();
+            asc::te::copy(asc::te::make_copy(asc::te::copy_l1_to_biastable{}), tensorBiasL0, tensorBiasL1);
+        }
+    }
+
     template <bool AL1AlreadyLocked, typename TensorAL1>
     __aicore__ inline void IterateMmad(const TensorAL1& tensorAL1, uint64_t kOffset, uint64_t kL1Size)
     {
@@ -315,23 +335,11 @@ private:
                 asc::te::make_mem_ptr<asc::te::location::bias, float>(btSlot.Addr()),
                 asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, CeilAlign(nL1Size_, BLOCK_CUBE)));
             bool needBias = hasBias_ && kOffset == 0 && kL0Idx == 0;
-            auto copyL1ToL0 = [&]() __aicore__ {
-                auto l0Lock = l0Slot.LockMte1();
-                asc::te::copy(asc::te::make_copy(asc::te::copy_l1_to_l0a{}), tensorAL0, aSlice);
-                asc::te::copy(asc::te::make_copy(asc::te::copy_l1_to_l0b{}), tensorBL0, bSlice);
-                if (needBias) {
-                    auto tensorBiasL1 = asc::te::make_tensor(
-                        asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(biasL1Slots_[bank].Addr()),
-                        asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, nL1Size_));
-                    auto btLock = btSlot.LockMte1();
-                    asc::te::copy(asc::te::make_copy(asc::te::copy_l1_to_biastable{}), tensorBiasL0, tensorBiasL1);
-                }
-            };
             if constexpr (AL1AlreadyLocked) {
-                copyL1ToL0();
+                CopyL1ToL0(tensorAL0, tensorBL0, aSlice, bSlice, tensorBiasL0, needBias);
             } else {
                 auto l1DataLock = aL1Slots_[bank].LockMte1();
-                copyL1ToL0();
+                CopyL1ToL0(tensorAL0, tensorBL0, aSlice, bSlice, tensorBiasL0, needBias);
             }
 
             uint8_t unitFlag = kOffset + kL0Offset + kL0Size == kSize_ ? FINAL_ACCUMULATION : NON_FINAL_ACCUMULATION;

@@ -713,13 +713,20 @@ private:
     static constexpr uint32_t N_RANGE_FIRST_TAIL = 1;  // N1: first tail blocks.
     static constexpr uint32_t N_RANGE_SECOND_TAIL = 2; // N2: second tail blocks after resplitting.
 
+    struct SharedWeightMemProvider {
+        BlockMmad& blockMmad;
+
+        __aicore__ inline auto operator()(uint32_t bufferId) const
+        {
+            return blockMmad.template GetShareMemPtr<asc::te::location::l1, AType>(bufferId);
+        }
+    };
+
     __aicore__ inline static void Execute(const Params& params)
     {
         BlockMmad blockMmad;
         blockMmad.Init(params.mmadParams);
-        auto getSharedWeightMem = [&blockMmad](uint32_t bufferId) __aicore__ {
-            return blockMmad.template GetShareMemPtr<asc::te::location::l1, AType>(bufferId);
-        };
+        SharedWeightMemProvider getSharedWeightMem{blockMmad};
         BlockScheduler scheduler(params.problemShape, params.schedulerParams);
         if ASCEND_IS_AIV {
             RunAiv(params, scheduler, getSharedWeightMem);
