@@ -95,7 +95,7 @@ __aicore__ inline void QBMMMxWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertoke
     kernel(params);
 }
 
-template <typename AType, typename BType, typename CType, typename BiasType>
+template <typename AType, typename BType, typename CType, typename BiasType, bool ScaleNz = false>
 __aicore__ inline void QBMMStreamKWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM, GM_ADDR scaleGM,
                                           GM_ADDR biasGM, GM_ADDR yGM, GM_ADDR workspaceGM,
                                           const QBMMStreamKTilingData& tilingData)
@@ -109,7 +109,9 @@ __aicore__ inline void QBMMStreamKWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pe
                                                           Blaze::Gemm::KernelQbmmMultiBlockStreamK>;
     using EpilogueDispatchPolicy = Blaze::Gemm::MatmulMultiBlockWithStreamK<>;
     using BlockScheduler = Blaze::Gemm::Block::BlockSchedulerMatmulStreamK<ProblemShape>;
-    using BlockMmad = Blaze::Gemm::Block::BlockMmad<DispatchPolicy, AType, LayoutA, BType, LayoutB, CType, LayoutC,
+    using ScaleLayout = AscendC::Std::conditional_t<ScaleNz, asc::te::nn_layout_ptn, asc::te::scaleb_nd_layout_ptn>;
+    using LayoutPair = AscendC::Std::tuple<LayoutB, ScaleLayout>;
+    using BlockMmad = Blaze::Gemm::Block::BlockMmad<DispatchPolicy, AType, LayoutA, BType, LayoutPair, CType, LayoutC,
                                                     BiasType, LayoutC>;
     using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueMatmulStreamK<float, CType, EpilogueDispatchPolicy>;
     using QBMMKernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
@@ -281,14 +283,14 @@ __global__ __aicore__ void qbmm_mx_kernel_entry(GM_ADDR x1GM, GM_ADDR x2GM, GM_A
                                                                    *tilingData);
 }
 
-template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS>
+template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS, bool ScaleNz = false>
 __global__ __aicore__ void qbmm_streamk_kernel_entry(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM,
                                                      GM_ADDR scaleGM, GM_ADDR biasGM, GM_ADDR yGM, GM_ADDR workspaceGM,
                                                      GM_ADDR tilingGM)
 {
     const auto* tilingData = reinterpret_cast<const QBMMUT::QBMMStreamKTilingData*>(tilingGM);
-    QBMMUT::QBMMStreamKWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS>(x1GM, x2GM, pertokenScaleGM, scaleGM, biasGM,
-                                                                        yGM, workspaceGM, *tilingData);
+    QBMMUT::QBMMStreamKWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, ScaleNz>(x1GM, x2GM, pertokenScaleGM, scaleGM,
+                                                                                 biasGM, yGM, workspaceGM, *tilingData);
 }
 
 template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS>

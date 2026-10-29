@@ -46,6 +46,7 @@ public:
     using ScaleType = MxScaleType<AType>;
     using LayoutA = typename BlockMmad::LayoutA;
     using LayoutB = typename BlockMmad::LayoutB;
+    using LayoutScaleB = typename BlockMmad::LayoutScaleB;
     using LayoutC = typename BlockMmad::LayoutC;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using BlockCoord = asc::te::coord<int64_t, int64_t, int64_t, int64_t>;
@@ -95,6 +96,7 @@ private:
     static constexpr bool IS_ATOMIC_ADD = BlockMmad::DispatchPolicy::IS_ATOMIC_ADD;
     static constexpr bool IS_HIF4 = IsHif4<AType>();
     static constexpr int64_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
+    static constexpr int64_t SCALE_N_ALIGN = IsScaleNz<LayoutScaleB>::value ? MATMUL_MNK_ALIGN : 1;
 
     using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE>>;
     using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE>>;
@@ -102,9 +104,7 @@ private:
     using MakeLayoutScaleA = AscendC::Std::conditional_t<
         TRANS_A, asc::te::frame_layout_format<asc::te::scalea_dn_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>,
         asc::te::frame_layout_format<asc::te::scalea_nd_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>>;
-    using MakeLayoutScaleB = AscendC::Std::conditional_t<
-        TRANS_B, asc::te::frame_layout_format<asc::te::scaleb_dn_layout_ptn, AscendC::Std::Int<GetScaleC0<BType>()>>,
-        asc::te::frame_layout_format<asc::te::scaleb_nd_layout_ptn, AscendC::Std::Int<GetScaleC0<BType>()>>>;
+    using MakeLayoutScaleB = asc::te::frame_layout_format<LayoutScaleB, AscendC::Std::Int<GetScaleC0<BType>()>>;
 
     __aicore__ inline void Run(const Params& params);
     __aicore__ inline void Process(const Params& params, BlockScheduler& bs);
@@ -241,7 +241,7 @@ __aicore__ inline void GemmUniversal<QBMM_MX_WITHOUT_BATCH_KERNEL_TEM_PARAMS>::P
     int64_t nPos = 0L;
     while (bs.GetTileIdx(blockCoord)) {
         BlockShape singleShape = bs.template GetBlockShape<QuantMode::MX_PERGROUP_MODE, QuantMode::MX_PERGROUP_MODE,
-                                                           WEIGHT_NZ>(blockCoord);
+                                                           WEIGHT_NZ, SCALE_N_ALIGN>(blockCoord);
         const auto baseM = asc::te::get<IDX_M_TILEIDX>(singleShape);
         const auto baseN = asc::te::get<IDX_N_TILEIDX>(singleShape);
         if (baseM <= 0 || baseN <= 0) {

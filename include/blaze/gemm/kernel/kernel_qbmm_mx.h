@@ -50,6 +50,7 @@ public:
     using BiasType = typename BlockMmad::BiasType;
     using LayoutA = typename BlockMmad::LayoutA;
     using LayoutB = typename BlockMmad::LayoutB;
+    using LayoutScaleB = typename BlockMmad::LayoutScaleB;
     using LayoutC = typename BlockMmad::LayoutC;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using BlockCoord = asc::te::coord<int64_t, int64_t, int64_t, int64_t>;
@@ -113,6 +114,8 @@ private:
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool IS_ATOMIC_ADD = BlockMmad::DispatchPolicy::IS_ATOMIC_ADD;
     static constexpr int64_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
+    // ScaleNZ pads N to the cube's N0; legacy ND scales have no N padding.
+    static constexpr int64_t SCALE_N_ALIGN = IsScaleNz<LayoutScaleB>::value ? MATMUL_MNK_ALIGN : 1;
 
     using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE>>;
     using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE>>;
@@ -120,9 +123,7 @@ private:
     using MakeLayoutScaleA = AscendC::Std::conditional_t<
         TRANS_A, asc::te::frame_layout_format<asc::te::scalea_dn_layout_ptn, AscendC::Std::Int<SCALE_C0>>,
         asc::te::frame_layout_format<asc::te::scalea_nd_layout_ptn, AscendC::Std::Int<SCALE_C0>>>;
-    using MakeLayoutScaleB = AscendC::Std::conditional_t<
-        TRANS_B, asc::te::frame_layout_format<asc::te::scaleb_dn_layout_ptn, AscendC::Std::Int<SCALE_C0>>,
-        asc::te::frame_layout_format<asc::te::scaleb_nd_layout_ptn, AscendC::Std::Int<SCALE_C0>>>;
+    using MakeLayoutScaleB = asc::te::frame_layout_format<LayoutScaleB, AscendC::Std::Int<SCALE_C0>>;
 
     __aicore__ inline void ResetGmAddr(const Params& params);
     __aicore__ inline void ProcessSingleBatch(const Params& params, BlockScheduler& bs, uint64_t restBatch,
@@ -274,7 +275,7 @@ __aicore__ inline void GemmUniversal<QBMM_MX_KERNEL_TEM_PARAMS>::ProcessWithBatc
     biasBatchStride_ = isBiasThreeDim_ ? n : 0;
     const uint64_t scaleKLen = Blaze::Gemm::CeilDiv(k, static_cast<int64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
     scaleABatchStride_ = static_cast<uint64_t>(m) * scaleKLen;
-    scaleBBatchStride_ = static_cast<uint64_t>(n) * scaleKLen;
+    scaleBBatchStride_ = static_cast<uint64_t>(CeilDiv(n, SCALE_N_ALIGN) * SCALE_N_ALIGN) * scaleKLen;
 
     const uint64_t singleBatchBlockCnt = bs.GetTotalCnt();
     const uint64_t batchCount = asc::te::get<MNK_B>(params.problemShape);
@@ -423,7 +424,7 @@ __aicore__ inline bool GemmUniversal<QBMM_MX_KERNEL_TEM_PARAMS>::ProcessTiles(
     int64_t nPos = 0L;
     while (bs.GetTileIdx(blockCoord)) {
         BlockShape singleShape = bs.template GetBlockShape<QuantMode::MX_PERGROUP_MODE, QuantMode::MX_PERGROUP_MODE,
-                                                           WEIGHT_NZ>(blockCoord);
+                                                           WEIGHT_NZ, SCALE_N_ALIGN>(blockCoord);
         const auto baseM = asc::te::get<IDX_M_TILEIDX>(singleShape);
         const auto baseN = asc::te::get<IDX_N_TILEIDX>(singleShape);
         if (baseM <= 0 || baseN <= 0) {

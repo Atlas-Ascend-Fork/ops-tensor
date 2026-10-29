@@ -88,6 +88,7 @@ private:
     using ScaleType = MxScaleType<AType>;
     using LayoutA = typename BlockMmadOp::LayoutA;
     using LayoutB = typename BlockMmadOp::LayoutB;
+    using LayoutScaleB = typename BlockMmadOp::LayoutScaleB;
     using LayoutC = typename BlockMmadOp::LayoutC;
 
     static_assert((IsFp8<AType>() && IsFp8<BType>()) || (IsFp4<AType>() && IsFp4<BType>()) ||
@@ -120,9 +121,7 @@ private:
     using MakeLayoutScaleA = AscendC::Std::conditional_t<
         TRANS_A, asc::te::frame_layout_format<asc::te::scalea_dn_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>,
         asc::te::frame_layout_format<asc::te::scalea_nd_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>>;
-    using MakeLayoutScaleB = AscendC::Std::conditional_t<
-        TRANS_B, asc::te::frame_layout_format<asc::te::scaleb_dn_layout_ptn, AscendC::Std::Int<GetScaleC0<BType>()>>,
-        asc::te::frame_layout_format<asc::te::scaleb_nd_layout_ptn, AscendC::Std::Int<GetScaleC0<BType>()>>>;
+    using MakeLayoutScaleB = asc::te::frame_layout_format<LayoutScaleB, AscendC::Std::Int<GetScaleC0<BType>()>>;
 
     __aicore__ inline void Init(Params const& params)
     {

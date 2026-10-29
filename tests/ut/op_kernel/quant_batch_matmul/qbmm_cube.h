@@ -53,12 +53,13 @@ struct QBMMCubeTypes {
 };
 
 template <typename AType, typename BType, typename CType, typename BiasType,
-          uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE, typename X2ScaleType = uint64_t>
+          uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE, typename X2ScaleType = uint64_t,
+          typename LayoutB = asc::te::nd_ext_layout_ptn>
 __aicore__ inline void QBMMCubeWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM, GM_ADDR scaleGM,
                                        GM_ADDR biasGM, GM_ADDR yGM, const QBMMV3TilingData& tilingData)
 {
-    using Types = QBMMCubeTypes<AType, BType, X2ScaleType, CType, BiasType, asc::te::nd_ext_layout_ptn,
-                                asc::te::nd_ext_layout_ptn, asc::te::nd_ext_layout_ptn, FullLoadMode>;
+    using Types = QBMMCubeTypes<AType, BType, X2ScaleType, CType, BiasType, asc::te::nd_ext_layout_ptn, LayoutB,
+                                asc::te::nd_ext_layout_ptn, FullLoadMode>;
     using QBMMKernel = typename Types::Kernel;
     using Params = typename QBMMKernel::Params;
 
@@ -163,14 +164,15 @@ __global__ __aicore__ void qbmm_pertensor_streamk_kernel_entry(GM_ADDR x1GM, GM_
         x1GM, x2GM, perTokenScaleGM, scaleGM, biasGM, yGM, workspaceGM, *tilingData);
 }
 
-template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS, class SCALE_TYPE = uint64_t>
+template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS, class SCALE_TYPE = uint64_t,
+          class LayoutB = asc::te::nd_ext_layout_ptn>
 __global__ __aicore__ void qbmm_cube_a_full_load_kernel_entry(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM,
                                                               GM_ADDR scaleGM, GM_ADDR biasGM, GM_ADDR yGM,
                                                               GM_ADDR tilingGM)
 {
     const auto* tilingData = reinterpret_cast<const QBMMV3TilingData*>(tilingGM);
-    QBMMUT::QBMMCubeWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, Blaze::Gemm::A_FULL_LOAD_MODE, SCALE_TYPE>(
-        x1GM, x2GM, pertokenScaleGM, scaleGM, biasGM, yGM, *tilingData);
+    QBMMUT::QBMMCubeWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, Blaze::Gemm::A_FULL_LOAD_MODE, SCALE_TYPE,
+                            LayoutB>(x1GM, x2GM, pertokenScaleGM, scaleGM, biasGM, yGM, *tilingData);
 }
 
 template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS, class SCALE_TYPE = uint64_t>

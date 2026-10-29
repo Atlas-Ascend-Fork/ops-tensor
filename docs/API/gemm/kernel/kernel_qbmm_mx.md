@@ -21,6 +21,15 @@ ND/DN 白名单保留 L0C 搬运路径支持的 C Tensor 布局；自定义 Bloc
 模板校验通过不等同于任意后处理组件均支持 DN 输出。
 
 ### Scale 因子要求
+
+ScaleB 布局来自 `BlockMmad::LayoutScaleB`。原有非 tuple 的 B 布局调用仍使用 ND scale；
+ScaleNZ 调用使用独立 `nn_layout_ptn`。具体 shape 和转换约定见
+[MX BlockMmad 的 ScaleB 独立布局](../block/block_mmad_qbmm_mx.md#scaleb-独立布局)。
+
+ScaleNZ 的 batch stride 包含 N 轴补齐，N 对齐使用 `SCALE_N_ALIGN`；ND scale 的 N 对齐为 1。
+
+ScaleNZ 的动态 N 尾块起点按 `SCALE_N_ALIGN` 对齐，避免从 NZ 的 N0 分组中间搬运。
+
 必须提供两个 Scale 因子：
 - `scaleAGmAddr`：A 矩阵的 缩放因子（`fp8_e8m0_t` 类型）
 - `scaleBGmAddr`：B 矩阵的 缩放因子（`fp8_e8m0_t` 类型）

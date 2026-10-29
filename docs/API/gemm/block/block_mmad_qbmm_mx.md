@@ -9,6 +9,19 @@ L0C→UB DualDst 路径。SwiGLU 路径可在一次 MMAD 中拼接 gate/linear �
 
 **继承自**：[Block Mmad 基础框架](./block_mmad.md)
 
+### ScaleB 独立布局
+
+`LayoutB` 参数保留原有矩阵布局写法，也接受 `tuple<WeightLayout, ScaleLayout>`。
+前者沿用由 B 转置决定的 ND scale 布局；后者分别指定 B 与 ScaleB 布局。
+ScaleNZ 使用 `nn_layout_ptn`，不随 B 转置改变。模板形参和调用接口不变。
+
+E8M0 ScaleNZ 的逻辑 shape 为 `[batch_B..., ceil(K/64), N, 2]`，storage shape 为
+`[batch_B..., ceil(N/16), ceil(K/64), 16, 2]`。应在 format cast 前交换真实轴和数据；
+不能以 reshape 代替换轴，也不能在打包后转置 ScaleNZ。
+
+此布局约定独立于矩阵类型；QBMM 的接口集成仍遵守 WeightNZ 的既有类型和转置限制。
+shape 校验不能恢复历史转置操作，`N == ceil(K/64)` 时也无法区分同形状的错误轴含义。
+
 ## 模板参数
 
 ### 模板参数列表
@@ -18,7 +31,7 @@ template <
     typename AType,             // A 矩阵数据类型（量化类型）
     typename LayoutA,           // A 矩阵布局
     typename BType,             // B 矩阵数据类型（量化类型）
-    typename LayoutB,           // B 矩阵布局
+    typename LayoutB,           // B 布局或 tuple<B 布局, ScaleB 布局>
     typename CType,             // C 矩阵计算类型（输出类型）
     typename LayoutC,           // C 矩阵布局
     typename BiasType,          // Bias 数据类型
@@ -44,7 +57,7 @@ class BlockMmad;
 | 类型 | 说明 |
 |------|------|
 | MakeLayoutScaleA | ScaleA Layout 构建器（根据 TRANS_A 选择 ScaleADN/ScaleAND） |
-| MakeLayoutScaleB | ScaleB Layout 构建器（根据 TRANS_B 选择 ScaleBDN/ScaleBND） |
+| MakeLayoutScaleB | ScaleB Layout 构建器（独立布局优先；原调用仍根据 TRANS_B 选择 ND 布局） |
 
 ## 特殊数据结构
 

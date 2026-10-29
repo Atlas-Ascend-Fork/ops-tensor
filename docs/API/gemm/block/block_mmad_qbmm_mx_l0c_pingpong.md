@@ -17,6 +17,19 @@
 - N 方向拆分由模板内部完成，调用侧传入的 `singleShape` 需要与 GM Tensor Slice 保持一致。
 - SplitK 场景下，仅最后一个 SplitK 分片写回输出。
 
+### ScaleB 独立布局
+
+`LayoutB` 参数保留原有矩阵布局写法，也接受 `tuple<WeightLayout, ScaleLayout>`。
+前者沿用由 B 转置决定的 ND scale 布局；后者分别指定 B 与 ScaleB 布局。
+ScaleNZ 使用 `nn_layout_ptn`，不随 B 转置改变。模板形参和调用接口不变。
+
+E8M0 ScaleNZ 的逻辑 shape 为 `[batch_B..., ceil(K/64), N, 2]`，storage shape 为
+`[batch_B..., ceil(N/16), ceil(K/64), 16, 2]`。应在 format cast 前交换真实轴和数据；
+不能以 reshape 代替换轴，也不能在打包后转置 ScaleNZ。
+
+此布局约定独立于矩阵类型；QBMM 的接口集成仍遵守 WeightNZ 的既有类型和转置限制。
+shape 校验不能恢复历史转置操作，`N == ceil(K/64)` 时也无法区分同形状的错误轴含义。
+
 ## 外部接口
 ### Params
 ```cpp

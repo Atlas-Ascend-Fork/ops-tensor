@@ -692,10 +692,9 @@ void RunMxL0CPingpongSmoke(const L0CPingpongCaseCfg& cfg)
     ASSERT_TRUE(ok) << "QBMM MX L0C ping-pong kernel execution failed";
 }
 
+template <typename AType = fp8_e4m3fn_t, typename BType = fp8_e5m2_t, bool ScaleNz = false>
 void RunMxStreamKSmoke(const StreamKCaseCfg& cfg)
 {
-    using AType = fp8_e4m3fn_t;
-    using BType = fp8_e5m2_t;
     using CType = half;
     using BiasType = float;
 
@@ -703,7 +702,8 @@ void RunMxStreamKSmoke(const StreamKCaseCfg& cfg)
     const size_t x1Size = GetMxInputSize<AType>(cfg.M * cfg.K);
     const size_t x2Size = GetMxInputSize<BType>(cfg.K * cfg.N);
     const size_t pertokenScaleSize = static_cast<size_t>(cfg.M) * scaleKLen * sizeof(AscendC::fp8_e8m0_t);
-    const size_t scaleSize = scaleKLen * static_cast<size_t>(cfg.N) * sizeof(AscendC::fp8_e8m0_t);
+    const size_t scaleN = ScaleNz ? Blaze::Gemm::CeilAlign(cfg.N, int64_t{Blaze::Gemm::MATMUL_MNK_ALIGN}) : cfg.N;
+    const size_t scaleSize = scaleKLen * scaleN * sizeof(AscendC::fp8_e8m0_t);
     const size_t biasSize = static_cast<size_t>(cfg.N) * sizeof(BiasType);
     const size_t ySize = static_cast<size_t>(cfg.M) * cfg.N * sizeof(CType);
     const size_t workspaceSize = cfg.blockNum * STREAMK_WORKSPACE_TILE_SIZE + STREAMK_WORKSPACE_OVERHEAD;
@@ -740,7 +740,7 @@ void RunMxStreamKSmoke(const StreamKCaseCfg& cfg)
 
     AscendC::SetKernelMode(KernelMode::MIX_MODE);
 
-    auto kernelFunc = qbmm_streamk_kernel_entry<AType, BType, CType, BiasType>;
+    auto kernelFunc = qbmm_streamk_kernel_entry<AType, BType, CType, BiasType, ScaleNz>;
     const bool ok = KERNEL_RUN_KF(kernelFunc, cfg.blockNum, x1GM.Get(), x2GM.Get(), pertokenScaleGM.Get(),
                                   scaleGM.Get(), biasGM.Get(), yGM.Get(), workspaceGM.Get(), tilingGM.Get());
 
@@ -2363,3 +2363,91 @@ TEST_F(QBMMPertensorStreamKTest, Int8FloatScalePostBiasModesPureSk)
 }
 
 TEST_F(QBMMPertensorStreamKTest, BatchedInputReturnsBeforeScheduling) { RunBatchInputRejectedSmoke(); }
+
+// Weight transpose and ScaleNZ storage are independent template parameters.
+// An ND [N,K] weight uses DN, while ScaleB remains packed [N1,Kg,16,2].
+template <class Policy, class WeightLayout>
+void CheckMxIndependentScaleNzAssembly()
+{
+    using PackedScale = asc::te::nn_layout_ptn;
+    using LayoutPair = AscendC::Std::tuple<WeightLayout, PackedScale>;
+    using Mmad = Blaze::Gemm::Block::BlockMmad<Policy, fp8_e4m3fn_t, ND, fp8_e4m3fn_t, LayoutPair, bfloat16_t, ND,
+                                               float, ND>;
+    using Scheduler = Blaze::Gemm::Block::BlockSchedulerQuantBatchMatmulV3<ProblemShape, Policy::FULL_LOAD_MODE, ND,
+                                                                           WeightLayout, fp8_e4m3fn_t>;
+    using Kernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, Mmad, Blaze::Epilogue::Block::BlockEpilogueEmpty,
+                                                      Scheduler>;
+    static_assert(std::is_same_v<typename Mmad::LayoutB, WeightLayout>);
+    static_assert(std::is_same_v<typename Mmad::LayoutScaleB, PackedScale>);
+    static_assert(HAS_KERNEL_CALL<Kernel>);
+    EXPECT_GT(sizeof(Kernel), 0U);
+}
+
+TEST(QBMMTemplateContractTest, NdTransposedWeightPreservesIndependentScaleNzLayout)
+{
+    using Regular = Blaze::Gemm::MatmulWithScaleMx<Blaze::Gemm::NONE_FULL_LOAD_MODE, false,
+                                                   Blaze::Gemm::KernelMmadWithScaleMx>;
+    using Pingpong = Blaze::Gemm::MatmulWithScaleMxL0CPingpong<Blaze::Gemm::NONE_FULL_LOAD_MODE, false,
+                                                               Blaze::Gemm::KernelMmadWithScaleMx>;
+    using FullLoad = Blaze::Gemm::MatmulWithScaleMxL0CPingpong<Blaze::Gemm::A_FULL_LOAD_MODE, false,
+                                                               Blaze::Gemm::KernelMmadWithScaleMxWithoutBatch>;
+    CheckMxIndependentScaleNzAssembly<Regular, DN>();
+    CheckMxIndependentScaleNzAssembly<Pingpong, DN>();
+    CheckMxIndependentScaleNzAssembly<FullLoad, DN>();
+    CheckMxIndependentScaleNzAssembly<Pingpong, NZ>();
+}
+
+TEST(QBMMTemplateContractTest, StreamKPreservesIndependentScaleNzLayout)
+{
+    using Policy = Blaze::Gemm::MatmulWithScaleMx<Blaze::Gemm::NONE_FULL_LOAD_MODE, false,
+                                                  Blaze::Gemm::KernelQbmmMultiBlockStreamK>;
+    using LayoutPair = AscendC::Std::tuple<ZN, asc::te::nn_layout_ptn>;
+    using Mmad = Blaze::Gemm::Block::BlockMmad<Policy, fp8_e4m3fn_t, ND, fp8_e4m3fn_t, LayoutPair, float, ND, float,
+                                               ND>;
+    using Scheduler = Blaze::Gemm::Block::BlockSchedulerMatmulStreamK<ProblemShape>;
+    using Epilogue = Blaze::Epilogue::Block::BlockEpilogueMatmulStreamK<float, float,
+                                                                        Blaze::Gemm::MatmulMultiBlockWithStreamK<>>;
+    using Kernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, Mmad, Epilogue, Scheduler>;
+    static_assert(std::is_same_v<typename Mmad::LayoutB, ZN>);
+    static_assert(std::is_same_v<typename Mmad::LayoutScaleB, asc::te::nn_layout_ptn>);
+    static_assert(HAS_KERNEL_CALL<Kernel>);
+    EXPECT_GT(sizeof(Kernel), 0U);
+}
+
+TEST_F(QBMMV3Test, ScaleNzStreamKFp8WithKNAndMnTileTails)
+{
+    RunMxStreamKSmoke<fp8_e4m3fn_t, fp8_e4m3fn_t, true>({34, 33, 194, 4});
+    RunMxStreamKSmoke<fp8_e4m3fn_t, fp8_e4m3fn_t, true>({66, 65, 256, 4});
+}
+
+TEST_F(QBMMV3Test, ScaleNzStreamKFp4WithKNAndMnTileTails)
+{
+    RunMxStreamKSmoke<fp4x2_e2m1_t, fp4x2_e2m1_t, true>({34, 33, 194, 4});
+    RunMxStreamKSmoke<fp4x2_e2m1_t, fp4x2_e2m1_t, true>({66, 65, 256, 4});
+}
+
+// The NN Ascend950 INT8_FLOW/BF16_FLOW CSV entries both use M/K/N=4/8192/128,
+// transposeB=true, INT8 inputs, uint64 scale and no bias. Exercise the same
+// problem through Tensor's production A-full-load assembly for both outputs.
+TEST_F(QBMMV3Test, NnPipelineInt8FlowTransposedWeight)
+{
+    CubeCaseCfg cfg{4, 128, 8192, 8, QM_DEFAULT, QM_PERTENSOR, false, GE_DT_INT32, sizeof(int32_t), sizeof(half), ""};
+    cfg.kL1 = 512;
+    cfg.baseM = 16;
+    cfg.baseN = 16;
+    cfg.baseK = 128;
+    auto entry = qbmm_cube_a_full_load_kernel_entry<int8_t, int8_t, half, int32_t, uint64_t, DN>;
+    RunCubeSmoke(entry, cfg);
+}
+
+TEST_F(QBMMV3Test, NnPipelineBf16FlowTransposedWeight)
+{
+    CubeCaseCfg cfg{4, 128, 8192, 8, QM_DEFAULT, QM_PERTENSOR, false, GE_DT_INT32, sizeof(int32_t), sizeof(bfloat16_t),
+                    ""};
+    cfg.kL1 = 512;
+    cfg.baseM = 16;
+    cfg.baseN = 16;
+    cfg.baseK = 128;
+    auto entry = qbmm_cube_a_full_load_kernel_entry<int8_t, int8_t, bfloat16_t, int32_t, uint64_t, DN>;
+    RunCubeSmoke(entry, cfg);
+}
