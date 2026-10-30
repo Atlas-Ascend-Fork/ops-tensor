@@ -292,7 +292,7 @@ def main():
     parser.add_argument("--group-list-type", type=int, required=True)
     parser.add_argument("--single-x", type=int, choices=(0, 1), required=True)
     parser.add_argument("--single-weight", type=int, choices=(0, 1), required=True)
-    parser.add_argument("--single-y", type=int, choices=(0, 1), required=True)
+    parser.add_argument("--single-y", type=int, choices=(0, 1))
     parser.add_argument("--weight-format", choices=("nd", "nz"), required=True)
     parser.add_argument("--dtype", choices=tuple(DTYPE_MAP), required=True)
     parser.add_argument("--group-num", type=int, required=True)

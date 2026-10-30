@@ -7,4 +7,4 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ============================================================================
 
-ops_example_add_executable(quant_grouped_matmul_mx quant_grouped_matmul_mx.cpp)
+ops_example_add_executable(quant_grouped_matmul_mx VER ascend950 quant_grouped_matmul_mx.cpp)

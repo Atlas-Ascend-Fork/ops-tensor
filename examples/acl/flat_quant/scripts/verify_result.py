@@ -149,8 +149,8 @@ def main():
     parser.add_argument("--k", type=int, required=True)
     parser.add_argument("--m", type=int, required=True)
     parser.add_argument("--n", type=int, required=True)
-    parser.add_argument("--iter-batch", type=int, required=True)
-    parser.add_argument("--has-p2", type=lambda v: v.lower() == "true", required=True)
+    parser.add_argument("--iter-batch", type=int)
+    parser.add_argument("--has-p2", type=lambda v: v.lower() == "true")
     args = parser.parse_args()
     return 0 if verify(args.golden_dir, args.actual_dir, args.k, args.m, args.n) else 1
 

@@ -488,8 +488,8 @@ def main():
         all_rows = list(csv.DictReader(fh))
 
     if not all_rows:
-        print("No test cases found in CSV file.")
-        sys.exit(0)
+        print("No test cases found in CSV file.", file=sys.stderr)
+        sys.exit(1)
 
     # -- Apply --ti filter ---------------------------------------------------
     if ti_indices is not None:
@@ -499,10 +499,11 @@ def main():
 
     if not indexed_rows:
         print(
-            f"No test cases match --ti={args.ti} "
-            f"(CSV has {len(all_rows)} rows, indices 0-{len(all_rows) - 1})"
+            f"ERROR: No test cases match --ti={args.ti} "
+            f"(CSV has {len(all_rows)} rows, indices 0-{len(all_rows) - 1})",
+            file=sys.stderr,
         )
-        sys.exit(0)
+        sys.exit(1)
 
     total = len(indexed_rows)
     print(f"Found {len(all_rows)} test case(s) in CSV, running {total}")

@@ -7,4 +7,4 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ============================================================================
 
-ops_example_add_executable(quant_batch_matmul_pergroup_a8w4 quant_batch_matmul_pergroup_a8w4/quant_batch_matmul_pergroup_a8w4.cpp)
+ops_example_add_executable(quant_batch_matmul_pergroup_a8w4 VER ascend950 quant_batch_matmul_pergroup_a8w4/quant_batch_matmul_pergroup_a8w4.cpp)

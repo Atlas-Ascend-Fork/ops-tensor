@@ -6,4 +6,4 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-ops_example_add_executable(grouped_matmul_mx_a8w4 grouped_matmul_mx_a8w4.cpp)
+ops_example_add_executable(grouped_matmul_mx_a8w4 VER ascend950 grouped_matmul_mx_a8w4.cpp)

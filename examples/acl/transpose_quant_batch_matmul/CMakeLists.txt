@@ -7,6 +7,6 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ============================================================================
 
-ops_example_add_executable(tqbmm_mx tqbmm_mx/tqbmm_mx.cpp)
-ops_example_add_executable(tqbmm_fixpipe_quant tqbmm_fixpipe_quant/tqbmm_fixpipe_quant.cpp)
-ops_example_add_executable(tqbmm_mix tqbmm_mix/tqbmm_mix.cpp)
+ops_example_add_executable(tqbmm_mx VER ascend950 tqbmm_mx/tqbmm_mx.cpp)
+ops_example_add_executable(tqbmm_fixpipe_quant VER ascend950 tqbmm_fixpipe_quant/tqbmm_fixpipe_quant.cpp)
+ops_example_add_executable(tqbmm_mix VER ascend950 tqbmm_mix/tqbmm_mix.cpp)

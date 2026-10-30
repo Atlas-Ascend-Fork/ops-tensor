@@ -154,6 +154,9 @@ C++（ACL 直调）样例位于 `acl/` 下；Python（torch 接口）样例位�
 
 # 运行算子下多个样例
 ./build.sh --examples --ops=mat_mul --target=mat_mul_basic,mat_mul_streamk
+
+# 指定芯片版本（默认 ascend950）
+./build.sh --examples --soc=ascend950 --ops=mat_mul
 ```
 
 ### 4.2 通过 common/run.sh 执行
@@ -161,13 +164,14 @@ C++（ACL 直调）样例位于 `acl/` 下；Python（torch 接口）样例位�
 `acl/common/run.sh` 是统一执行入口：
 
 ```bash
-bash examples/acl/common/run.sh --ops=<names> [--target=<names>] [--case=<path>] [--ti=<N|N-M>] [-j<N>|--jobs=<N>] [--skip-build] [--build-only]
+bash examples/acl/common/run.sh [--soc=<name>] --ops=<names> [--target=<names>] [--case=<path>] [--ti=<N|N-M>] [-j<N>|--jobs=<N>] [--skip-build] [--build-only]
 ```
 
 **参数说明**：
 
 | 参数                 | 说明                                                                                                              |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `--soc=<name>`     | 芯片版本，默认 `ascend950`；取值见 `examples/CMakeLists.txt` 的 `EXAMPLES_SOC_TABLE`，决定编译版本与可运行的样例集合 |
 | `--ops=<names>`    | 算子目录名，支持逗号分隔多个（如`mat_mul` 或 `mat_mul,grouped_matmul`）                                       |
 | `--target=<names>` | 样例名，支持逗号分隔多个（如`mat_mul_basic` 或 `mat_mul_basic,mat_mul_streamk`）。多值时 `--ops` 必须为单个 |
 | `--case=<path>`    | CSV 测试用例文件路径。仅支持`--ops` 和 `--target` 均为单个值时使用                                            |
@@ -299,7 +303,7 @@ mkdir -p examples/acl/new_op/scripts
 
 # 3. 创建算子级 CMakeLists.txt，注册样例
 cat > examples/acl/new_op/CMakeLists.txt << 'EOF'
-ops_example_add_executable(new_op_basic new_op_basic/new_op_basic.cpp)
+ops_example_add_executable(new_op_basic VER dav-3510 new_op_basic/new_op_basic.cpp)
 EOF
 
 # 4. 在 examples/CMakeLists.txt 中注册算子
@@ -327,7 +331,7 @@ EOF
 # 4. 创建 CSV 测试用例表 new_op_basic.csv
 
 # 5. 在算子级 CMakeLists.txt 中注册
-# 追加: ops_example_add_executable(new_op_basic new_op_basic/new_op_basic.cpp)
+# 追加: ops_example_add_executable(new_op_basic VER dav-3510 new_op_basic/new_op_basic.cpp)
 ```
 
 注册后即可通过以下方式运行：
@@ -339,3 +343,41 @@ EOF
 # 通过 common/run.sh
 bash examples/acl/common/run.sh --ops=new_op --target=new_op_basic
 ```
+
+### 5.3 样例版本注册
+
+每个样例在算子 `CMakeLists.txt` 中注册时显式声明支持的芯片版本；配置阶段按
+`ASCEND_SOC`（默认 `ascend950`）扫描，决定是否生成该 target：
+
+```cmake
+# 通用样例：任何芯片版本都会编译
+ops_example_add_executable(new_op_basic new_op_basic/new_op_basic.cpp)
+
+# 指定版本：仅当 ASCEND_SOC 命中时才生成 target
+ops_example_add_executable(new_op_basic VER ascend950 new_op_basic/new_op_basic.cpp)
+
+# 多版本：逗号分隔并加引号
+ops_example_add_executable(new_op_basic VER "ascend950,ascendXXX" new_op_basic/new_op_basic.cpp)
+```
+
+- `VER` 取值为 `EXAMPLES_SOC_TABLE` 中的 SoC 短名（`ascend950` 等），与
+  `run.sh` / `build.sh` 的 `--soc` 完全一致。
+- 短名到 `--npu-arch` 的映射只在 `examples/CMakeLists.txt` 的 `EXAMPLES_SOC_TABLE`
+  维护，新增芯片版本时追加一行即可：
+
+```cmake
+set(EXAMPLES_SOC_TABLE
+    "ascend950|dav-3510"
+    # "ascendXXX|dav-ZZZZ"
+)
+```
+
+- 配置完成后会输出扫描结果，并生成清单文件 `build/examples_manifest.txt`，格式为
+  `target|soc|status|source_dir`，供 `common/run.sh` 过滤与 CI 查询：
+
+```
+mat_mul_basic|ascend950|enabled|/path/to/examples/mat_mul
+```
+
+> 未命中当前版本的样例不会生成 target，`run.sh` 会依据清单把它们从本次构建/执行中剔除，
+> 并打印 `Skipped for soc=<soc>: ...` 提示。

@@ -1,1 +1,1 @@
-ops_example_add_executable(transpose_batch_mat_mul_basic transpose_batch_mat_mul_basic/transpose_batch_mat_mul_basic.cpp)
+ops_example_add_executable(transpose_batch_mat_mul_basic VER ascend950 transpose_batch_mat_mul_basic/transpose_batch_mat_mul_basic.cpp)

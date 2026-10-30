@@ -19,7 +19,7 @@
 #   --ops=OP_LIST       指定要编译的算子列表 (逗号分隔)
 #   --run               编译后执行测试
 #   --pkg               编译并打包成 .run 文件
-#   --soc=SOC           指定目标 SoC 型号 (当前仅支持: Ascend950, 支持小写输入)
+#   --soc=SOC           指定目标 SoC 型号（支持小写与逗号分隔多值）
 #   -j[N]               编译线程数，默认为 8，例如: -j16
 #   --test-timeout=N    测试超时时间（秒），默认为 300
 #   --force-submodule   强制更新 tensor_api submodule 至 superproject 记录的 pinned commit
@@ -113,6 +113,9 @@ get_soc_version() {
         "ascend950")
             echo "ascend950dt_9595"
             ;;
+        "ascend960"|"ascend960dt"|"ascend960_dt")
+            echo "ascend960dt_968b7"
+            ;;
         "ascend910b"|"ascend910_b")
             echo "ascend910b3"
             ;;
@@ -134,7 +137,6 @@ get_soc_version() {
             ;;
     esac
 }
-
 
 # 检查 ASCEND 环境变量
 check_ascend_env() {
@@ -215,6 +217,7 @@ Options:
   --run               Run tests after build
   --pkg               Build package (.run file)
   --soc=SOC           Target SoC model (default: Ascend950, case-insensitive)
+                      Also selects the chip version for --examples (run.sh --soc)
   -j[N]               Number of compile threads (default: 8), e.g., -j16
   --test-timeout=N    Test timeout in seconds (default: 300)
   --force-submodule   Force update tensor_api submodule to the pinned commit
@@ -603,10 +606,12 @@ build_kernel_ut() {
     cmake_args+=(-DASCEND_HOME_PATH="${ASCEND_HOME_PATH}")
     cmake_args+=(-DOPS_TENSOR_ROOT="${SCRIPT_DIR}")
 
+    # Kernel UT 目标 SoC：未指定 --soc 时仅构建/执行 Ascend950（保持既有默认行为）
+    local _ut_soc_list="ascend950"
     if [ "$SOC_EXPLICIT" = true ]; then
-        local _soc_lower=$(echo "${SOC_NAME}" | tr '[:upper:]' '[:lower:]')
-        cmake_args+=(-DKERNEL_UT_SOC="${_soc_lower}")
+        _ut_soc_list=$(echo "${SOC_NAME}" | tr '[:upper:]' '[:lower:]')
     fi
+    cmake_args+=(-DKERNEL_UT_SOC="${_ut_soc_list}")
 
     if [ "$BUILD_OPERATORS" != "all" ]; then
         cmake_args+=(-DOP_KERNEL_OPS="${BUILD_OPERATORS}")
@@ -616,9 +621,9 @@ build_kernel_ut() {
     fi
 
     if [ "$SOC_EXPLICIT" = true ]; then
-        log_info "Kernel UT SoC: ${_soc_lower}"
+        log_info "Kernel UT SoC: ${_ut_soc_list} (from --soc=${SOC_NAME})"
     else
-        log_info "Kernel UT SoC: all"
+        log_info "Kernel UT SoC: ${_ut_soc_list} (default)"
     fi
 
     cmake_args+=(-DCANN_3RD_LIB_PATH="${CANN_3RD_LIB_PATH}")
@@ -682,6 +687,12 @@ build_examples() {
     if [ -n "$EXAMPLE_TARGET" ]; then
         run_args+=("--target=${EXAMPLE_TARGET}")
     fi
+    # 芯片版本透传（默认 ascend950，由 --soc 指定）
+    local _ex_soc
+    _ex_soc=$(echo "${SOC_NAME}" | tr '[:upper:]' '[:lower:]')
+    run_args+=("--soc=${_ex_soc}")
+    log_info "Examples chip version: ${_ex_soc}"
+
     # -j 透传：仅显式指定时传给 run.sh（未指定时 run.sh 自适应，避免默认 8 限制大核机器）
     if [ "$THREAD_EXPLICIT" = true ]; then
         run_args+=("-j${THREAD_NUM}")
@@ -939,7 +950,7 @@ main() {
         if [ "$SOC_EXPLICIT" = true ]; then
             log_info "Kernel UT SoC: $(echo "${SOC_NAME}" | tr '[:upper:]' '[:lower:]')"
         else
-            log_info "Kernel UT SoC: all"
+            log_info "Kernel UT SoC: ascend950 (default)"
         fi
         if [ "$RUN_TESTS" = true ]; then
             log_success "Run Kernel UT tests: YES"

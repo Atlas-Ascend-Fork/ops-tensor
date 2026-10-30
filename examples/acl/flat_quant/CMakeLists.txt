@@ -1,1 +1,1 @@
-ops_example_add_executable(flat_quant flat_quant/flat_quant.cpp)
+ops_example_add_executable(flat_quant VER ascend950 flat_quant/flat_quant.cpp)

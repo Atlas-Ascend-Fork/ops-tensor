@@ -53,6 +53,7 @@ OPS_NAME=""
 TARGET=""
 CASE_FILE=""
 TI_ARG=""
+SOC="ascend950"
 SKIP_BUILD=false
 BUILD_ONLY=false
 FORCE_SUBMODULE=false
@@ -66,6 +67,8 @@ Usage: bash examples/acl/common/run.sh [OPTIONS]
 Compile and run ops-tensor example examples.
 
 Options:
+  --soc=<name>        Chip version to build/run (default: ascend950).
+                      Registered in examples/CMakeLists.txt EXAMPLES_SOC_TABLE.
   --ops=<names>       Operator directory name(s), comma-separated.
                       Multiple: --ops=mat_mul,grouped_matmul (runs all examples under each).
                       Single or omitted: --target may be specified.
@@ -140,6 +143,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ti=*)
             TI_ARG="${1#*=}"
+            shift
+            ;;
+        --soc=*)
+            SOC="${1#*=}"
             shift
             ;;
         --skip-build)
@@ -357,6 +364,45 @@ _discover_op_examples() {
     done
 }
 
+# 依据 CMake 配置期生成的样例清单（build/examples_manifest.txt）过滤样例。
+# 清单格式: target|soc|status|source_dir；status=enabled 表示当前版本可编译/运行。
+# 清单不存在时（如 --skip-build 且尚未配置过）原样返回。
+filter_examples_by_soc() {
+    local examples="$1"
+    local manifest="${BUILD_DIR}/examples_manifest.txt"
+
+    if [[ ! -f "${manifest}" ]]; then
+        printf '%s\n' "$examples"
+        return 0
+    fi
+
+    local -A _enabled=()
+    local _t _v _st _d
+    while IFS='|' read -r _t _v _st _d; do
+        [[ -z "$_t" || "$_t" == \#* ]] && continue
+        [[ "$_st" == "enabled" ]] && _enabled["$_t"]=1
+    done < "${manifest}"
+
+    local -a _kept=() _dropped=()
+    local _line _target
+    while IFS= read -r _line; do
+        [[ -z "$_line" ]] && continue
+        _target="${_line#*/}"
+        if [[ -n "${_enabled[$_target]:-}" ]]; then
+            _kept+=("$_line")
+        else
+            _dropped+=("$_target")
+        fi
+    done < <(printf '%s\n' "$examples")
+
+    if [[ ${#_dropped[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}[WARNING]${NC} Skipped for soc=${SOC}: ${_dropped[*]}" >&2
+    fi
+    if [[ ${#_kept[@]} -gt 0 ]]; then
+        printf '%s\n' "${_kept[@]}"
+    fi
+}
+
 # ── Build ────────────────────────────────────────────────────────────────────
 source "${REPO_ROOT}/scripts/submodule_utils.sh"
 
@@ -366,9 +412,10 @@ configure_build() {
         return 1
     fi
 
-    log_info "Configuring CMake (build dir: ${BUILD_DIR})..."
+    log_info "Configuring CMake (build dir: ${BUILD_DIR}, soc: ${SOC})..."
     cmake -B "${BUILD_DIR}" \
         -DASCEND_HOME_PATH="${ASCEND_HOME_PATH}" \
+        -DASCEND_SOC="${SOC}" \
         "${EXAMPLES_DIR}"
 }
 
@@ -742,11 +789,15 @@ main() {
     # ── Configure once for all examples ─────────────────────────────────
     if [[ "$SKIP_BUILD" == true ]]; then
         log_info "Skipping build (--skip-build)"
+        examples="$(filter_examples_by_soc "$examples")"
     else
         if ! configure_build; then
             log_error "CMake configuration failed"
             exit 1
         fi
+
+        # 按当前芯片版本的样例清单过滤（被跳过的样例不参与本次构建与执行）
+        examples="$(filter_examples_by_soc "$examples")"
 
         # Phase 1: build every selected target up front, in parallel.
         local -a all_targets=()
@@ -761,6 +812,12 @@ main() {
             exit 1
         fi
     fi
+
+    if [[ -z "$examples" ]]; then
+        log_error "No example available for soc=${SOC} (ops=${OPS_NAME:-<all>}, target=${TARGET:-<all>})"
+        exit 1
+    fi
+
     if [[ "$BUILD_ONLY" == true ]]; then
         log_info "Build-only mode: no execution after build"
     fi

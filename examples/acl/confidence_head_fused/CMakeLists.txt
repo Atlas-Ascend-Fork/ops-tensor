@@ -6,4 +6,4 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-ops_example_add_executable(confidence_head_fused_mix confidence_head_fused_mix/confidence_head_fused_mix.cpp)
+ops_example_add_executable(confidence_head_fused_mix VER ascend950 confidence_head_fused_mix/confidence_head_fused_mix.cpp)

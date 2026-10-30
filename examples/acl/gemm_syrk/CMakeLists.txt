@@ -11,4 +11,4 @@
 
 # ops-tensor Examples — gemm_syrk
 
-ops_example_add_executable(gemm_syrk_basic gemm_syrk_basic/gemm_syrk_basic.cpp)
+ops_example_add_executable(gemm_syrk_basic VER ascend950 gemm_syrk_basic/gemm_syrk_basic.cpp)

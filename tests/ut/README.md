@@ -73,6 +73,14 @@ bash build.sh --opkernel -u --ops=mat_mul,quant_batch_matmul
 
 `build.sh` 会自动完成：submodule 初始化 → cmake 配置 → 编译 → 运行。
 
+SoC 相关行为：
+
+| 命令 | 行为 |
+| ---- | ---- |
+| 不带 `--soc` | **仅**构建并执行 ascend950 的 UT（默认行为） |
+| `--soc=ascend950` | 同上，显式指定 |
+| `--soc=<soc1>,<soc2>` | 多 SoC，逗号分隔（各 SoC 见 `KERNEL_UT_SOC_TABLE`） |
+
 ### 4.2 执行个别测试用例
 
 完整编译后，到构建目录用 gtest filter 筛选：
@@ -100,6 +108,11 @@ cd build/kernel_ut
 | 构建目录   | `build/kernel_ut/`                               |
 | 可执行文件 | `build/kernel_ut/ops_tensor_kernel_ut_ascend950` |
 
+### 4.4 多 SoC 构建
+
+`KERNEL_UT_SOC`（或 `build.sh --soc=<soc>`）支持逗号分隔的多 SoC，每个 SoC 生成独立的
+`ops_tensor_kernel_ut_<soc>` 可执行文件；未指定时构建 `ALL_SUPPORTED_SOCS` 全集。
+
 ## 5. 新增算子 UT
 
 以新增算子 `my_op` 为例：
@@ -119,8 +132,67 @@ AddOpTestCase(my_op "ascend950pr_9599" "")
 | 参数                     | 说明                         | 示例                   |
 | ------------------------ | ---------------------------- | ---------------------- |
 | `opName`               | 算子名称（子目录名）         | `mat_mul`            |
-| `supportedSocVersions` | 支持的 SoC 版本字符串        | `"ascend950pr_9599"` |
+| `supportedSocVersions` | 支持的 SoC 版本字符串（`;` 分隔） | `"ascend950pr_9599"` |
 | `extraCompileOptions`  | 额外编译选项（如数据类型宏） | `"-DDTYPE_A=half"`   |
+
+### 5.1 用例级 SoC 隔离（目录约定）
+
+算子目录下可建**架构子目录**，把只属于某一芯片架构的用例与支撑源码隔离出来。
+目录名与 SoC 的对应关系由 `KERNEL_UT_SOC_TABLE` 第 3 列决定（见 5.2）。
+
+```
+tests/ut/op_kernel/my_op/
+├── test_my_op_basic.cpp          # 顶层：编入该算子支持的全部 SoC
+└── arch35/                       # 架构目录（名取自 SoC 扩展表）
+    ├── test_my_op_prealloc.cpp   # 仅编入该架构对应的 SoC
+    └── mx_helper.cpp             # 该架构专属支撑源
+```
+
+| 位置 | 编入范围 | 说明 |
+| ---- | -------- | ---- |
+| `<op>/test_*.cpp` | 该算子 `supportedSocVersions` 中的**全部** SoC | 通用用例 |
+| `<op>/<archXX>/test_*.cpp` | **仅** 该架构目录对应的 SoC | 架构专属用例 |
+| `<op>/<archXX>/*.cpp`（非 `test_` 开头） | **仅** 该架构目录对应的 SoC | 该架构专属支撑源，照常编译链接 |
+
+规则要点：
+
+- **用例文件一律以 `test_*.cpp` 命名**，顶层与架构目录同规则；非 `test_` 前缀的 `.cpp`
+  不会被当作用例收集，但其编译归属仍跟随所在架构目录。
+- 架构目录下的非 `.cpp` 文件（`.h`、`.txt` 等）不参与编译，可作为该架构专属的头文件/资源。
+- 隔离发生在**编译期**：不属于当前 SoC 的用例与支撑源都不会进入该 SoC 的对象库，
+  因此 `--gtest_list_tests` 看到的用例集合天然就是当前 SoC 的子集，架构专属 API
+  也不会在另一架构下编译。
+- 若某算子在某 SoC 下没有任何可用源文件，该算子在该 SoC 下自动跳过并打印原因。
+
+### 5.2 新增 SoC（唯一扩展点）
+
+`tests/ut/op_kernel/CMakeLists.txt` 顶部维护一张 SoC 扩展表，**新增 SoC 只需追加一行**：
+
+```cmake
+set(KERNEL_UT_SOC_TABLE
+    "ascend950|ascend950pr_9599|arch35|dav_3510"
+    # 短名     | compute_unit      | 架构目录 | 仿真器架构目录
+    # "ascendXXX|ascendXXX_yyyy    | archAA  | dav_ZZZZ"     <- 新增 SoC 按此格式追加一行
+)
+```
+
+由该表自动派生，无需再改任何 `if/else`：
+
+| 派生项 | 用途 |
+| ------ | ---- |
+| `ALL_SUPPORTED_SOCS` | 未指定 `KERNEL_UT_SOC` 时构建的 SoC 全集 |
+| `KERNEL_UT_ARCH_DIRS` | 参与用例收集的架构目录清单（取自表第 3 列） |
+| `map_compute_unit()` | 短名 → compute_unit（`KERNEL_UT_SOC`、`build.sh --soc`） |
+| `map_soc_tag()` | compute_unit 长名 / 短名 → 裸 SoC 名 |
+| `map_soc_to_arch_dir()` | SoC → 架构目录（用例级隔离） |
+| `map_soc_to_sim_arch()` | SoC → `simulator/<arch>/lib` 链接目录 |
+| tikicpulib 调试宏剥离目标 | `tikicpulib_<compute_unit>` 列表 |
+| `soc_has_cpudebug_runtime()` | 运行时自动探测 CANN 是否提供该架构的 `libcpudebug.so` |
+
+仍需人工处理的两处（属于算子自身声明，不在本表范围）：
+
+1. 各算子 `<op>/CMakeLists.txt` 的 `AddOpTestCase(<op>, "<新增 compute_unit>")`。
+2. 若该 SoC 还需算子包/二进制配置（`op_kernel`、`config/<soc>/*.json`），按原有流程补充。
 
 ```cpp
 // 3. tests/ut/op_kernel/my_op/test_my_op.cpp

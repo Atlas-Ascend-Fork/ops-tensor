@@ -22,7 +22,45 @@ project(ops_tensor_kernel_ut LANGUAGES CXX)
 # 代码覆盖率选项
 option(ENABLE_GCOV "Enable code coverage for kernel UT" OFF)
 
-set(ALL_SUPPORTED_SOCS "ascend950")
+# ============================================================================
+# SoC 扩展表 —— 新增 SoC 时**只需在此追加一行**，其余逻辑全部自动派生
+#   每行 4 列，用 "|" 分隔：
+#     短名          KERNEL_UT_SOC / build.sh --soc 的取值，也是用例架构目录的归属标签
+#     compute_unit  CANN 的架构标识（tikicpulib / SoC 版本对应关系）
+#     架构目录      算子目录下仅编入该 SoC 的子目录名（用例级隔离）
+#     仿真器目录    $ASCEND_HOME_PATH/<sys>/simulator/<该值>/lib
+# ============================================================================
+set(KERNEL_UT_SOC_TABLE
+    "ascend950|ascend950pr_9599|arch35|dav_3510"
+    "ascend960|ascend960DT_968B7|arch92|dav_9201"
+)
+
+set(ALL_SUPPORTED_SOCS "")
+set(KERNEL_UT_ARCH_DIRS "")
+foreach(_soc_row IN LISTS KERNEL_UT_SOC_TABLE)
+    string(REPLACE "|" ";" _soc_cols "${_soc_row}")
+    list(LENGTH _soc_cols _soc_cols_len)
+    if(NOT _soc_cols_len EQUAL 4)
+        message(FATAL_ERROR "KERNEL_UT_SOC_TABLE 行格式错误（应为 4 列）：${_soc_row}")
+    endif()
+    list(GET _soc_cols 0 _soc_short)
+    list(GET _soc_cols 1 _soc_long)
+    list(GET _soc_cols 2 _soc_arch_dir)
+    list(GET _soc_cols 3 _soc_sim_arch)
+    list(APPEND ALL_SUPPORTED_SOCS "${_soc_short}")
+    list(APPEND KERNEL_UT_ARCH_DIRS "${_soc_arch_dir}")
+    set(KERNEL_UT_SOC_${_soc_short}_LONG "${_soc_long}")
+    set(KERNEL_UT_SOC_${_soc_short}_ARCH_DIR "${_soc_arch_dir}")
+    set(KERNEL_UT_SOC_${_soc_short}_SIM_ARCH "${_soc_sim_arch}")
+    set(KERNEL_UT_SOC_LONG_${_soc_long}_SHORT "${_soc_short}")
+endforeach()
+unset(_soc_row)
+unset(_soc_cols)
+unset(_soc_cols_len)
+unset(_soc_short)
+unset(_soc_long)
+unset(_soc_arch_dir)
+unset(_soc_sim_arch)
 
 if(NOT KERNEL_UT_SOC)
     set(KERNEL_UT_SOC_LIST ${ALL_SUPPORTED_SOCS})
@@ -30,15 +68,50 @@ else()
     string(REPLACE "," ";" KERNEL_UT_SOC_LIST "${KERNEL_UT_SOC}")
 endif()
 
+# 短名（或 compute_unit 长名）→ compute_unit 长名
 function(map_compute_unit compute_unit compute_unit_long)
-    set(_keys "ascend950")
-    set(_values "ascend950pr_9599")
-    list(FIND _keys ${compute_unit} _idx)
-    if(NOT _idx EQUAL -1)
-        list(GET _values ${_idx} _mapped)
-        set(${compute_unit_long} ${_mapped} PARENT_SCOPE)
+    if(DEFINED KERNEL_UT_SOC_${compute_unit}_LONG)
+        set(${compute_unit_long} "${KERNEL_UT_SOC_${compute_unit}_LONG}" PARENT_SCOPE)
     else()
-        set(${compute_unit_long} ${compute_unit} PARENT_SCOPE)
+        set(${compute_unit_long} "${compute_unit}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+# 抽取裸 SoC 名：短名原样返回，compute_unit 长名反查回短名
+function(map_soc_tag soc_name soc_tag)
+    if(DEFINED KERNEL_UT_SOC_${soc_name}_LONG)
+        set(${soc_tag} "${soc_name}" PARENT_SCOPE)
+    elseif(DEFINED KERNEL_UT_SOC_LONG_${soc_name}_SHORT)
+        set(${soc_tag} "${KERNEL_UT_SOC_LONG_${soc_name}_SHORT}" PARENT_SCOPE)
+    else()
+        set(${soc_tag} "${soc_name}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+# SoC → 用例架构目录（未知 SoC 返回空，此时只编入顶层通用用例）
+function(map_soc_to_arch_dir soc_tag arch_dir)
+    if(DEFINED KERNEL_UT_SOC_${soc_tag}_ARCH_DIR)
+        set(${arch_dir} "${KERNEL_UT_SOC_${soc_tag}_ARCH_DIR}" PARENT_SCOPE)
+    else()
+        set(${arch_dir} "" PARENT_SCOPE)
+    endif()
+endfunction()
+
+# SoC → 仿真器架构目录（未知 SoC 返回空）
+function(map_soc_to_sim_arch soc_tag sim_arch)
+    if(DEFINED KERNEL_UT_SOC_${soc_tag}_SIM_ARCH)
+        set(${sim_arch} "${KERNEL_UT_SOC_${soc_tag}_SIM_ARCH}" PARENT_SCOPE)
+    else()
+        set(${sim_arch} "" PARENT_SCOPE)
+    endif()
+endfunction()
+
+# CANN 是否为该 SoC 提供 CPU 调试运行时（libcpudebug.so）。
+function(soc_has_cpudebug_runtime soc_long has_runtime)
+    if(TARGET tikicpulib_${soc_long})
+        set(${has_runtime} TRUE PARENT_SCOPE)
+    else()
+        set(${has_runtime} FALSE PARENT_SCOPE)
     endif()
 endfunction()
 
@@ -70,9 +143,12 @@ find_package(tikicpulib REQUIRED)
 
 option(KERNEL_UT_TENSOR_API_DEBUG_CHECK "Enable tensor_api CPU-sim strict checks (ASCENDC_DEBUG)" OFF)
 if(NOT KERNEL_UT_TENSOR_API_DEBUG_CHECK)
-    set(_TIKICPULIB_SOC_TARGETS
-        tikicpulib_ascend950pr_9599
-        tikicpulib_ascend960DT_96887)
+    # 从 SoC 扩展表派生，无需单独维护
+    set(_TIKICPULIB_SOC_TARGETS "")
+    foreach(_soc_short ${ALL_SUPPORTED_SOCS})
+        list(APPEND _TIKICPULIB_SOC_TARGETS "tikicpulib_${KERNEL_UT_SOC_${_soc_short}_LONG}")
+    endforeach()
+    unset(_soc_short)
     foreach(_t IN LISTS _TIKICPULIB_SOC_TARGETS)
         if(TARGET ${_t})
             get_target_property(_defs ${_t} INTERFACE_COMPILE_DEFINITIONS)
@@ -104,7 +180,34 @@ endif()
 set_property(GLOBAL PROPERTY KERNEL_UT_REG_NAMES "")
 
 function(AddOpTestCase opName supportedSocVersions extraCompileOptions)
+    # 用例源一律以 test_*.cpp 命名（顶层与架构目录同规则）：
+    #   顶层 test_*.cpp           通用用例
+    #   <arch>/test_*.cpp         该架构专属用例
+    #   <arch>/*.cpp（非 test_）   该架构专属支撑源，同样只编入对应 SoC
     file(GLOB _test_srcs CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.cpp)
+    set(_arch_aux_srcs "")
+    foreach(_arch_dir ${KERNEL_UT_ARCH_DIRS})
+        file(GLOB _dir_tests CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${_arch_dir}/test_*.cpp)
+        file(GLOB _dir_all CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${_arch_dir}/*.cpp)
+        if(_dir_tests)
+            list(APPEND _test_srcs ${_dir_tests})
+        endif()
+        if(_dir_all)
+            set(_dir_aux ${_dir_all})
+            if(_dir_tests)
+                list(REMOVE_ITEM _dir_aux ${_dir_tests})
+            endif()
+            if(_dir_aux)
+                list(APPEND _arch_aux_srcs ${_dir_aux})
+                list(LENGTH _dir_aux _n)
+                message(STATUS "  [opkernel] ${opName}/${_arch_dir}: ${_n} aux source(s) compiled for this SoC only")
+            endif()
+        endif()
+    endforeach()
+    if(_arch_aux_srcs)
+        list(APPEND _test_srcs ${_arch_aux_srcs})
+    endif()
+
     if(NOT _test_srcs)
         message(WARNING "  [opkernel] ${opName}: no test_*.cpp found, skipping")
         return()
@@ -144,9 +247,20 @@ if(NOT REG_NAMES)
 endif()
 
 set(BUILT_SOC_LIST "")
+set(SKIPPED_SOC_LIST "")
 
 foreach(_soc_short ${KERNEL_UT_SOC_LIST})
     map_compute_unit(${_soc_short} _soc_long)
+    map_soc_tag(${_soc_short} _soc_tag)
+    soc_has_cpudebug_runtime(${_soc_long} _has_runtime)
+
+    if(NOT _has_runtime)
+        message(STATUS
+            "  [opkernel] SoC=${_soc_short}(${_soc_long}): 当前 CANN 未提供该架构的 CPU-debug "
+            "运行时(libcpudebug.so)与头文件分支，编译/运行跳过")
+        list(APPEND SKIPPED_SOC_LIST "${_soc_short}")
+        continue()
+    endif()
 
     set(_matched_ops "")
     foreach(_op ${REG_NAMES})
@@ -168,8 +282,26 @@ foreach(_soc_short ${KERNEL_UT_SOC_LIST})
         get_property(_op_flags GLOBAL PROPERTY KERNEL_UT_REG_${_op}_FLAGS)
         get_property(_op_dir GLOBAL PROPERTY KERNEL_UT_REG_${_op}_DIR)
 
+        # 用例级 SoC 隔离：顶层用例进全部 SoC，架构目录用例仅进对应 SoC
+        map_soc_to_arch_dir(${_soc_tag} _soc_arch_dir)
+        set(_soc_srcs "")
+        foreach(_src ${_op_srcs})
+            get_filename_component(_src_dir "${_src}" DIRECTORY)
+            get_filename_component(_src_dir_name "${_src_dir}" NAME)
+            if(NOT _src_dir_name IN_LIST KERNEL_UT_ARCH_DIRS)
+                list(APPEND _soc_srcs "${_src}")
+            elseif(_src_dir_name STREQUAL _soc_arch_dir)
+                list(APPEND _soc_srcs "${_src}")
+            endif()
+        endforeach()
+
+        if(NOT _soc_srcs)
+            message(STATUS "  [opkernel] ${_op}: no case for ${_soc_tag}(${_soc_arch_dir}), skipped on SoC=${_soc_short}")
+            continue()
+        endif()
+
         set(_tgt "opkernel_${_op}_${_soc_short}")
-        add_library(${_tgt} OBJECT ${_op_srcs})
+        add_library(${_tgt} OBJECT ${_soc_srcs})
 
         target_compile_options(${_tgt} PRIVATE
             -g
@@ -242,9 +374,17 @@ foreach(_soc_short ${KERNEL_UT_SOC_LIST})
         ${UT_KERNEL_INC}
     )
 
+    # 各 SoC 的运行时/仿真库目录（查 SoC 扩展表）
+    map_soc_to_sim_arch(${_soc_tag} _soc_sim_arch)
+    if(_soc_sim_arch)
+        set(_soc_sim_lib_dir "${ASCEND_HOME_PATH}/${SYSTEM_PREFIX}/simulator/${_soc_sim_arch}/lib")
+    else()
+        set(_soc_sim_lib_dir "")
+    endif()
+
     target_link_directories(${_exe} PRIVATE
         ${ASCEND_HOME_PATH}/${SYSTEM_PREFIX}/lib64
-        ${ASCEND_HOME_PATH}/${SYSTEM_PREFIX}/simulator/dav_3510/lib
+        ${_soc_sim_lib_dir}
     )
 
     list(APPEND BUILT_SOC_LIST "${_soc_short}")
@@ -252,10 +392,12 @@ foreach(_soc_short ${KERNEL_UT_SOC_LIST})
 endforeach()
 
 if(NOT BUILT_SOC_LIST)
-    message(FATAL_ERROR "No SoC targets produced any executables. KERNEL_UT_SOC=${KERNEL_UT_SOC_LIST}")
+    message(FATAL_ERROR
+        "No SoC produced any executable. KERNEL_UT_SOC=${KERNEL_UT_SOC_LIST}\n"
+        "  Skipped (CANN lacks CPU-debug runtime): [${SKIPPED_SOC_LIST}]\n")
 endif()
 
-message(STATUS "ops_tensor Kernel UT configured: SoCs=[${BUILT_SOC_LIST}]")
+message(STATUS "ops_tensor Kernel UT configured: SoCs=[${BUILT_SOC_LIST}] skipped=[${SKIPPED_SOC_LIST}]")
 
 # ============================================================================
 # 代码覆盖率收集 target

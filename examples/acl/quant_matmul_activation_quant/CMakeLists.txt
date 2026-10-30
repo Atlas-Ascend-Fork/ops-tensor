@@ -1,1 +1,1 @@
-ops_example_add_executable(quant_matmul_activation_quant quant_matmul_activation_quant/quant_matmul_activation_quant.cpp)
+ops_example_add_executable(quant_matmul_activation_quant VER ascend950 quant_matmul_activation_quant/quant_matmul_activation_quant.cpp)

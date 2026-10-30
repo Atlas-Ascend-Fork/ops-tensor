@@ -63,3 +63,16 @@ repos:
             "--skip",
             "*.py,*.cpp,*.hpp,*.c,*.h",
           ]
+
+  # 分类规则登记校验：include/blaze 下新增的 .h/.cpp 必须在 classify_rule.yaml 中登记
+  - repo: local
+    hooks:
+      - id: classify-rule-check
+        name: classify_rule 登记校验
+        entry: python3 scripts/check_classify_rule.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+        stages: [pre-commit]
+        verbose: true
