@@ -370,8 +370,7 @@ private:
     {
         int64_t curN = asc::te::get<Blaze::Gemm::MNK_N>(l0Shape);
         int64_t curK = asc::te::get<Blaze::Gemm::MNK_K>(l0Shape);
-        constexpr auto mmadAtom = asc::te::make_mmad(asc::te::mmad_operation{},
-                                                     Blaze::Gemm::Tile::MmadTraitConfidenceHeadGemv{});
+        constexpr auto mmadAtom = asc::te::make_mmad(asc::te::mmad_operation{}, Blaze::Gemm::Tile::MmadTraitGemv{});
         asc::te::mmad_params mmadParams{1U, static_cast<uint16_t>(curN), static_cast<uint16_t>(curK),
                                         static_cast<asc::te::unit_flag_mode>(unitFlag), initC};
         if (needBias) {

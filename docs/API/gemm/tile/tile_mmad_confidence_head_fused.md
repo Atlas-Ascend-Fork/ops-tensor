@@ -4,7 +4,7 @@
 
 ## 功能说明
 
-`MmadTraitConfidenceHeadGemv` 为 `asc::te::make_mmad` 提供 M=1 的原生 GEMV 配置，关闭 M 补齐，保留向量乘矩阵的计算方式。
+`MmadTraitGemv` 为 `asc::te::make_mmad` 提供 M=1 的原生 GEMV 配置，关闭 M 补齐，保留向量乘矩阵的计算方式。
 
 ## 特殊约束
 
@@ -18,5 +18,5 @@
 #include "blaze/gemm/tile/tile_trait.h"
 
 auto atom = asc::te::make_mmad(
-    asc::te::mmad_operation{}, Blaze::Gemm::Tile::MmadTraitConfidenceHeadGemv{});
+    asc::te::mmad_operation{}, Blaze::Gemm::Tile::MmadTraitGemv{});
 ```

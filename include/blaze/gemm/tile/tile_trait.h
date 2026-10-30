@@ -25,7 +25,7 @@ struct MmadTraitMX {
 };
 
 // Disable M padding to select the native M=1 GEMV mode.
-struct MmadTraitConfidenceHeadGemv {
+struct MmadTraitGemv {
     using TraitType = asc::te::mmad_trait;
     static constexpr TraitType value{0, false, false, false, asc::te::mmad_type::normal};
 };

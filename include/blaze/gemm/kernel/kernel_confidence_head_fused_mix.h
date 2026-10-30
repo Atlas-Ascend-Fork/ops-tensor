@@ -104,18 +104,12 @@ public:
         }
         InitCrossCoreSync();
 
-        // Complete Cube cleanup before restoring HF32 mode.
-        {
-            BlockMmad blockMmad;
-            if ASCEND_IS_AIC {
-                blockMmad.Init(params.mmadParams);
-            }
-
-            Process(params, blockMmad, scheduler, curBlockIdx, blockEpilogue);
-        }
+        BlockMmad blockMmad;
         if ASCEND_IS_AIC {
-            UnsetHf32();
+            blockMmad.Init(params.mmadParams);
         }
+
+        Process(params, blockMmad, scheduler, curBlockIdx, blockEpilogue);
     }
 
 private:
@@ -247,8 +241,6 @@ private:
             b2GmAddr_ = reinterpret_cast<__gm__ BType*>(params.markovGmAddr);
         }
     }
-
-    __aicore__ inline void UnsetHf32() { AscendC::SetHF32Mode(0); }
 
     template <typename TensorB>
     __aicore__ inline void SetL2Cache(TensorB& gmB, uint64_t k)
