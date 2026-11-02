@@ -133,8 +133,11 @@ public:
         int64_t curML1 = asc::te::get<MNK_M>(tileShape);
         int64_t curNL1 = asc::te::get<MNK_N>(tileShape);
         uint64_t skSingleCoreK = asc::te::get<MNK_K>(tileShape);
-        splitSingleCoreKRound_ = skSingleCoreK / splitSingleCoreK_;
-        splitSingleCoreKTail_ = skSingleCoreK % splitSingleCoreK_ + splitSingleCoreK_;
+        splitSingleCoreKRound_ = skSingleCoreK < splitSingleCoreK_ ? 1 : skSingleCoreK / splitSingleCoreK_;
+        // 尾块合并
+        splitSingleCoreKTail_ = skSingleCoreK < splitSingleCoreK_ ?
+                                    skSingleCoreK :
+                                    skSingleCoreK % splitSingleCoreK_ + splitSingleCoreK_;
 
         for (uint64_t splitSingleCoreKIdx = 0; splitSingleCoreKIdx < splitSingleCoreKRound_; splitSingleCoreKIdx++) {
             uint64_t coordK = splitSingleCoreKIdx * splitSingleCoreK_;
