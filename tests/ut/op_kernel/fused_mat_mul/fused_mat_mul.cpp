@@ -17,7 +17,9 @@
 
 #include <cstring>
 #include "fused_mat_mul_with_scale_add.h"
+#include "fused_mat_mul_elemwise.h"
 #include "blaze/epilogue/block/block_epilogue_matmul_with_sigmoid.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 
 template <typename ElementType>
 __global__ __aicore__ void fused_mat_mul_kernel_entry(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR x3GM, GM_ADDR yGM,
@@ -65,4 +67,16 @@ __global__ __aicore__ void fused_mat_mul_sigmoid_kernel_entry(GM_ADDR x1GM, GM_A
 
     MatmulKernel kernel;
     kernel(params);
+}
+// FusedMatMul add/mul kernel UT entry: out = acc (+|*) x3.
+template <typename ElementType, uint64_t FusedOpType, uint64_t L0C2OutMode, uint64_t FullLoadMode, bool HighPrecise,
+          bool TransA, bool TransB>
+__global__ __aicore__ void fused_mat_mul_add_mul_kernel_entry(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR biasGM, GM_ADDR x3GM,
+                                                              GM_ADDR yGM, GM_ADDR workspaceGM, GM_ADDR tilingGM)
+{
+    FusedMatMulUT::FusedMatMulTilingData tilingData;
+    memcpy(&tilingData, tilingGM, sizeof(tilingData));
+    FusedMatMulUT::FusedMatMulAddMulWrapper<ElementType, FusedOpType, L0C2OutMode, FullLoadMode, HighPrecise, TransA,
+                                            TransB>(x1GM, x2GM, biasGM, x3GM, yGM, workspaceGM,
+                                                    tilingData.matMulTilingData.matMulTilingData);
 }

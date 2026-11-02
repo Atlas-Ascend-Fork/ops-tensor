@@ -11,6 +11,8 @@
 /*!
  * \file kernel_matmul_al1_full_load.h
  * \brief
+ * 当FUSED_OP_TYPE为ADD/MUL(elemwise融合): MIX模式 — AIC算mmad进UB, 配对AIV执行epilogue(acc ±× x3 → GM);
+ * 当FUSED_OP_TYPE == 0(无融合): AIC_ONLY — AIC直写GM(原有行为).
  */
 
 #pragma once
@@ -23,6 +25,7 @@
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {
@@ -34,8 +37,24 @@ class GemmUniversal<ProblemShape_, BlockMmad_, BlockEpilogue_, BlockScheduler_,
                     AscendC::Std::enable_if_t<AscendC::Std::is_same_v<
                         KernelMmadMultiBlockAFullLoad, typename BlockMmad_::DispatchPolicy::ScheduleType>>> {
 public:
-    __aicore__ inline GemmUniversal() {}
-    __aicore__ inline ~GemmUniversal() {}
+    __aicore__ inline GemmUniversal()
+    {
+        if constexpr (HAS_ELEMWISE) {
+            if ASCEND_IS_AIV {
+                Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG);
+                Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG + 1);
+            }
+        }
+    }
+    __aicore__ inline ~GemmUniversal()
+    {
+        if constexpr (HAS_ELEMWISE) {
+            if ASCEND_IS_AIC {
+                Sync::WaitForVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG, true);
+                Sync::WaitForVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG + 1, true);
+            }
+        }
+    }
 
     using BlockMmad = BlockMmad_;
     using ProblemShape = ProblemShape_;
@@ -69,22 +88,38 @@ public:
 
     __aicore__ inline void operator()(Params const& params)
     {
-        if ASCEND_IS_AIV {
-            return;
-        }
         Init(params);
 
         // 初始化blockScheduler
         BlockScheduler bs(params.problemShape, params.schParams);
         int64_t curBlockIdx = AscendC::GetBlockIdx();
         int64_t realCoreNums = bs.GetCoreNums();
+        if constexpr (HAS_ELEMWISE) {
+            if ASCEND_IS_AIV {
+                if (!params.mmadParams.splitM && AscendC::GetSubBlockIdx() > 0) {
+                    return;
+                }
+                curBlockIdx /= AscendC::GetTaskRation();
+            }
+        } else {
+            if ASCEND_IS_AIV {
+                return;
+            }
+        }
         if (curBlockIdx >= realCoreNums) {
             return;
         }
         Blaze::Gemm::SetHF32(params.schParams.isHf32);
         BlockMmad blockMmad;
-        blockMmad.Init(params.mmadParams);
-        MatmulProcess(params, blockMmad, bs, curBlockIdx, AscendC::GetBlockNum(), bs.GetBlockNums());
+        if ASCEND_IS_AIC {
+            blockMmad.Init(params.mmadParams);
+        }
+        BlockEpilogue epilogueOp;
+        if constexpr (HAS_ELEMWISE) {
+            // params-only Init契约(A全载非融合配Empty不进Init).
+            epilogueOp.Init(params.epilogueParams);
+        }
+        MatmulProcess(params, blockMmad, epilogueOp, bs, curBlockIdx, AscendC::GetBlockNum(), bs.GetBlockNums());
         Blaze::Gemm::UnsetHF32(params.schParams.isHf32);
     }
 
@@ -103,17 +138,18 @@ private:
         return layoutA;
     }
 
-    __aicore__ inline void MatmulProcess(Params const& params, BlockMmad& blockMmad, BlockScheduler& bs,
-                                         int64_t curBlockIdx, int64_t coreNums, int64_t totalBlockNums)
+    // HAS_ELEMWISE(add/mul): MIX模式 — AIC mmad -> UB, 配对AIV执行epilogue(acc ±× x3 -> GM);
+    // !HAS_ELEMWISE: AIC_ONLY — AIC直写GM(原有行为), 分支体与主线保持一致.
+    __aicore__ inline void MatmulProcess(Params const& params, BlockMmad& blockMmad, BlockEpilogue& epilogueOp,
+                                         BlockScheduler& bs, int64_t curBlockIdx, int64_t coreNums,
+                                         int64_t totalBlockNums)
     {
         auto layoutA = MakeLayoutA2D(params);
         auto layoutB = MakeLayoutB{}(batch_, k_, n_); // ND layout for B
-        auto layoutC = MakeLayoutC{}(batch_, m_, n_); // ND layout for C
         auto layoutBias = MakeLayoutBias{}(1L, n_);   // ND layout for Bias
-        // A,B,C Gm Tensor
+        // A,B,Bias Gm Tensor
         auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aGmAddr_), layoutA);
         auto gmB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(bGmAddr_), layoutB);
-        auto gmC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(cGmAddr_), layoutC);
         auto gmBias = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(biasGmAddr_), layoutBias);
 
         // 使能双页表
@@ -127,15 +163,51 @@ private:
             auto shapeK = asc::te::get<MNK_K>(blockShape);
             auto coordN = asc::te::get<MNK_N>(blockCoord);
             curBatchIdx_ = static_cast<uint64_t>(asc::te::get<MNK_B>(blockCoord));
-            // Block offset
-            auto subTensorB = gmB.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(0L, coordN)),
-                                        asc::te::make_shape(1L, asc::te::make_shape(shapeK, shapeN)));
-            auto gmBlockB = asc::te::squeeze<0>(subTensorB);
-            auto gmBlockBias = gmBias.slice(asc::te::make_coord(0L, coordN), asc::te::make_shape(1L, shapeN));
-            auto subTensorC = gmC.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(0L, coordN)),
-                                        asc::te::make_shape(1L, asc::te::make_shape(m_, shapeN)));
-            auto gmBlockC = asc::te::squeeze<0>(subTensorC);
-            blockMmad(gmA, gmBlockB, gmBlockBias, gmBlockC, blockShape);
+            if constexpr (HAS_ELEMWISE) {
+                // MIX: 尾块裁剪有效N, 输出进UB, AIC/AIV分工
+                const int64_t shapeM = asc::te::get<MNK_M>(blockShape);
+                const int64_t validShapeN = AscendC::Std::min(shapeN, static_cast<int64_t>(n_) - coordN);
+                if (shapeM <= 0 || validShapeN <= 0) {
+                    continue;
+                }
+                BlockShape validBlockShape{shapeM, validShapeN, shapeK, 1};
+
+                const uint64_t batchOffsetB = curBatchIdx_ * k_ * n_;
+                const int64_t offsetC = (static_cast<int64_t>(curBatchIdx_) * static_cast<int64_t>(m_)) *
+                                            static_cast<int64_t>(n_) +
+                                        coordN;
+                auto gmBBatch = asc::te::make_tensor(
+                    asc::te::make_mem_ptr<asc::te::location::gm>(bGmAddr_ + batchOffsetB), layoutB);
+                // slice的coord/shape与layoutB同构(嵌套形态, 同主线AIC_ONLY分支的subTensorB),
+                // 不依赖is_flat_batch的2维简化判定(该判定对MakeLayoutB生成的layout不成立).
+                auto subTensorB = gmBBatch.slice(asc::te::make_coord(0L, asc::te::make_coord(0L, coordN)),
+                                                 asc::te::make_shape(1L, asc::te::make_shape(shapeK, validShapeN)));
+                auto gmBlockB = asc::te::squeeze<0>(subTensorB);
+                auto gmBlockBiasValid = gmBias.slice(asc::te::make_coord(0L, coordN),
+                                                     asc::te::make_shape(1L, validShapeN));
+                auto layoutUb = MakeLayoutC{}(shapeM, validShapeN);
+                auto ubTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0), layoutUb);
+                if ASCEND_IS_AIC {
+                    blockMmad(gmA, gmBlockB, gmBlockBiasValid, ubTensor, validBlockShape);
+                }
+                if ASCEND_IS_AIV {
+                    epilogueOp(validBlockShape, offsetC, params.mmadParams.splitM, params.schParams.baseM,
+                               params.schParams.baseN, params.mmadParams.ubDB);
+                }
+            } else {
+                // AIC_ONLY(原有行为): B/C按batch切片, mmad直写GM
+                auto layoutC = MakeLayoutC{}(batch_, m_, n_); // ND layout for C
+                auto gmC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(cGmAddr_), layoutC);
+                // Block offset
+                auto subTensorB = gmB.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(0L, coordN)),
+                                            asc::te::make_shape(1L, asc::te::make_shape(shapeK, shapeN)));
+                auto gmBlockB = asc::te::squeeze<0>(subTensorB);
+                auto gmBlockBias = gmBias.slice(asc::te::make_coord(0L, coordN), asc::te::make_shape(1L, shapeN));
+                auto subTensorC = gmC.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(0L, coordN)),
+                                            asc::te::make_shape(1L, asc::te::make_shape(m_, shapeN)));
+                auto gmBlockC = asc::te::squeeze<0>(subTensorC);
+                blockMmad(gmA, gmBlockB, gmBlockBias, gmBlockC, blockShape);
+            }
         }
     }
 
@@ -166,6 +238,11 @@ private:
 private:
     static constexpr bool TRANS_A = BlockMmad::TRANS_A;
     static constexpr bool TRANS_B = BlockMmad::TRANS_B;
+    static constexpr bool HAS_ELEMWISE = BlockMmad::DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_ADD ||
+                                         BlockMmad::DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_MUL;
+    static constexpr uint64_t AIC_SYNC_AIV_MODE_4 = 4;
+    static constexpr uint16_t AIV_SYNC_AIC_FLAG = 4;
+
     __gm__ AType* aGmAddr_;
     __gm__ BType* bGmAddr_;
     __gm__ CType* cGmAddr_;

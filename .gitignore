@@ -67,3 +67,5 @@ tbetoolkits-*.log
 version.info
 .claude/
 .opencode/
+examples/acl/fused_mat_mul/fused_mat_mul_elemwise/input/
+examples/acl/fused_mat_mul/fused_mat_mul_elemwise/output/

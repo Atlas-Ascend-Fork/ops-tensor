@@ -48,6 +48,13 @@ struct SigmoidCase {
     bool hasBias;
 };
 
+struct AddMulCase {
+    uint32_t m;
+    uint32_t n;
+    uint32_t k;
+    uint32_t nL1;
+};
+
 void ReadBinToGm(const std::string& path, GM_ADDR addr, size_t size)
 {
     std::ifstream file(path, std::ios::binary);
@@ -272,6 +279,108 @@ protected:
         }
     }
 
+    // Elementwise add/mul fusion (legacy MatMulMixWithoutQueActKernel semantics): out = acc (+|*) x3.
+    // HighPrecise keeps the accumulator in FP32 (inner_precise = 0, splitM pairs two AIVs);
+    // !HighPrecise fuses in the element domain (inner_precise = 1).
+    template <typename ElementType, uint64_t FusedOpType, uint64_t L0C2OutMode, uint64_t FullLoadMode, bool HighPrecise,
+              bool TransA, bool TransB>
+    void RunAddMulCase(const AddMulCase& testCase)
+    {
+        static_assert(std::is_same_v<ElementType, half> || std::is_same_v<ElementType, bfloat16_t>);
+        const uint32_t blockNum = 1;
+        const size_t x1Size = static_cast<size_t>(testCase.m) * testCase.k * sizeof(ElementType);
+        const size_t x2Size = static_cast<size_t>(testCase.k) * testCase.n * sizeof(ElementType);
+        const size_t outputCount = static_cast<size_t>(testCase.m) * testCase.n;
+        const size_t outputSize = outputCount * sizeof(ElementType);
+        const size_t workspaceSize = blockNum * WORKSPACE_TILE_SIZE + WORKSPACE_OVERHEAD;
+
+        x1GM = (GM_ADDR)AscendC::GmAlloc(x1Size);
+        x2GM = (GM_ADDR)AscendC::GmAlloc(x2Size);
+        x3GM = (GM_ADDR)AscendC::GmAlloc(outputSize);
+        yGM = (GM_ADDR)AscendC::GmAlloc(outputSize);
+        workspaceGM = (GM_ADDR)AscendC::GmAlloc(workspaceSize);
+        tilingGM = (GM_ADDR)AscendC::GmAlloc(sizeof(FusedMatMulUT::FusedMatMulTilingData));
+
+        ASSERT_NE(x1GM, nullptr);
+        ASSERT_NE(x2GM, nullptr);
+        ASSERT_NE(x3GM, nullptr);
+        ASSERT_NE(yGM, nullptr);
+        ASSERT_NE(workspaceGM, nullptr);
+        ASSERT_NE(tilingGM, nullptr);
+
+        const std::string dataDir = std::string(UT_KERNEL_SRC_DIR) + "/fused_mat_mul/fused_mat_mul_data";
+        const std::string dtype = std::is_same_v<ElementType, half> ? "float16" : "bfloat16";
+        const std::string optype = FusedOpType == Blaze::Gemm::OP_TYPE_ADD ? "add" : "mul";
+        const std::string genDataCmd = "cd " + dataDir + " && python3 gen_data.py --optype " + optype + " --m " +
+                                       std::to_string(testCase.m) + " --n " + std::to_string(testCase.n) + " --k " +
+                                       std::to_string(testCase.k) + " --dtype " + dtype + (TransA ? " --trans_a" : "") +
+                                       (TransB ? " --trans_b" : "") + " --inner_precise " + (HighPrecise ? "0" : "1");
+        const std::string cleanCmd = "cd " + dataDir + " && rm -rf *.bin";
+        ASSERT_EQ(system(cleanCmd.c_str()), 0) << "Failed to clean old .bin files";
+        ASSERT_EQ(system(genDataCmd.c_str()), 0) << "gen_data.py failed";
+
+        ASSERT_NO_FATAL_FAILURE(ReadBinToGm(dataDir + "/input_a.bin", x1GM, x1Size));
+        ASSERT_NO_FATAL_FAILURE(ReadBinToGm(dataDir + "/input_b.bin", x2GM, x2Size));
+        ASSERT_NO_FATAL_FAILURE(ReadBinToGm(dataDir + "/input_x3.bin", x3GM, outputSize));
+        std::vector<ElementType> golden(outputCount);
+        ASSERT_NO_FATAL_FAILURE(
+            ReadBinToGm(dataDir + "/golden_c.bin", reinterpret_cast<GM_ADDR>(golden.data()), outputSize));
+        memset(yGM, 0, outputSize);
+        memset(workspaceGM, 0, workspaceSize);
+
+        auto* tilingData = reinterpret_cast<FusedMatMulUT::FusedMatMulTilingData*>(tilingGM);
+        memset(tilingData, 0, sizeof(FusedMatMulUT::FusedMatMulTilingData));
+        // 两层取值对齐scale_add用例: FusedMatMulTilingData.matMulTilingData(Batch)内层才是
+        // MatMulV3BasicTilingData(m/n/k/mL1等基本字段所在层).
+        auto& tiling = tilingData->matMulTilingData.matMulTilingData;
+        tiling.usedCoreNum = blockNum;
+        tiling.m = testCase.m;
+        tiling.n = testCase.n;
+        tiling.k = testCase.k;
+        tiling.mL1 = 16;
+        tiling.nL1 = testCase.nL1;
+        tiling.kL1 = 16;
+        tiling.baseM = 16;
+        tiling.baseN = 16;
+        tiling.baseK = 16;
+        tiling.skSingleCoreK = testCase.k;
+        tiling.mTailCnt = 1;
+        tiling.nTailCnt = 1;
+        tiling.mBaseTailSplitCnt = 1;
+        tiling.nBaseTailSplitCnt = 1;
+        tiling.mTailMain = testCase.m;
+        tiling.nTailMain = testCase.n;
+        tiling.mmadParam = 0;
+        tiling.l1BufferNum = 1;
+        tiling.l0cDB = 1;
+        tiling.ubDB = 1;
+        tiling.l2CacheDisable = FusedMatMulUT::L2CacheMode::L2_CACHE_DEFAULT;
+        tiling.sliceM = testCase.m;
+        tiling.srcNdStride = 1;
+        tiling.rowStride = 1;
+        tiling.innerBatch = 1;
+
+        AscendC::SetKernelMode(KernelMode::MIX_MODE);
+        auto kernelFunc = fused_mat_mul_add_mul_kernel_entry<ElementType, FusedOpType, L0C2OutMode, FullLoadMode,
+                                                             HighPrecise, TransA, TransB>;
+        ASSERT_TRUE(KERNEL_RUN_KF(kernelFunc, blockNum, x1GM, x2GM, nullptr, x3GM, yGM, workspaceGM, tilingGM))
+            << "Kernel execution failed: one or more cores exited with non-zero status";
+
+        // Enable on simulators that commit Cube/Fixpipe results, following the scale-add/sigmoid UT convention.
+        const char* verifyOutput = getenv("FUSED_MATMUL_UT_VERIFY_OUTPUT");
+        if (verifyOutput == nullptr || verifyOutput[0] != '1') {
+            return;
+        }
+        const auto* output = reinterpret_cast<const ElementType*>(yGM);
+        const float tolerance = std::is_same_v<ElementType, half> ? 2e-3F : 1e-2F;
+        for (size_t i = 0; i < outputCount; ++i) {
+            const float actual = static_cast<float>(output[i]);
+            const float expect = static_cast<float>(golden[i]);
+            ASSERT_TRUE(std::isfinite(actual)) << "Non-finite output at " << i;
+            ASSERT_NEAR(actual, expect, tolerance * std::max(1.0F, std::fabs(expect))) << "Output index " << i;
+        }
+    }
+
     static constexpr size_t WORKSPACE_TILE_SIZE = 256UL * 256 * 4;
     static constexpr size_t WORKSPACE_OVERHEAD = 20UL * 1024 * 1024;
     GM_ADDR x1GM;
@@ -317,4 +426,61 @@ TEST_F(FusedMatMulTest, Test_BF16_Sigmoid_NT_BF16Bias_OddM)
 TEST_F(FusedMatMulTest, Test_BF16_Sigmoid_TT_FP32Bias_MultiTile)
 {
     RunSigmoidCase<bfloat16_t, float, true, true>({17, 33, 35, 32, true});
+}
+
+// ------------------------- add/mul basic path (fixpipe_opti): OTF / 1V2 -------------------------
+TEST_F(FusedMatMulTest, Test_FP16_Add_OTF_HighPrecise_NN)
+{
+    RunAddMulCase<half, Blaze::Gemm::OP_TYPE_ADD, Blaze::Gemm::ON_THE_FLY, Blaze::Gemm::NONE_FULL_LOAD_MODE, true,
+                  false, false>({17, 19, 23, 16});
+}
+
+TEST_F(FusedMatMulTest, Test_FP16_Add_1V2_HighPrecise_TN)
+{
+    RunAddMulCase<half, Blaze::Gemm::OP_TYPE_ADD, Blaze::Gemm::ND_ALIG_1V2_FIXPIPE, Blaze::Gemm::NONE_FULL_LOAD_MODE,
+                  true, false, true>({17, 33, 35, 32});
+}
+
+TEST_F(FusedMatMulTest, Test_FP16_Mul_OTF_HighPrecise_NT)
+{
+    RunAddMulCase<half, Blaze::Gemm::OP_TYPE_MUL, Blaze::Gemm::ON_THE_FLY, Blaze::Gemm::NONE_FULL_LOAD_MODE, true, true,
+                  false>({3, 17, 19, 16});
+}
+
+TEST_F(FusedMatMulTest, Test_BF16_Mul_1V2_HighPrecise_NN)
+{
+    RunAddMulCase<bfloat16_t, Blaze::Gemm::OP_TYPE_MUL, Blaze::Gemm::ND_ALIG_1V2_FIXPIPE,
+                  Blaze::Gemm::NONE_FULL_LOAD_MODE, true, false, false>({17, 19, 23, 32});
+}
+
+// ----------------- add/mul high performance (element-domain fusion, AccType == ElementType) --------
+TEST_F(FusedMatMulTest, Test_FP16_Mul_OTF_HighPerf_NN)
+{
+    RunAddMulCase<half, Blaze::Gemm::OP_TYPE_MUL, Blaze::Gemm::ON_THE_FLY, Blaze::Gemm::NONE_FULL_LOAD_MODE, false,
+                  false, false>({17, 19, 23, 16});
+}
+
+TEST_F(FusedMatMulTest, Test_BF16_Add_1V2_HighPerf_TT)
+{
+    RunAddMulCase<bfloat16_t, Blaze::Gemm::OP_TYPE_ADD, Blaze::Gemm::ND_ALIG_1V2_FIXPIPE,
+                  Blaze::Gemm::NONE_FULL_LOAD_MODE, false, true, true>({17, 33, 23, 32});
+}
+
+// ----------------- add/mul full-load paths: al1 (A full-load) / bl1 (B full-load) ------------------
+TEST_F(FusedMatMulTest, Test_FP16_Add_AFullLoad_HighPrecise_NN)
+{
+    RunAddMulCase<half, Blaze::Gemm::OP_TYPE_ADD, Blaze::Gemm::ON_THE_FLY, Blaze::Gemm::A_FULL_LOAD_MODE, true, false,
+                  false>({33, 17, 23, 16});
+}
+
+TEST_F(FusedMatMulTest, Test_FP16_Mul_BFullLoad_OTF_HighPrecise_NN)
+{
+    RunAddMulCase<half, Blaze::Gemm::OP_TYPE_MUL, Blaze::Gemm::ON_THE_FLY, Blaze::Gemm::B_FULL_LOAD_MODE, true, false,
+                  false>({17, 33, 23, 16});
+}
+
+TEST_F(FusedMatMulTest, Test_BF16_Add_BFullLoad_1V2_HighPrecise_NT)
+{
+    RunAddMulCase<bfloat16_t, Blaze::Gemm::OP_TYPE_ADD, Blaze::Gemm::ND_ALIG_1V2_FIXPIPE, Blaze::Gemm::B_FULL_LOAD_MODE,
+                  true, true, false>({17, 33, 23, 32});
 }

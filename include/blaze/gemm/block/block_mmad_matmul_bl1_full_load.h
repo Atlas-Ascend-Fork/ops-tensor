@@ -309,7 +309,11 @@ private:
                                           uint64_t iterN)
     {
         asc::te::l0c_to_gm_params fixpParams{asc::te::unit_flag_mode::enable_update};
-        if constexpr (DispatchPolicy::L0C2OUT_MODEL != ON_THE_FLY) {
+        // 1V2, or elementwise ADD/MUL fusion under OTF (MIX flow: AIC L0C->UB + paired AIV
+        // epilogue, mirroring the legacy CMCT MatMulMixWithoutQueActKernel), both write UB first.
+        if constexpr (DispatchPolicy::L0C2OUT_MODEL != ON_THE_FLY ||
+                      DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_ADD ||
+                      DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_MUL) {
             uint16_t slot = (ubDB_ > 1) ? static_cast<uint16_t>(cvPingPong_ & 0x1) : 0U;
             Sync::WaitForVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG + slot, splitM_);
             CopyOutFromL0C2UB(tensorC, tensorL0C, tileN, curM, slot);

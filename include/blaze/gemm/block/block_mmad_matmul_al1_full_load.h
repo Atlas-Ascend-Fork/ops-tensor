@@ -18,6 +18,7 @@
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/buffer_manager.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/tile/tile_trait.h"
 #include "blaze/gemm/block/block_mmad_decl.h"
@@ -74,6 +75,10 @@ public:
         uint32_t l1Stages{1};
         uint16_t l0cStages{1};
         uint64_t rowStride{0};
+        // Fused epilogue (FusedOpType != 0) AIC-AIV sync params, mirroring fixpipe_opti/bl1 layouts.
+        // Defaults keep legacy 13-member aggregate initializers (e.g. CMCT mat_mul_al1_full_load.h) valid.
+        uint64_t splitM{0};
+        uint8_t ubDB{1};
     };
 
 public:
@@ -102,6 +107,7 @@ public:
         isBias_ = params.biasGmAddr != nullptr;
         l1Stages_ = params.l1Stages;
         enableL0cPingPong_ = params.l0cStages > 1;
+        splitM_ = params.splitM != 0;
         kAlign_ = Blaze::Gemm::CeilAlign(oriK_, static_cast<uint64_t>(AscendC::BLOCK_CUBE));
         // A全载
         uint64_t aL1OneSize = mL1_ * kAlign_ * sizeof(AType);
@@ -139,12 +145,14 @@ public:
             isAL1Loaded_ = true;
         }
 
-        baseM_ = Min(curM, baseM_);
-        mL1Iter_ = CeilDiv(curM, baseM_);
+        // Per-block temp curBaseM_: M tail block must not shrink baseM_ (mainline self-pollution
+        // breaks later blocks' tiling/handshake counts).
+        curBaseM_ = Min(curM, baseM_);
+        mL1Iter_ = CeilDiv(curM, curBaseM_);
         kL1_ = Min(oriK_, kL1_);
         kL1Iter_ = CeilDiv(oriK_, kL1_);
         for (uint64_t iterM = 0; iterM < mL1Iter_; ++iterM) {
-            auto tileM = (iterM + 1 == mL1Iter_) ? (curM - baseM_ * iterM) : baseM_;
+            auto tileM = (iterM + 1 == mL1Iter_) ? (curM - curBaseM_ * iterM) : curBaseM_;
             uint64_t l0cOffset = HALF_L0C_SIZE * (l0cPingPong_ & 0x1);
             // LoC搬出
             auto layoutL0C = asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<16>>{}(tileM, curN);
@@ -168,7 +176,7 @@ public:
                     uint64_t curK0 = (iter1 + 1 == kL0Iter) ? (curKL1 - iter1 * baseK_) : baseK_;
                     uint16_t l0BufferId = l0PingPong_ & 0x1;
 
-                    uint64_t aL1MOffset = iterM * baseM_;
+                    uint64_t aL1MOffset = iterM * curBaseM_;
                     uint64_t aL1KOffset = iter0 * kL1_ + iter1 * baseK_;
                     uint64_t bL1KOffset = iter1 * baseK_;
                     uint64_t bL1NOffset = 0UL;
@@ -200,8 +208,13 @@ public:
             }
             // 数据搬出到GM
             asc::te::l0c_to_gm_params fixpParams{asc::te::unit_flag_mode::enable_update};
-            auto tensorgmC = gmC.slice(asc::te::make_coord(iterM * baseM_, 0), asc::te::make_shape(tileM, curN));
-            if constexpr (FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_RELU) {
+            auto tensorgmC = gmC.slice(asc::te::make_coord(iterM * curBaseM_, 0), asc::te::make_shape(tileM, curN));
+            if constexpr (DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_ADD ||
+                          DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_MUL) {
+                Sync::WaitForVector<Sync::SYNC_MODE_INTRA, PIPE_FIX>(Sync::FIXPIPE_AIV_ACK_FLAG_BASE, splitM_);
+                CopyOutFromL0C2UB(gmC, tensorL0C, curN, tileM);
+                Sync::NotifyVector<Sync::SYNC_MODE_INTRA, PIPE_FIX>(Sync::FIXPIPE_AIC_READY_FLAG_BASE, splitM_);
+            } else if constexpr (FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_RELU) {
                 auto copyL0C2GMRelu = asc::te::make_copy(asc::te::copy_l0c_to_gm{},
                                                          Blaze::Gemm::Tile::CopyL0C2GMTraitRelu{});
                 asc::te::copy(copyL0C2GMRelu.with(fixpParams), tensorgmC, tensorL0C);
@@ -216,6 +229,29 @@ public:
     }
 
 private:
+    constexpr static uint64_t SPLIT_M_ALIGN = 2UL; // 对齐fixpipe_opti/bl1, 与epilogue的SPLIT_M_ALIGN约定一致
+
+    // FUSED(MIX)路径: L0C->UB搬出, 对齐block_mmad_matmul_fixpipe_opti的CopyOutFromL0C2UB
+    // (单缓冲slot恒0; splitM时走dual-dst-split-m trait, UB行数按SPLIT_M_ALIGN对齐).
+    template <typename TensorUB, typename TensorL0C>
+    __aicore__ inline void CopyOutFromL0C2UB(TensorUB& tensorC, TensorL0C& tensorL0C, uint64_t tileN, uint64_t curM)
+    {
+        asc::te::l0c_to_ub_params fixpParams{asc::te::unit_flag_mode::enable_update};
+        uint64_t tileNAlign = Blaze::Gemm::CeilAlign(tileN, static_cast<uint64_t>(asc::te::c0_element<CType>));
+        auto layoutUB = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
+            Blaze::Gemm::CeilAlign(curM, SPLIT_M_ALIGN), tileNAlign);
+        auto ubTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub>(tensorC.data().get()),
+                                             layoutUB);
+        if (splitM_) {
+            auto copyL0C2UBSplitM = asc::te::make_copy(asc::te::copy_l0c_to_ub{},
+                                                       Blaze::Gemm::Tile::CopyL0C2UBTraitSplitM{});
+            asc::te::copy(copyL0C2UBSplitM.with(fixpParams), ubTensor, tensorL0C);
+        } else {
+            auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{});
+            asc::te::copy(copyL0C2UB.with(fixpParams), ubTensor, tensorL0C);
+        }
+    }
+
     __aicore__ inline bool NeedProcessBias(uint64_t kIter0, uint64_t kIter1)
     {
         return isBias_ && kIter0 == 0 && kIter1 == 0;
@@ -328,6 +364,7 @@ private:
     uint64_t mL1_{1};
     uint64_t kL1_{1};
     uint64_t baseM_{16};
+    uint64_t curBaseM_{16};
     uint64_t baseN_{16};
     uint64_t baseK_{16};
 
@@ -340,6 +377,7 @@ private:
     uint64_t l0cPingPong_{0};
     bool isBias_{false};
     bool enableL0cPingPong_{false};
+    bool splitM_{false};
     bool isAL1Loaded_{false};
 
     uint64_t aL1Buffer_{0};

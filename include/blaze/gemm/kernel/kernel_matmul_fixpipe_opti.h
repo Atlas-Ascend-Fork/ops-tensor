@@ -72,6 +72,10 @@ public:
     using MakeLayoutC = asc::te::frame_layout_format<LayoutC, AscendC::Std::Int<asc::te::c0_element<CType>>>;
     using MakeLayoutBias = asc::te::frame_layout_format<LayoutBias, AscendC::Std::Int<asc::te::c0_element<BiasType>>>;
     static constexpr bool TRANS_B = BlockMmad::TRANS_B;
+    // Elementwise ADD/MUL epilogue (BlockEpilogueMatmulElemwise) provides the params-only Init;
+    // other fused epilogues (fixpipe family) keep the mainline two-param contract.
+    static constexpr bool HAS_ELEMWISE = BlockMmad::DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_ADD ||
+                                         BlockMmad::DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_MUL;
     using MakeLayoutBL1 = AscendC::Std::conditional_t<
         TRANS_B, asc::te::frame_layout_format<asc::te::zn_layout_ptn, asc::te::layout_trait_default<BType>>,
         asc::te::frame_layout_format<asc::te::nz_layout_ptn, asc::te::layout_trait_default<BType>>>;
@@ -118,7 +122,11 @@ public:
             return;
         }
         Blaze::Gemm::SetHF32(params.schParams.isHf32);
-        epilogueOp.Init(params.epilogueParams, problemShape_);
+        if constexpr (HAS_ELEMWISE) {
+            epilogueOp.Init(params.epilogueParams); // elemwise: params-only Init
+        } else {
+            epilogueOp.Init(params.epilogueParams, problemShape_); // fixpipe: mainline two-param
+        }
         if ASCEND_IS_AIC {
             blockMmad.Init(params.mmadParams);
         }

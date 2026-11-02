@@ -92,12 +92,48 @@ def gen_sigmoid_data(
     return golden
 
 
+def gen_add_mul_data(
+    m,
+    n,
+    k,
+    dtype,
+    optype,
+    trans_a=False,
+    trans_b=False,
+    output_dir="./",
+    seed=42,
+    inner_precise=0,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    a, a_fp32 = _cast_input(rng.uniform(-0.5, 0.5, (m, k)).astype(np.float32), dtype)
+    b, b_fp32 = _cast_input(rng.uniform(-0.5, 0.5, (k, n)).astype(np.float32), dtype)
+    x3, x3_fp32 = _cast_input(rng.uniform(-0.5, 0.5, (m, n)).astype(np.float32), dtype)
+    accumulator = np.matmul(a_fp32, b_fp32)
+    if str(inner_precise) == "1":
+        _, accumulator = _cast_input(accumulator, dtype)
+    if optype == "add":
+        golden_fp32 = accumulator + x3_fp32
+    else:
+        golden_fp32 = accumulator * x3_fp32
+    golden = (
+        golden_fp32.astype(np.float16)
+        if dtype == "float16"
+        else _fp32_to_bf16_u16(golden_fp32)
+    )
+    (a.T.copy() if trans_a else a).tofile(os.path.join(output_dir, "input_a.bin"))
+    (b.T.copy() if trans_b else b).tofile(os.path.join(output_dir, "input_b.bin"))
+    x3.tofile(os.path.join(output_dir, "input_x3.bin"))
+    golden.tofile(os.path.join(output_dir, "golden_c.bin"))
+    return golden
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate FusedMatMul scale-add or sigmoid test data"
     )
     parser.add_argument(
-        "--optype", choices=["scale_add", "sigmoid"], default="scale_add"
+        "--optype", choices=["scale_add", "sigmoid", "add", "mul"], default="scale_add"
     )
     parser.add_argument(
         "--bias_dtype", choices=["none", "same", "float32"], default="none"
@@ -115,6 +151,13 @@ def main():
     parser.add_argument("--beta", type=float, default=1.0, help="x3 scale")
     parser.add_argument("--output_dir", type=str, default="./")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--inner_precise",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="0: FP32 fusion, 1: B16 acc fusion",
+    )
     args = parser.parse_args()
 
     if args.optype == "sigmoid":
@@ -128,6 +171,21 @@ def main():
             args.trans_b,
             args.output_dir,
             args.seed,
+        )
+        return
+
+    if args.optype in ("add", "mul"):
+        gen_add_mul_data(
+            args.m,
+            args.n,
+            args.k,
+            args.dtype,
+            args.optype,
+            args.trans_a,
+            args.trans_b,
+            args.output_dir,
+            args.seed,
+            args.inner_precise,
         )
         return
 

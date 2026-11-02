@@ -37,7 +37,7 @@ class GemmUniversal<ProblemShape_, BlockMmad_, BlockEpilogue_, BlockScheduler_,
 public:
     __aicore__ inline GemmUniversal()
     {
-        if constexpr (BlockMmad::DispatchPolicy::L0C2OUT_MODEL != ON_THE_FLY) {
+        if constexpr (BlockMmad::DispatchPolicy::L0C2OUT_MODEL != ON_THE_FLY || HAS_ELEMWISE) {
             if ASCEND_IS_AIV {
                 Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG);     // ping
                 Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG + 1); // pong
@@ -46,7 +46,7 @@ public:
     }
     __aicore__ inline ~GemmUniversal()
     {
-        if constexpr (BlockMmad::DispatchPolicy::L0C2OUT_MODEL != ON_THE_FLY) {
+        if constexpr (BlockMmad::DispatchPolicy::L0C2OUT_MODEL != ON_THE_FLY || HAS_ELEMWISE) {
             if ASCEND_IS_AIC {
                 Sync::WaitForVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG, true);     // ping
                 Sync::WaitForVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIV_SYNC_AIC_FLAG + 1, true); // pong
@@ -77,6 +77,12 @@ public:
     using MakeLayoutBias = asc::te::frame_layout_format<LayoutBias, AscendC::Std::Int<asc::te::c0_element<BiasType>>>;
 
     static constexpr bool TRANS_B = BlockMmad::TRANS_B;
+    // Elementwise add/mul fusion (FUSED_OP_TYPE != 0) runs the MIX data flow (AIC L0C->UB +
+    // paired AIV epilogue) even for the ON_THE_FLY L0C2OUT model, mirroring the legacy CMCT
+    // MatMulMixWithoutQueActKernel B-full-load OTF template. Without fusion the OTF model keeps
+    // the original AIC-only direct L0C->GM write.
+    static constexpr bool HAS_ELEMWISE = BlockMmad::DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_ADD ||
+                                         BlockMmad::DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_MUL;
     using MakeLayoutBL1 = AscendC::Std::conditional_t<
         TRANS_B, asc::te::frame_layout_format<asc::te::zn_layout_ptn, asc::te::layout_trait_default<BType>>,
         asc::te::frame_layout_format<asc::te::nz_layout_ptn, asc::te::layout_trait_default<BType>>>;
@@ -108,7 +114,8 @@ public:
         BlockEpilogue epilogueOp;
         BlockMmad blockMmad;
         int64_t curBlockIdx = AscendC::GetBlockIdx();
-        if constexpr (BlockMmad::DispatchPolicy::L0C2OUT_MODEL == ON_THE_FLY) {
+        // OTF without fusion stays AIC-only (direct L0C->GM); 1V2 and fused OTF run the MIX flow.
+        if constexpr (BlockMmad::DispatchPolicy::L0C2OUT_MODEL == ON_THE_FLY && !HAS_ELEMWISE) {
             if ASCEND_IS_AIV {
                 return;
             }
@@ -130,11 +137,15 @@ public:
         }
         Blaze::Gemm::SetHF32(params.schParams.isHf32);
 
-        if constexpr (BlockMmad::DispatchPolicy::L0C2OUT_MODEL == ON_THE_FLY) {
+        if constexpr (BlockMmad::DispatchPolicy::L0C2OUT_MODEL == ON_THE_FLY && !HAS_ELEMWISE) {
             blockMmad.Init(params.mmadParams);
             MatmulProcessOnTheFly(params, blockMmad, bs, curBlockIdx, AscendC::GetBlockNum(), bs.GetBlockNums());
         } else {
-            epilogueOp.Init(params.epilogueParams, problemShape_);
+            if constexpr (HAS_ELEMWISE) {
+                epilogueOp.Init(params.epilogueParams); // elemwise: params-only Init
+            } else {
+                epilogueOp.Init(params.epilogueParams, problemShape_); // fixpipe: mainline two-param
+            }
             if ASCEND_IS_AIC {
                 blockMmad.Init(params.mmadParams);
             }

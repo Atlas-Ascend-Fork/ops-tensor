@@ -1,0 +1,13 @@
+casename,m,k,n,transA,transB,dtype,bias_dtype,op_type,inner_precise,mode
+fused_mat_mul_elemwise_fp16_add_hp_nn,513,129,257,false,false,float16,none,add,0,basic
+fused_mat_mul_elemwise_bf16_mul_hp_nn,64,128,64,false,false,bfloat16,none,mul,0,basic
+fused_mat_mul_elemwise_fp16_add_perf_nt,17,33,65,false,true,float16,none,add,1,basic
+fused_mat_mul_elemwise_bf16_mul_perf_tn,33,65,17,true,false,bfloat16,none,mul,1,basic
+fused_mat_mul_elemwise_fp16_add_hp_tt,33,65,79,true,true,float16,none,add,0,basic
+fused_mat_mul_elemwise_bf16_mul_perf_small_n,1001,5,1,false,false,bfloat16,none,mul,1,basic
+fused_mat_mul_elemwise_fp16_add_perf_nn_largen,17,33,65,false,false,float16,none,add,1,basic
+fused_mat_mul_elemwise_fp16_add_hp_nt_ctrl,17,33,65,false,true,float16,none,add,0,basic
+fused_mat_mul_elemwise_bf16_add_streamk_nn,32,15824,112,false,false,bfloat16,none,add,1,streamk
+fused_mat_mul_elemwise_bf16_add_streamk_smallk,32,512,112,false,false,bfloat16,none,add,1,streamk
+fused_mat_mul_elemwise_fp16_mul_streamk_nn,64,4096,96,false,false,float16,none,mul,1,streamk
+fused_mat_mul_elemwise_bf16_add_streamk_hp,32,15824,112,false,false,bfloat16,none,add,0,streamk
