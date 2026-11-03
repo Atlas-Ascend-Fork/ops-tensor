@@ -69,7 +69,8 @@ repos:
     hooks:
       - id: classify-rule-check
         name: classify_rule 登记校验
-        entry: python3 scripts/check_classify_rule.py
+        # 优先 python3，环境无 python3 时退化为 python（见 scripts/pre_commit_python.sh）
+        entry: bash scripts/pre_commit_python.sh scripts/check_classify_rule.py
         language: system
         pass_filenames: false
         always_run: true
