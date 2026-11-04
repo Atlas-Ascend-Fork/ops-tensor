@@ -218,7 +218,9 @@ private:
                                                      asc::te::layout_trait_default<int32_t>>(1UL, n);
             auto l1Bias = asc::te::make_tensor(
                 asc::te::make_mem_ptr<asc::te::location::l1, int32_t>(l1BiasOffset_[biasBufferId_]), layout);
-            asc::te::copy(asc::te::make_copy(asc::te::copy_gm_to_l1{}), l1Bias, gmBias);
+            auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{},
+                                                Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
+            asc::te::copy(copyGM2L1, l1Bias, gmBias);
             SetFlag<HardEvent::MTE2_MTE1>(BIAS_FLAG + biasBufferId_);
             WaitFlag<HardEvent::MTE2_MTE1>(BIAS_FLAG + biasBufferId_);
         }
@@ -304,7 +306,7 @@ private:
     __aicore__ inline void IterateABL1(const TensorA& gmA, const TensorB& gmB, asc::te::mmad_params& mmadParams,
                                        C1Tensor& c1Local, uint64_t curML1, uint64_t curNL1)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
 
         for (uint64_t iter0 = 0; iter0 < kL1Iter_; ++iter0) {
             uint64_t curKL1 = (iter0 == kL1Iter_ - 1) ? (k_ - iter0 * kL1_) : kL1_;
@@ -354,7 +356,7 @@ private:
     __aicore__ inline void IterateAL1BL1(const TensorA& gmA, const TensorB& gmB, asc::te::mmad_params& mmadParams,
                                          C1Tensor& c1Local, uint64_t curML1, uint64_t curNL1)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
 
         for (uint64_t kAIter = 0; kAIter < kAL1Iter_; ++kAIter) {
             uint64_t curKAL1 = (kAIter == kAL1Iter_ - 1) ? (k_ - kAIter * kAL1_) : kAL1_;
@@ -404,7 +406,7 @@ private:
     __aicore__ inline void IterateBL1AL1(const TensorA& gmA, const TensorB& gmB, asc::te::mmad_params& mmadParams,
                                          C1Tensor& c1Local, uint64_t curML1, uint64_t curNL1)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
 
         for (uint64_t kBIter = 0; kBIter < kBL1Iter_; ++kBIter) {
             uint64_t curKBL1 = (kBIter == kBL1Iter_ - 1) ? (k_ - kBIter * kBL1_) : kBL1_;

@@ -18,6 +18,7 @@
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
+#include "blaze/gemm/tile/tile_trait.h"
 #include "blaze/gemm/block/block_mmad_decl.h"
 #include "tensor_api/tensor.h"
 
@@ -267,7 +268,8 @@ private:
             scalarScale_ = scaleGlobal;
         } else if constexpr (asc::te::is_attr_tensor_v<TScale> && !IsSameType<CType, int32_t>::value) {
             WaitFlag<HardEvent::FIX_MTE2>(scaleL1BufId);
-            auto copyGM2L1Scale = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+            auto copyGM2L1Scale = asc::te::make_copy(asc::te::copy_gm_to_l1{},
+                                                     Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
             asc::te::copy(copyGM2L1Scale, tensorX2L1, scaleGlobal);
             SetFlag<HardEvent::MTE2_FIX>(scaleL1BufId);
             WaitFlag<HardEvent::MTE2_FIX>(scaleL1BufId);
@@ -281,7 +283,7 @@ private:
             return;
         }
         WaitFlag<HardEvent::MTE1_MTE2>(BIAS_BUFFER_FLAG_0 + biasBufId);
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         asc::te::copy(copyGM2L1, tensorBiasL1, gmBias);
         SetFlag<HardEvent::MTE2_MTE1>(BIAS_BUFFER_FLAG_0 + biasBufId);
         WaitFlag<HardEvent::MTE2_MTE1>(BIAS_BUFFER_FLAG_0 + biasBufId);
@@ -601,7 +603,7 @@ private:
                                        uint64_t curML1, uint64_t curNL1, const TensorBiasL1& tensorBiasL1,
                                        uint16_t biasBufId)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         const uint64_t k = k_;
         const uint64_t kL1 = kL1_;
         const uint64_t kAL1 = kAL1_;
@@ -659,7 +661,7 @@ private:
                                          uint64_t curML1, uint64_t curNL1, const TensorBiasL1& tensorBiasL1,
                                          uint16_t biasBufId)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
 
         for (uint64_t kAIter = 0; kAIter < kAL1Iter_; ++kAIter) {
             uint64_t curKAL1 = (kAIter == kAL1Iter_ - 1) ? (k_ - kAIter * kAL1_) : kAL1_;
@@ -711,7 +713,7 @@ private:
                                          uint64_t curML1, uint64_t curNL1, const TensorBiasL1& tensorBiasL1,
                                          uint16_t biasBufId)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
 
         for (uint64_t kBIter = 0; kBIter < kBL1Iter_; ++kBIter) {
             uint64_t curKBL1 = (kBIter == kBL1Iter_ - 1) ? (k_ - kBIter * kBL1_) : kBL1_;

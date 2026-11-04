@@ -364,7 +364,8 @@ private:
         auto tensorScaleAL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, AscendC::fp8_e8m0_t>(scaleAL1Offset), layoutScaleAL1);
         if (needCopyScale) {
-            auto CopyScaleGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+            auto CopyScaleGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{},
+                                                     Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(SCALE_BUFFER_FLAG_0 + scaleL1BufId);
             const uint64_t curScaleKL1 = Min(scaleKL1_, k_ - kL1Offset);
             const uint64_t curScaleKLen = (Align64(curScaleKL1) >> ALIGN_64_BYTES_SHIFT) * MXFP_MULTI_BASE_SIZE;
@@ -390,7 +391,8 @@ private:
             tileL1L0Param.curM, scaleKLen);
         auto tensorScaleAL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, AscendC::fp8_e8m0_t>(scaleAL1Offset), layoutScaleAL1);
-        auto CopyScaleGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto CopyScaleGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{},
+                                                 Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         if (needCopyScale) {
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(SCALE_BUFFER_FLAG_0 + scaleL1BufId);
             const uint64_t curScaleKL1 = Min(scaleKL1_, k_ - kL1Offset);
@@ -409,7 +411,7 @@ private:
     __aicore__ inline auto CopyAToL1(TensorA_ const& gmA, const TileL1L0Param& tileL1L0Param, uint64_t l1BufId,
                                      uint64_t kL1Offset)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         if constexpr (DispatchPolicy::FULL_LOAD_MODE == NONE_FULL_LOAD_MODE) {
             const uint64_t aL1Offset = l1BufferAOffset_[l1BufId];
             auto layoutAL1 = MakeLayoutAL1{}(tileL1L0Param.curM, tileL1L0Param.curPadKL1);
@@ -447,7 +449,8 @@ private:
         auto tensorBiasL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(biasL1Offset),
                                                  layoutBiasL1);
         if (isBias_ && iter0 == 0 && isFirstSplitK) {
-            auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+            auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{},
+                                                Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
             asc::te::copy(copyGM2L1, tensorBiasL1, gmBias);
         }
         return tensorBiasL1;
@@ -464,7 +467,7 @@ private:
         auto gmBlockB = gmB.slice(asc::te::make_coord(kL1Offset, 0),
                                   asc::te::make_shape(tileL1L0Param.curGmKL1, tileL1L0Param.curN));
         Blaze::Gemm::Tile::PadMxKBL1::PadZero(tensorBL1, gmBlockB);
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         asc::te::copy(copyGM2L1, tensorBL1, gmBlockB);
         return tensorBL1;
     }
