@@ -222,9 +222,9 @@ template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, 
 __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::operator()(
     const BlockShape& blockShape, const BlockCoord& blockCoord)
 {
-    int64_t blkM = AscendC::Te::Get<Gemm::MNK_M>(blockShape);
-    int64_t k = AscendC::Te::Get<Gemm::MNK_K>(blockShape);
-    uint64_t offset = AscendC::Te::Get<Gemm::MNK_M>(blockCoord) * shape_.b + AscendC::Te::Get<Gemm::MNK_B>(blockCoord);
+    int64_t blkM = asc::te::get<Gemm::MNK_M>(blockShape);
+    int64_t k = asc::te::get<Gemm::MNK_K>(blockShape);
+    uint64_t offset = asc::te::get<Gemm::MNK_M>(blockCoord) * shape_.b + asc::te::get<Gemm::MNK_B>(blockCoord);
     Quant(offset, blkM, k);
 }
 
@@ -240,9 +240,9 @@ template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, 
 __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::InitProblemShape(
     const ProblemShape& problemShape)
 {
-    shape_.m = AscendC::Te::Get<Gemm::MNK_M>(problemShape);
-    shape_.n = AscendC::Te::Get<Gemm::MNK_N>(problemShape);
-    shape_.b = AscendC::Te::Get<Gemm::MNK_B>(problemShape);
+    shape_.m = asc::te::get<Gemm::MNK_M>(problemShape);
+    shape_.n = asc::te::get<Gemm::MNK_N>(problemShape);
+    shape_.b = asc::te::get<Gemm::MNK_B>(problemShape);
 }
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
