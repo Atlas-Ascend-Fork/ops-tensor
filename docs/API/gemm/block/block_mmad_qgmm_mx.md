@@ -43,8 +43,8 @@ L0C 结果写到双 AIV 可见的 UB，供融合 Epilogue 消费。
   其自定义搬运，不将该 view 转交普通 NZ/ZN 双源 Tensor Copy。
 - `singleShape` 的 N 是单个半区宽度；拼接后的 L1 B、ScaleB 和 UB C 的 N 宽度均为其 2 倍，
   即 UB 输出逻辑形状为 `[blockM, 2 * blockN]`。
-- NZ/ZN 搬运优先尝试物理布局快速路径；不满足 K/N/window 对齐条件时，回退为左右半区分别搬运，
-  不改变计算结果。
+- 普通 NZ/ZN 双源 Tensor 在按需补零后，通过 tensor_api NZ2NZ/ZN2ZN 分别搬运左右半区。
+  单源 view 始终使用 `CopyConcatGM2L1` 通用拼接。
 
 ## 特殊静态常量
 

@@ -7,7 +7,7 @@
 | 类别 | 典型代表 | 注册方式 | 调用方式 | `.with()` |
 |------|---------|---------|---------|-----------|
 | **Copy Tile（委托基类式）** | `CopySliceGM2L1`, `CopyGM2UBWeight` | CopyTraits 继承框架基类 | `MakeCopy → Copy` | 否 |
-| **Copy Tile（自定义式）** | `CopyConcatGM2L1`, `CopyMatmulSliceGM2L1` | CopyTraits 完全自定义 | `MakeCopy → .with(params) → Copy` | 是 |
+| **Copy Tile（自定义式）** | `CopyConcatGM2L1`, `CopyMatmulSliceGM2L1` | 复用算子作为 OpWith + 带参 CopyTraits | `MakeCopy → .with(params) → Copy` | 是 |
 | **Compute Tile** | `PadMxKAL1`, `FillUb`, `ScaleMxBias` | 无 | `X::Method(args...)` | 否 |
 | **Trait-Only Tile** | `MmadTraitMX`, `CopyL0C2GMTraitRelu` | MmadTraits 特化 | 作为模板参数传入 `MmadAtom` | 通过 MmadAtom 的 `.with()` |
 
@@ -79,11 +79,11 @@ Copy Tile 的核心是定义一个包含 `static void Copy(...)` 的结构体，
 | | 委托基类式 | 自定义式 |
 |---|---|---|
 | **代表** | `CopySliceGM2L1`, `CopyGM2UBWeight` | `CopyConcatGM2L1`, `CopyMatmulSliceGM2L1` |
-| **CopyTraits 实现** | 继承框架 4 参数基类 | 完全自定义，不继承基类 |
-| **`.with()` 支持** | 不支持 | 支持 |
-| **`CopyUnpack`** | 由框架基类提供 | 自行实现，转发存储的参数 |
+| **CopyTraits 实现** | 继承框架 4 参数基类 | 带参 2 参偏特化 + 默认特化继承 4 参数基类 |
+| **`.with()` 支持** | 不支持 | 支持（由基类提供） |
+| **`CopyUnpack`** | 由框架基类提供 | 带参特化自行实现，转发存储的参数 |
 | **额外参数传递** | 函数入参直接传 | 通过 `.with()` 存储，`CopyUnpack` 转发 |
-| **Copy 方法签名** | `<Tp, traits, T, U>` 标准 4 参数 | `<T, U>` + params 结构体 |
+| **Copy 方法签名** | `<Tp, traits, T, U>` 标准 4 参数 | `<Tp, traits, T, U>` + 额外参数 |
 | **适用场景** | 不需要运行时参数，或参数可从 Layout 推导 | 需要调用方显式传入运行时参数 |
 
 ### 3.2 定义 Tile 结构体（两种模式共用）
@@ -150,7 +150,7 @@ private:
 
 **关键要点：**
 
-- **模板签名**：委托基类式使用 `<typename Tp, const Tp& traits, typename T, typename U>` 标准 4 参数；自定义式只需 `<typename T, typename U>` + params 参数
+- **模板签名**：两种 Copy Tile 均使用 `<typename Tp, const Tp& traits, typename T, typename U>` 标准 4 参数；自定义式需要额外运行时参数时，在函数入参末尾追加 params 参数
 - **Layout 信息从 Tensor 运行时提取**：通过 `.Layout()` 获取 shape/stride，不硬编码。NZ layout 的 M 轴使用 `MNK_M` 语义常量索引
 - **流水线守卫**：MTE2/MTE3 搬运操作需要 `if ASCEND_IS_AIV { return; }` 跳过 Vector 核
 - **架构守卫**：使用 `if constexpr (CURRENT_ARCH_VERSION == ArchVersion::V3510)` 保护架构相关代码
@@ -200,7 +200,7 @@ AscendC::Te::Copy(copyGM2L1Slice, tensorAL1, gmTileA);
 
 ### 3.4 自定义式 CopyTraits（支持 `.with()` 传参）
 
-当 Tile 需要调用方**显式传入运行时参数**时，CopyTraits 必须完全自定义：自行定义 `.with()` 存储参数、`CopyUnpack` 转发参数。
+当 Tile 需要调用方**显式传入运行时参数**时，复用算子自身作为 OpWith：带参 `copy_traits<Op, Traits>` 承载参数并实现 `CopyUnpack` 转发；默认全特化继承 4 参数基类，`.with()` 由基类提供并返回同一算子的带参 traits。
 
 自定义式内部根据参数形式又分为两种子模式：
 
@@ -208,9 +208,10 @@ AscendC::Te::Copy(copyGM2L1Slice, tensorAL1, gmTileA);
 |---|---|---|
 | **代表** | `CopyConcatGM2L1` | `CopyMatmulSliceGM2L1` |
 | **参数形式** | Params 结构体（`n`, `k`） | 标量（`sliceM`） |
-| **Copy 签名** | `<T, U>` + params（去掉 Tp/traits） | `<Tp, traits, T, U>` + 标量（保留标准 4 参数） |
-| **CopyUnpack** | 显式 `<T, U>` 类型 | 可变参数包 `Args...` 转发 |
-| **CopyTraits 特化** | `template <>` 默认特化 | `template <>` 针对特定 TraitDefault 特化 |
+| **Copy 签名** | `<Tp, traits, T, U>` + params（保留标准 4 参数） | `<Tp, traits, T, U>` + 标量（保留标准 4 参数） |
+| **OpWith 标签** | 复用算子自身 | 复用算子自身 |
+| **CopyUnpack** | 直接调用 `Copy<Tp, trait>`，显式 `<T, U>` | 可变参数包 `Args...` 转发 |
+| **默认特化** | 继承 4 参数基类，`with()` 由基类提供 | 继承 4 参数基类，`with()` 由基类提供 |
 
 #### 模式 A：结构体参数式 — `CopyConcatGM2L1`
 
@@ -227,60 +228,65 @@ struct CopyConcatGM2L1Params {
 } // namespace Blaze::Gemm::Tile
 ```
 
-**步骤 2：Tile 结构体 — Copy 方法去掉 Tp/traits，直接接受 params**
+**步骤 2：Tile 结构体 — 单一 Copy 入口（void），保留标准 4 参数签名 `<Tp, traits, T, U>`（带默认值）**
 
 ```cpp
 struct CopyConcatGM2L1 {
-    template <typename T, typename U>
+    // Tp/traits 带默认值：traits 路由时由框架显式传入，Block 直调时省略
+    template <typename Tp = asc::te::gm_to_l1_trait,
+              const Tp& traits = asc::te::gm_to_l1_trait_default::value,
+              typename T, typename U>
     __aicore__ inline static void Copy(const T& dst, const U& src,
                                        const CopyConcatGM2L1Params& params)
     {
-        using SrcLayoutPtn = AscendC::Te::GetLayoutPattern<typename U::layoutType>;
+        using SrcLayoutPtn = asc::te::get_layout_pattern<typename U::layout_type>;
         constexpr bool isScaleB = AscendC::Std::is_one_of_v<SrcLayoutPtn,
-            AscendC::Te::ScaleBNDLayoutPtn, AscendC::Te::ScaleBDNLayoutPtn>;
+            asc::te::scaleb_nd_layout_ptn, asc::te::scaleb_dn_layout_ptn>;
         if constexpr (isScaleB) {
-            CopyScaleB(dst, src, params);
+            // ...通用 ScaleB 拼接路径...
         } else {
-            CopyB(dst, src, params);
+            // ...通用 B 拼接路径...
         }
     }
 
 private:
     // ...内部实现省略
 };
+
 ```
 
-注意：`Copy` 方法签名**去掉了** `Tp`/`traits` 模板参数，因为 `CopyUnpack` 会手动解包并转发。
+注意：`Copy` 保留标准 4 参数签名 `<Tp, traits, T, U>`（与 `CopySliceGM2L1::Copy` 一致），
+traits 检测路径因此对所有算子统一；默认值让 Block 直调免于显式传 trait。
 
-**步骤 3：CopyTraits — `template <>` 默认特化，CopyUnpack 显式类型**
+**步骤 3：CopyTraits — 带参 2 参偏特化承载 params，默认全特化继承 4 参数基类**
 
 ```cpp
-namespace AscendC {
-namespace Te {
+namespace asc {
+namespace te {
 
-template <>
-struct CopyTraits<Blaze::Gemm::Tile::CopyConcatGM2L1> {
-    using TraitType = typename CopyGM2L1TraitDefault::TraitType;
-    static constexpr const TraitType defaultTrait = CopyGM2L1TraitDefault::value;
+// 带参形态：承载 params 成员，CopyUnpack 转发 params
+template <typename Traits>
+struct copy_traits<Blaze::Gemm::Tile::CopyConcatGM2L1, Traits> {
+    using trait_type = get_trait_member_type_t<Traits>;
+    static constexpr const trait_type default_trait = Traits::value;
 
-    __aicore__ inline constexpr CopyTraits with(
-        const Blaze::Gemm::Tile::CopyConcatGM2L1Params& copyParams) const
-    {
-        return {copyParams};
-    }
-
-    template <const TraitType& trait = defaultTrait, typename T, typename U>
+    template <const trait_type& trait = default_trait, typename T, typename U>
     __aicore__ inline void CopyUnpack(const T& dst, const U& src) const
     {
-        (void)trait;
-        Blaze::Gemm::Tile::CopyConcatGM2L1::Copy(dst, src, params);
+        Blaze::Gemm::Tile::CopyConcatGM2L1::template Copy<trait_type, trait>(dst, src, params);
     }
 
-    Blaze::Gemm::Tile::CopyConcatGM2L1Params params{};
+    Blaze::Gemm::Tile::CopyConcatGM2L1Params params;
 };
 
-} // namespace Te
-} // namespace AscendC
+// 默认全特化：继承 4 参数基类，with() 由基类提供并返回带参 traits
+template <>
+struct copy_traits<Blaze::Gemm::Tile::CopyConcatGM2L1>
+    : public copy_traits<Blaze::Gemm::Tile::CopyConcatGM2L1, gm_to_l1_trait_default,
+                         Blaze::Gemm::Tile::CopyConcatGM2L1, gm_to_l1_trait_default> {};
+
+} // namespace te
+} // namespace asc
 ```
 
 **步骤 4：调用方式**
@@ -294,7 +300,7 @@ AscendC::Te::Copy(
 
 #### 模式 B：标量参数式 — `CopyMatmulSliceGM2L1`
 
-与模式 A 的关键区别：Copy 方法**保留标准 4 参数签名** `<Tp, traits, T, U>`，额外参数是标量而非结构体，CopyUnpack 使用**可变参数包**转发。
+与模式 A 的关键区别：额外参数是标量而非结构体，OpWith 复用算子自身，CopyUnpack 使用**可变参数包**转发；Copy 方法同样**保留标准 4 参数签名** `<Tp, traits, T, U>`。
 
 **步骤 1：Tile 结构体 — Copy 方法保留标准 4 参数 + 额外标量**
 
@@ -390,101 +396,53 @@ AscendC::Te::Copy(copyGM2L1Slice.with(sliceM_), tensorAL1, gmTileA);
 
 开发新 Tile 时，容易对模式 A 和模式 B 的写法差异产生困惑。以下逐一解答。
 
-##### Q1：为什么模式 B（`CopyMatmulSliceGM2L1`）无需自己定义 `with()`，而模式 A（`CopyConcatGM2L1`）必须自己写？
+##### Q1：为什么两种模式都不用自己写 `with()`？
 
-**答案：取决于默认特化是否继承了框架 4 参数基类。**
+**答案：默认特化都继承了框架 4 参数基类，`with()` 由基类统一提供。**
 
-模式 B 的默认特化继承了框架 4 参数基类，`with()` 由基类提供：
+基类 `with()` 返回 `copy_traits<Op, Trait>{params}`（aggregate 初始化进带参 traits 的
+`params` 成员）。两种模式都复用算子自身作为 OpWith，差别只在带参 traits 的特化形式和
+`CopyUnpack` 的参数转发方式。
 
-```cpp
-// 模式 B：继承 4 参数基类 → 基类已实现 with()，无需自己写
-template <>
-struct AscendC::Te::CopyTraits<Blaze::Gemm::Tile::CopyMatmulSliceGM2L1>
-    : public CopyTraits<
-          AscendC::Te::CopyGM2L1, AscendC::Te::CopyGM2L1TraitDefault,
-          Blaze::Gemm::Tile::CopyMatmulSliceGM2L1,
-          AscendC::Te::CopyGM2L1TraitDefault> {
-};
-```
-
-完整调用链：
+模式 A 的完整调用链：
 
 ```
-MakeCopy(CopyMatmulSliceGM2L1{})
-  → 命中默认特化（继承基类，基类提供 with()）
-    → .with(sliceM_)
-      → 基类 with() 返回带 sliceM 的 <CopyMatmulSliceGM2L1, CopyGM2L1TraitDefault> 实例
+MakeCopy(CopyConcatGM2L1{})
+  → 命中默认全特化（继承 4 参数基类，基类提供 with()）
+    → .with(CopyConcatGM2L1Params{n_, k_})
+      → 基类 with() 返回 copy_traits<CopyConcatGM2L1, Trait>{params}
         → 框架调用该实例的 CopyUnpack(dst, src)
-          → CopyUnpack 将 sliceM 追加到参数末尾，转发给 Copy<Tp, trait, T, U>(dst, src, sliceM)
+          → CopyConcatGM2L1::Copy<Tp, trait>(dst, src, params)
 ```
 
-模式 A 的默认特化**没有继承任何基类**，是完全自定义的，所以必须自己定义 `with()`：
+**核心规则：默认特化继承 4 参数基类 = `with()` 由基类提供；带参 traits 只负责承载参数并转发。**
 
-```cpp
-// 模式 A：没有继承基类 → 必须自己写 with()
-template <>
-struct CopyTraits<Blaze::Gemm::Tile::CopyConcatGM2L1> {
-    // 自己定义 with()
-    __aicore__ inline constexpr CopyTraits with(
-        const CopyConcatGM2L1Params& copyParams) const
-    {
-        return {copyParams};
-    }
-    // 自己定义 CopyUnpack
-    template <const TraitType& trait = defaultTrait, typename T, typename U>
-    __aicore__ inline void CopyUnpack(const T& dst, const U& src) const
-    {
-        (void)trait;
-        CopyConcatGM2L1::Copy(dst, src, params);
-    }
-    CopyConcatGM2L1Params params{};
-};
-```
+##### Q2：哪些入口必须保留 `<Tp, traits, T, U>` 标准签名，哪些不需要？
 
-**核心规则：继承基类 = 基类提供 `with()`；不继承 = 自己写 `with()`。**
+**答案：经 copy_traits 机制路由的入口一律保留；Block 直调、不经 traits 的辅助入口不需要。**
 
-##### Q2：为什么模式 A 的 Copy 去掉了 `Tp`/`traits`，而模式 B 保留了？
+凡是由 `CopyUnpack`（或 4 参基类 `copy_unpack`）经检测路径
+（`has_pascal_copy_method`）调用的算子入口，签名统一为
+`template <typename Tp, const Tp& traits, typename T, typename U> Copy(...)`——
+与 `CopySliceGM2L1::Copy` 及 tensor_api 内建算子一致，即使实现不使用 trait
+（如 concat 路径）也保留，检测路径因此对所有算子统一。
 
-**答案：取决于 `CopyUnpack` 是否将 trait 转发给 `Copy`。**
+需要同时服务 traits 路由和直调的入口可为 trait 参数提供默认值：
 
-模式 A 的 `CopyUnpack` **丢弃了 trait**，直接调 `Copy(dst, src, params)`：
+- `CopyConcatGM2L1::Copy`：唯一对外入口，void 返回，`Tp`/`traits` 带默认值（直调免填）
+- `PadMxKBL1::PadZero` 等：普通直调辅助，不带 trait 参数
 
-```cpp
-// 模式 A：CopyUnpack 消费了 trait，不传给 Copy
-template <const TraitType& trait = defaultTrait, typename T, typename U>
-__aicore__ inline void CopyUnpack(const T& dst, const U& src) const
-{
-    (void)trait;  // ← trait 在这里被丢弃
-    CopyConcatGM2L1::Copy(dst, src, params);  // ← Copy 只收到 (dst, src, params)
-}
-```
-
-`Copy` 不需要 `Tp`/`traits`，因为 `CopyUnpack` 已经帮它消费了 trait。
-
-模式 B 的 `CopyUnpack` **显式传递了 `Tp`/`traits`** 给 `Copy`：
-
-```cpp
-// 模式 B：CopyUnpack 将 trait 转发给 Copy
-template <const TraitType& trait = defaultTrait, typename... Args>
-__aicore__ inline void CopyUnpack(const Args&... args) const
-{
-    // ← 显式传 <TraitType, trait>
-    CopyMatmulSliceGM2L1::Copy<TraitType, trait, Args...>(args..., sliceM);
-}
-```
-
-`Copy` 必须保留 `Tp`/`traits`，因为 `CopyUnpack` 会转发给它。
-
-**核心规则：`CopyUnpack` 丢弃 trait → `Copy` 不需要 `Tp`/`traits`；`CopyUnpack` 转发 trait → `Copy` 必须保留 `Tp`/`traits`。**
+**核心规则：traits 路由入口保留 `<Tp, traits, T, U>`；需要同时服务直调的入口为 trait 参数提供默认值。**
 
 ##### 总结对照表
 
 | | 模式 A：`CopyConcatGM2L1` | 模式 B：`CopyMatmulSliceGM2L1` |
 |---|---|---|
-| 默认特化 | 不继承基类，完全自定义 | 继承 4 参数基类 |
-| `with()` 来源 | 自己定义 | 基类提供 |
-| `CopyUnpack` 对 trait | `(void)trait` 丢弃 | 显式传给 `Copy<Tp, trait, ...>` |
-| `Copy` 模板参数 | `<T, U>`（去掉 `Tp`/`traits`） | `<Tp, traits, T, U>`（保留标准 4 参数） |
+| 默认特化 | 继承 4 参数基类 | 继承 4 参数基类 |
+| `with()` 来源 | 基类提供 | 基类提供 |
+| OpWith 标签 | 复用算子自身 | 复用算子自身 |
+| `CopyUnpack` 对 trait | 显式传给 `Copy<Tp, trait, ...>` | 显式传给 `Copy<Tp, trait, ...>` |
+| `Copy` 模板参数 | `<Tp, traits, T, U>`（保留标准 4 参数） | `<Tp, traits, T, U>`（保留标准 4 参数） |
 | `CopyUnpack` 参数 | 显式 `<T, U>` 类型 | 可变参数包 `Args...` |
 
 ### 3.5 如何选择注册模式
@@ -494,11 +452,11 @@ __aicore__ inline void CopyUnpack(const Args&... args) const
 ├── 否 → 委托基类式（3.3）
 │         CopyTraits 继承框架基类，代码量少
 │
-└── 是 → 自定义式（3.4）
-          CopyTraits 完全自定义，实现 .with() + CopyUnpack
-          ├── 参数是结构体（如 n, k）→ 模式 A：Copy 去掉 Tp/traits，
-          │   CopyUnpack 显式 <T, U> 类型
-          └── 参数是标量（如 sliceM）→ 模式 B：Copy 保留标准 4 参数，
+└── 是 → 自定义式（3.4，复用算子作为 OpWith）
+          默认特化继承 4 参数基类，.with() 由基类提供，带参 traits 承载参数
+          ├── 参数是结构体（如 n, k）→ 模式 A：带参 2 参偏特化承载 params，
+          │   CopyUnpack 显式使用 <T, U>
+          └── 参数是标量（如 sliceM）→ 模式 B：针对 TraitDefault 特化，
               CopyUnpack 用 Args... 可变参数包转发
 ```
 

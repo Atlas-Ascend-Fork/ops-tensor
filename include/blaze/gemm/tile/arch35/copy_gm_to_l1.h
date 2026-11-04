@@ -99,88 +99,18 @@ private:
 
 /*! \brief Copies two logical B or ScaleB N halves into one concatenated L1 tensor. */
 struct CopyConcatGM2L1 {
-    static constexpr uint64_t ALIGN_MASK_ADJUSTMENT = 1;
     /*!
-     * \brief Copies physical NZ/ZN FP8 weight through the aligned fast path when supported.
+     * \brief Copies and concatenates B or ScaleB according to the source layout.
+     *
+     * Leading <Tp, traits> follow the copy_traits detection convention
+     * (defaulted for direct callers); the concat path ignores them.
+     *
      * \param dst Concatenated L1 destination.
-     * \param src Already-offset left-half GM slice for the current K window.
+     * \param src GM source.
      * \param params Full N/K dimensions.
-     * \param kOffsetAligned Whether the current K window starts at a 128-element boundary.
-     * \return true after issuing the optimized copy; false before any DMA so the caller can use its fallback.
      */
-    template <typename T, typename U>
-    __aicore__ inline static bool Copy(const T& dst, const U& src, const CopyConcatGM2L1Params& params,
-                                       bool kOffsetAligned)
-    {
-        using ElementType = asc::te::get_attribute_element_type<typename U::element_type*>;
-        using SrcLayoutPtn = asc::te::get_layout_pattern<typename U::layout_type>;
-        if constexpr (sizeof(ElementType) != 1 || IsFp4<ElementType>() || !IsWeightNz<SrcLayoutPtn>::value) {
-            return false;
-        } else {
-            if (!kOffsetAligned) {
-                return false;
-            }
-            const uint64_t width = asc::te::get_total_column_shape(src.layout());
-            const uint64_t windowK = asc::te::get_total_row_shape(src.layout());
-            const uint64_t l1K = asc::te::get_total_row_shape(dst.layout());
-            constexpr bool IS_TRANS = IsTrans<SrcLayoutPtn>::value;
-            constexpr uint64_t N_ALIGN = IS_TRANS ? BLOCK_CUBE : C0_SIZE_B8;
-            if ((params.k & (WEIGHT_NZ_K_ALIGN - ALIGN_MASK_ADJUSTMENT)) != 0 ||
-                (params.n & (WEIGHT_NZ_N_ALIGN - ALIGN_MASK_ADJUSTMENT)) != 0 || windowK == 0 ||
-                (windowK & (WEIGHT_NZ_K_ALIGN - ALIGN_MASK_ADJUSTMENT)) != 0 || l1K != windowK || width == 0 ||
-                (width & (N_ALIGN - ALIGN_MASK_ADJUSTMENT)) != 0 || width > (params.n >> CONCAT_N_SHIFT)) {
-                return false;
-            }
-            const auto cacheMode = static_cast<asc_load_l2_cache_mode>(src.engine().get_cache_mode());
-            auto dstPtr = reinterpret_cast<__cbuf__ uint8_t*>(dst.data().get());
-            auto srcPtr = reinterpret_cast<__gm__ uint8_t*>(src.data().get());
-            if constexpr (IS_TRANS) {
-                // Preserve left0,right0,left1,right1,... in L1 while loading
-                // the halves separately. Each DMA walks full-N source stripes
-                // and skips the other half in the destination.
-                const uint64_t burstsPerHalf = windowK >> ALIGN_32_BYTES_SHIFT;
-                const uint64_t bytes = width << ALIGN_32_BYTES_SHIFT;
-                // Preserve the concat-wide burst limit and leave room for the doubled destination stride.
-                if (burstsPerHalf > (MAX_DMA_BURST_COUNT >> CONCAT_N_SHIFT) ||
-                    bytes > (MAX_DMA_DST_STRIDE >> CONCAT_N_SHIFT)) {
-                    return false;
-                }
-                if ASCEND_IS_AIC {
-                    asc_copy_gm2l1_align(
-                        dstPtr, srcPtr, static_cast<uint32_t>(burstsPerHalf), static_cast<uint32_t>(bytes), 0, 0, true,
-                        cacheMode, params.n << ALIGN_32_BYTES_SHIFT, static_cast<uint32_t>(bytes << CONCAT_N_SHIFT));
-                    asc_copy_gm2l1_align(
-                        dstPtr + bytes, srcPtr + ((params.n >> CONCAT_N_SHIFT) << ALIGN_32_BYTES_SHIFT),
-                        static_cast<uint32_t>(burstsPerHalf), static_cast<uint32_t>(bytes), 0, 0, true, cacheMode,
-                        params.n << ALIGN_32_BYTES_SHIFT, static_cast<uint32_t>(bytes << CONCAT_N_SHIFT));
-                }
-            } else {
-                // Each half is a virtual ND matrix [width/32, windowK*32]
-                // of raw bytes. Swapping the destination N/D strides keeps
-                // each N32 stripe contiguous and produces standard NZ L1.
-                const uint64_t rows = width >> ALIGN_32_BYTES_SHIFT;
-                if (rows > MAX_DMA_BURST_COUNT || (windowK << ALIGN_32_BYTES_SHIFT) > MAX_DMA_DST_STRIDE) {
-                    return false;
-                }
-                if ASCEND_IS_AIC {
-                    // NZ stores each N32 stripe with the full-K pitch. Copy
-                    // the left and right stripes separately: two ordinary
-                    // aligned DMAs are substantially faster than expressing
-                    // the same address pattern through ND2NZ conversion.
-                    const uint32_t bytes = static_cast<uint32_t>(windowK << ALIGN_32_BYTES_SHIFT);
-                    asc_copy_gm2l1_align(dstPtr, srcPtr, static_cast<uint32_t>(rows), bytes, 0, 0, true, cacheMode,
-                                         params.k << ALIGN_32_BYTES_SHIFT, bytes);
-                    asc_copy_gm2l1_align(dstPtr + width * l1K, srcPtr + (params.n >> CONCAT_N_SHIFT) * params.k,
-                                         static_cast<uint32_t>(rows), bytes, 0, 0, true, cacheMode,
-                                         params.k << ALIGN_32_BYTES_SHIFT, bytes);
-                }
-            }
-            return true;
-        }
-    }
-
-    /*! \brief Copies and concatenates B or ScaleB according to the source layout. */
-    template <typename T, typename U>
+    template <typename Tp = asc::te::gm_to_l1_trait, const Tp& traits = asc::te::gm_to_l1_trait_default::value,
+              typename T, typename U>
     __aicore__ inline static void Copy(const T& dst, const U& src, const CopyConcatGM2L1Params& params)
     {
         using SrcLayoutPtn = asc::te::get_layout_pattern<typename U::layout_type>;
@@ -197,10 +127,6 @@ private:
     static constexpr uint16_t CONCAT_MATRIX_NUM = 2U;
     static constexpr uint64_t CONCAT_N_FACTOR = 2UL;
     static constexpr uint32_t CONCAT_N_SHIFT = 1U;
-    static constexpr uint64_t WEIGHT_NZ_K_ALIGN = 128UL;
-    static constexpr uint64_t WEIGHT_NZ_N_ALIGN = 64UL;
-    static constexpr uint64_t MAX_DMA_BURST_COUNT = 0xffffUL;
-    static constexpr uint64_t MAX_DMA_DST_STRIDE = 0xffffffffUL;
 
     template <typename T, typename U>
     __aicore__ inline static void CopyB(const T& dst, const U& src, const CopyConcatGM2L1Params& params)
@@ -355,26 +281,34 @@ template <>
 struct copy_traits<Blaze::Gemm::Tile::CopySliceGM2L1>
     : public copy_traits<Blaze::Gemm::Tile::CopySliceGM2L1, gm_to_l1_trait_default> {};
 
-template <>
-struct copy_traits<Blaze::Gemm::Tile::CopyConcatGM2L1> {
-    using trait_type = typename gm_to_l1_trait_default::trait_type;
-    using TraitType = trait_type;
-    static constexpr const trait_type default_trait = gm_to_l1_trait_default::value;
+// 带参形态：承载 CopyConcatGM2L1Params，CopyUnpack 把 params 传给操作
+// （tensor_api 内建算子的 OpWith 模式，见 impl/tensor_api/atom/cube/copy_l0c2ub.h）
+template <typename Traits>
+struct copy_traits<Blaze::Gemm::Tile::CopyConcatGM2L1, Traits> {
+    using trait_type = get_trait_member_type_t<Traits>;
+    static constexpr const trait_type default_trait = Traits::value;
 
-    __aicore__ inline constexpr copy_traits with(const Blaze::Gemm::Tile::CopyConcatGM2L1Params& copyParams) const
-    {
-        return {copyParams};
-    }
+    copy_traits() = delete;
+
+    __aicore__ inline constexpr copy_traits(const Blaze::Gemm::Tile::CopyConcatGM2L1Params& copyParams)
+        : params(copyParams)
+    {}
 
     template <const trait_type& trait = default_trait, typename T, typename U>
     __aicore__ inline void CopyUnpack(const T& dst, const U& src) const
     {
-        (void)trait;
-        Blaze::Gemm::Tile::CopyConcatGM2L1::Copy(dst, src, params);
+        Blaze::Gemm::Tile::CopyConcatGM2L1::template Copy<trait_type, trait>(dst, src, params);
     }
 
-    Blaze::Gemm::Tile::CopyConcatGM2L1Params params{};
+    Blaze::Gemm::Tile::CopyConcatGM2L1Params params;
 };
+
+// 普通形态：with() 由 4 参基类提供并返回上面的带参 traits。普通形态无 params
+// 成员，漏调 .with() 时编译失败而非静默使用 n=0/k=0。
+template <>
+struct copy_traits<Blaze::Gemm::Tile::CopyConcatGM2L1>
+    : public copy_traits<Blaze::Gemm::Tile::CopyConcatGM2L1, gm_to_l1_trait_default, Blaze::Gemm::Tile::CopyConcatGM2L1,
+                         gm_to_l1_trait_default> {};
 
 } // namespace te
 } // namespace asc

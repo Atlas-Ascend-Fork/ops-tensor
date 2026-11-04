@@ -36,10 +36,8 @@ BlockMmadMX（量化矩阵乘）
             └── 对齐到 C0_SIZE
 
 BlockMmadQGmmMx（SwiGLU MX）
-    └── CopyConcatGM2L1
-            ├── ND/DN 左右半区拼接
-            ├── NZ/ZN FP8 快速搬运
-            └── 不满足快速路径约束时回退为双源普通 Copy
+    ├── CopyConcatGM2L1（B/ScaleB 通用左右半区拼接）
+    └── NZ/ZN 双源 Copy（tensor_api，按需补零后分别搬运左右半区）
 
 GemmUniversal（KernelMixWithWeightPrologue）
     └── Weight Quant MX Preprocess

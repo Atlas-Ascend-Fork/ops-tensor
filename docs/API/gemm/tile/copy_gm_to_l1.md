@@ -19,10 +19,9 @@ A 矩阵 ND slice 非连续场景，以及 SwiGLU MX 左右 B/ScaleB 半区拼�
 `tile/datamove.h`；本头文件为兼容保留的转发入口。
 
 ### 数据类型
-支持 `half` 和 `float` 数据类型。
+`CopySliceGM2L1` 支持 `half` 和 `float` 数据类型。
 
-`CopyConcatGM2L1` 的通用路径还支持 QGMM MX 使用的 FP8/FP4 B 与 E8M0 ScaleB；
-`TryCopyWeightNz` 快速路径仅支持物理 NZ/ZN 的 1 字节 FP8，不支持 FP4。
+`CopyConcatGM2L1` 还支持 QGMM MX 使用的 FP8/FP4 B 与 E8M0 ScaleB。
 
 ## 特殊类型
 
@@ -57,27 +56,20 @@ struct CopyConcatGM2L1Params {
 };
 
 struct CopyConcatGM2L1 {
-    template <typename T, typename U>
-    __aicore__ inline static bool TryCopyWeightNz(
-        const T& dst, const U& src, const CopyConcatGM2L1Params& params);
-
-    template <typename T, typename U>
+    // 前导 <Tp, traits> 遵循 copy_traits 检测约定（直调时用默认值），拼接路径不使用
+    template <typename Tp = asc::te::gm_to_l1_trait,
+              const Tp& traits = asc::te::gm_to_l1_trait_default::value,
+              typename T, typename U>
     __aicore__ inline static void Copy(
         const T& dst, const U& src, const CopyConcatGM2L1Params& params);
 };
+
 ```
 
-`Copy` 把 SwiGLU 的左右两个 N 半区拼接到同一 L1 Tensor。B 使用完整 N/K 的 GM stride；
-ScaleB 仍使用 `scaleb_nd_layout_ptn` 或 `scaleb_dn_layout_ptn`，每个 K/64 分组保存两个 scale。
+`Copy` 通过通用 ND2NZ/DN2NZ 路径把 SwiGLU 的左右两个 N 半区拼接到同一 L1 Tensor。
+B 使用完整 N/K 的 GM stride；ScaleB 仍使用 `scaleb_nd_layout_ptn` 或
+`scaleb_dn_layout_ptn`，每个 K/64 分组保存两个 scale。所有调用统一经
+`asc::te::copy(make_copy(CopyConcatGM2L1{}).with(params), dst, src)` 发起。
 
-`TryCopyWeightNz` 是 NZ/ZN FP8 的可选快速路径。调用时 `src` 必须已经是左半区、当前 K window
-的 slice。仅当以下条件全部满足时发起 DMA 并返回 `true`：
-
-- 源布局为物理 NZ/ZN、元素宽度为 1 字节且不是 FP4；
-- 完整 `K` 是 128 的倍数，完整 `N` 是 64 的倍数；
-- 当前 K window 非空且按 128 对齐，目标 L1 K 与该 window 相等；
-- 当前 N 宽度非空，NZ 按 32、ZN 按 16 对齐，且不超过 `N / 2`；
-- DMA 的 burst/byte 计数通过实现中的范围检查；调用方仍须确保目标 SDK 的指令参数限制和 L1 容量约束。
-
-任一条件不满足时，函数在发起 DMA 前返回 `false`。调用方必须保留普通 Tensor Copy 回退，
-分别把 left/right slice 写入拼接 L1 的两个半区。
+`BlockMmadQGmmMx` 的普通 NZ/ZN 双源 Tensor 使用 tensor_api `copy_gm_to_l1`
+分别搬运左右半区，不经过 `CopyConcatGM2L1`；搬运前按需补零，K 已对齐时无需额外填充。

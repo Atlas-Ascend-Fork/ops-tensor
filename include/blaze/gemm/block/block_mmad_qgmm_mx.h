@@ -63,7 +63,6 @@ public:
     static constexpr uint64_t SCALE_K_PAIR_SIZE = 2;
     static constexpr uint64_t SCALE_N_BLOCK = 16;
     static constexpr uint64_t MAX_SCALE_DMA_BLOCKS = 0xffffUL;
-    static constexpr uint64_t WEIGHT_NZ_K_COPY_ALIGN = 128;
     static constexpr uint64_t SPLIT_M_ALIGN = 2;
     static constexpr uint64_t CONCAT_N_FACTOR = 2UL;
     static constexpr uint16_t CONCAT_MATRIX_NUM = 2U;
@@ -568,11 +567,6 @@ private:
             auto tensorBL1 = asc::te::make_tensor(
                 asc::te::make_mem_ptr<asc::te::location::l1, BType>(l1BufferBOffset_[bL1BufId]), layoutBL1);
             auto gmBlockBLeft = gmBLeft.slice(asc::te::make_coord(kL1Offset, 0), asc::te::make_shape(curGmBKL1, curN));
-            if (Blaze::Gemm::Tile::CopyConcatGM2L1::Copy(tensorBL1, gmBlockBLeft,
-                                                         Blaze::Gemm::Tile::CopyConcatGM2L1Params{n_, k_},
-                                                         kL1Offset % WEIGHT_NZ_K_COPY_ALIGN == 0)) {
-                return tensorBL1;
-            }
             auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
             auto tensorBL1Left = tensorBL1.slice(asc::te::make_coord(0, 0), asc::te::make_shape(l1K, curN));
             auto tensorBL1Right = tensorBL1.slice(asc::te::make_coord(0, curN), asc::te::make_shape(l1K, curN));
