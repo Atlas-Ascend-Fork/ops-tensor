@@ -24,6 +24,7 @@
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
+#include "blaze/gemm/tile/datamove.h"
 #include "blaze/gemm/tile/tile_trait.h"
 #include "blaze/gemm/block/block_mmad_decl.h"
 #include "tensor_api/tensor.h"
@@ -32,10 +33,11 @@ namespace Blaze {
 namespace Gemm {
 namespace Block {
 
-template <uint64_t L0COutModel_, uint64_t FusedOpType_, class KernelSchedule_, class AType_, class LayoutA_,
-          class BType_, class LayoutB_, class CType_, class LayoutC_, class BiasType_, class LayoutBias_>
-class BlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, KernelSchedule_>, AType_, LayoutA_, BType_,
-                LayoutB_, CType_, LayoutC_, BiasType_, LayoutBias_> {
+template <uint64_t L0COutModel_, uint64_t FusedOpType_, class KernelSchedule_, uint64_t NonContiguousType_,
+          class AType_, class LayoutA_, class BType_, class LayoutB_, class CType_, class LayoutC_, class BiasType_,
+          class LayoutBias_>
+class BlockMmad<MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, KernelSchedule_, NonContiguousType_>, AType_,
+                LayoutA_, BType_, LayoutB_, CType_, LayoutC_, BiasType_, LayoutBias_> {
 public:
     using AType = AType_;
     using BType = BType_;
@@ -45,7 +47,8 @@ public:
     using LayoutB = LayoutB_;
     using LayoutC = LayoutC_;
     using LayoutBias = LayoutBias_;
-    using DispatchPolicy = MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, KernelSchedule_>;
+    using DispatchPolicy = MatmulMultiBlockFixpipeOpti<L0COutModel_, FusedOpType_, KernelSchedule_, NonContiguousType_>;
+    static constexpr uint64_t NON_CONTIGUOUS_TYPE = DispatchPolicy::NON_CONTIGUOUS_TYPE;
     using TupleShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using TileShape = asc::te::shape<int64_t, int64_t, int64_t>;
 
@@ -216,6 +219,8 @@ private:
     __aicore__ inline auto CopyL1FromGM(const TensorA& tensorA, const TensorB& tensorB, const TensorBias& tensorBias,
                                         const TileShape& l1Shape, uint16_t l1BufferId, uint64_t kOffset)
     {
+        constexpr bool IS_SLICE_POLICY = NON_CONTIGUOUS_TYPE ==
+                                         static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_SLICE);
         uint64_t curM = asc::te::get<MNK_M>(l1Shape);
         uint64_t curN = asc::te::get<MNK_N>(l1Shape);
         uint64_t curKL1 = asc::te::get<MNK_K>(l1Shape);
@@ -227,8 +232,19 @@ private:
         auto layoutAL1 = MakeLayoutAL1{}(curM, curKL1);
         auto tensorAL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Buffer_[l1BufferId]), layoutAL1);
-        auto gmTileA = tensorA.slice(asc::te::make_coord(0, kOffset), asc::te::make_shape(curM, curKL1));
-        asc::te::copy(copyGM2L1, tensorAL1, gmTileA);
+
+        if constexpr (IS_SLICE_POLICY) {
+            auto layoutGmA = tensorA.layout();
+            auto sliceM = asc::te::get<0>(asc::te::get<1>(layoutGmA.shape()));
+            auto gmTileASlice = tensorA.slice(asc::te::make_coord(0, asc::te::make_coord(0, kOffset)),
+                                              asc::te::make_shape(curM / sliceM, asc::te::make_shape(sliceM, curKL1)));
+            auto copyGM2L1Slice = asc::te::make_copy(Blaze::Gemm::Tile::CopySliceGM2L1{},
+                                                     Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
+            asc::te::copy(copyGM2L1Slice, tensorAL1, gmTileASlice);
+        } else {
+            auto gmTileA = tensorA.slice(asc::te::make_coord(0, kOffset), asc::te::make_shape(curM, curKL1));
+            asc::te::copy(copyGM2L1, tensorAL1, gmTileA);
+        }
 
         auto layoutBL1 = MakeLayoutBL1{}(curKL1, curN);
         auto tensorBL1 = asc::te::make_tensor(

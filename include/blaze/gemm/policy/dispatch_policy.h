@@ -347,13 +347,14 @@ struct MatmulMultiBlockBFullLoad {
  * @param [in] KernelSchedule_: mmad dispatch policy
  */
 template <uint64_t L0C2OutModel_ = ON_THE_FLY, uint64_t FusedOpType_ = 0,
-          class KernelSchedule_ = KernelMmadMultiBlockFixpipeOpti>
+          class KernelSchedule_ = KernelMmadMultiBlockFixpipeOpti, uint64_t NonContiguousType_ = 0>
 struct MatmulMultiBlockFixpipeOpti {
     using ScheduleType = KernelSchedule_;
     static constexpr uint64_t FULL_LOAD_MODE = NONE_FULL_LOAD_MODE;
     static constexpr uint64_t L0C2OUT_MODEL = L0C2OutModel_;
     static constexpr uint64_t FUSED_OP_TYPE = FusedOpType_;
     static constexpr MatmulOutputMode OUTPUT_MODE = MatmulOutputMode::OVERWRITE;
+    static constexpr uint64_t NON_CONTIGUOUS_TYPE = NonContiguousType_;
 };
 
 /**

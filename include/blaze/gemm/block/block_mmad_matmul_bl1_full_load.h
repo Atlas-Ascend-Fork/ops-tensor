@@ -47,6 +47,7 @@ public:
     using LayoutBias = LayoutBias_;
     using DispatchPolicy = MatmulMultiBlockBFullLoad<L0COutModel_, FusedOpType_, KernelSchedule_>;
     static constexpr uint64_t FUSED_OP_TYPE = DispatchPolicy::FUSED_OP_TYPE;
+    static constexpr uint64_t NON_CONTIGUOUS_TYPE = 0;
     using TupleShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using TileShape = asc::te::shape<int64_t, int64_t, int64_t>;
 

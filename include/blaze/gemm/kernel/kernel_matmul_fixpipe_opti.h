@@ -23,6 +23,7 @@
 #include "blaze/gemm/block/block_mmad_matmul_fixpipe_opti.h"
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/sync.h"
 #include "tensor_api/tensor.h"
 
@@ -149,11 +150,33 @@ private:
         return layoutA;
     }
 
+    __aicore__ inline auto MakeLayoutGmA(Params const& params)
+    {
+        if constexpr (IS_SLICE_POLICY) {
+            return MakeLayoutA3DForSlice(params);
+        } else {
+            return MakeLayoutA2D(params);
+        }
+    }
+
+    template <typename GmATensor>
+    __aicore__ inline auto MakeBlockA(const GmATensor& gmA, Params const& params, int64_t coordM, int64_t shapeM,
+                                      int64_t shapeK)
+    {
+        if constexpr (IS_SLICE_POLICY) {
+            int64_t sliceM = static_cast<int64_t>(params.schParams.sliceM);
+            return gmA.slice(asc::te::make_coord(coordM / sliceM, asc::te::make_coord(0L, 0L)),
+                             asc::te::make_shape(shapeM / sliceM, asc::te::make_shape(sliceM, shapeK)));
+        } else {
+            return gmA.slice(AscendC::MakeCoord(coordM, 0L), AscendC::MakeShape(shapeM, shapeK));
+        }
+    }
+
     __aicore__ inline void MatmulProcess(Params const& params, BlockEpilogue& epilogueOp, BlockMmad& blockMmad,
                                          BlockScheduler& bs, int64_t curBlockIdx, int64_t coreNums,
                                          int64_t totalBlockNums)
     {
-        auto layoutA = MakeLayoutA2D(params);
+        auto layoutA = MakeLayoutGmA(params);
         auto layoutB = MakeLayoutB{}(k_, n_);       // ND layout for B
         auto layoutC = MakeLayoutC{}(m_, n_);       // ND layout for C
         auto layoutBias = MakeLayoutBias{}(1L, n_); // ND layout for Bias
@@ -162,6 +185,9 @@ private:
         auto gmB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(bGmAddr_), layoutB);
         auto gmC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(cGmAddr_), layoutC);
         auto gmBias = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(biasGmAddr_), layoutBias);
+        if constexpr (IS_SLICE_POLICY) {
+            SetL2Cache(gmA, gmB, params.schParams.l2CacheMode);
+        }
 
         for (int64_t blockIdx = curBlockIdx; blockIdx < totalBlockNums; blockIdx += coreNums) {
             auto blockShape = bs.template GetBlockShape<TRANS_B, BType>(blockIdx);
@@ -175,7 +201,7 @@ private:
             shapeN = AscendC::Std::min(shapeN, static_cast<int64_t>(n_) - coordN);
             TupleShape validBlockShape{shapeM, shapeN, shapeK, asc::te::get<MNK_B>(blockShape)};
 
-            auto gmBlockA = gmA.slice(AscendC::MakeCoord(coordM, 0L), AscendC::MakeShape(shapeM, shapeK));
+            auto gmBlockA = MakeBlockA(gmA, params, coordM, shapeM, shapeK);
             auto gmBlockB = gmB.slice(AscendC::MakeCoord(0L, coordN), AscendC::MakeShape(shapeK, shapeN));
 
             int64_t ubOffsetElems = 0;
@@ -197,6 +223,18 @@ private:
             }
         }
     }
+    __aicore__ inline auto MakeLayoutA3DForSlice(Params const& params)
+    {
+        int64_t sliceM = static_cast<int64_t>(params.schParams.sliceM);
+        int64_t sliceBatch = static_cast<int64_t>(m_) / sliceM;
+        int64_t srcNdStride = static_cast<int64_t>(params.schParams.srcNdStride);
+
+        return asc::te::make_pattern_layout<
+            NDSliceLayoutPtn, asc::te::layout_trait<AType, AscendC::Std::Int<asc::te::c0_element<AType>>>>(
+            asc::te::make_shape(sliceBatch, asc::te::make_shape(sliceM, k_)),
+            asc::te::make_stride(srcNdStride, asc::te::make_stride(k_, 1L)));
+    }
+
     __aicore__ inline void Init(Params const& params)
     {
         problemShape_ = params.problemShape;
@@ -223,6 +261,9 @@ private:
 
 private:
     static constexpr bool TRANS_A = BlockMmad::TRANS_A;
+    static constexpr uint64_t NON_CONTIGUOUS_TYPE = BlockMmad::NON_CONTIGUOUS_TYPE;
+    static constexpr bool IS_SLICE_POLICY = NON_CONTIGUOUS_TYPE ==
+                                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_SLICE);
     static constexpr uint64_t AIC_SYNC_AIV_MODE_4 = 4;
     static constexpr uint16_t AIV_SYNC_AIC_FLAG = 4;
     static constexpr uint16_t AIC_SYNC_AIV_FLAG = 6;
