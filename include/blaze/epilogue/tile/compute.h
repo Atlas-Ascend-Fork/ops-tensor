@@ -20,6 +20,7 @@
 #include "blaze/epilogue/tile/arch35/gelu.h"
 #include "blaze/epilogue/tile/arch35/initialize_empty_softmax.h"
 #include "blaze/epilogue/tile/arch35/mx_quant.h"
+#include "blaze/epilogue/tile/arch35/process_shared_input.h"
 #include "blaze/epilogue/tile/arch35/reduce_square.h"
 #include "blaze/epilogue/tile/arch35/rms_softmax.h"
 #include "blaze/epilogue/tile/arch35/sigmoid.h"

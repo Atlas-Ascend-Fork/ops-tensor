@@ -56,8 +56,11 @@ struct KernelGmmSwiGluMixMx {};                  // MIX AIC+AIV schedule for Gro
 struct KernelMatmulEmuSplitWeight {};            // Double bf16 matmul to simulate fp32 (AIC+AIV)
 struct KernelMmadWithScaleMxMix {};              // Multi-block with Mx scale, epilogue after block mmad
 struct KernelQgmmMxMixFinalizeRouting {};        // MIX AIC+AIV schedule for GroupedMatmulFinalizeRouting MX
-struct KernelGroupedMmadNoQuant {};              // Grouped multi-block without quantization
-struct KernelMmadAPrefetchBAntiquant {};         // AIV weight dequantization and AIC matrix multiplication
+// MIX AIC+AIV schedule for GroupedMatmulFinalizeRouting per-token dequant (INT8/FP8/HIFLOAT8
+// full-quantization, L0C -> UB splitM -> vector dequant + logit muls + routing scatter).
+struct KernelQgmmMixPertokenFinalizeRouting {};
+struct KernelGroupedMmadNoQuant {};      // Grouped multi-block without quantization
+struct KernelMmadAPrefetchBAntiquant {}; // AIV weight dequantization and AIC matrix multiplication
 
 struct KernelRotateQuant {}; // Rotate quantization single-matmul with MXFP4/FP8 AIC+AIV
 
@@ -163,6 +166,10 @@ struct MatmulWithWeightQuantPergroup {
  */
 using GroupedMatmulWithWeightQuantMx = WeightQuantMxPolicy<KernelWqgmmMxMix, WeightPrologueMxKSchedule::DYNAMIC,
                                                            WeightPrologueMxScaleBSource::AIV>;
+
+// Finalize routing uses dynamic K blocking with AIC ScaleB loads and a deferred AIV epilogue.
+using GroupedMatmulFinalizeRoutingWithWeightQuantMx = WeightQuantMxPolicy<
+    KernelWqgmmMxMix, WeightPrologueMxKSchedule::DYNAMIC, WeightPrologueMxScaleBSource::AIC>;
 
 /**
  * @struct GroupedMatmulWithScaleMx

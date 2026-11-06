@@ -8,14 +8,22 @@
 
 #include <cstdint>
 #include <type_traits>
+#include "grouped_matmul_finalize_routing_cpu_debug_compat.h"
 #include "blaze_kernel_stub.h"
 #include "kernel_operator.h"
 #include "tensor_api/tensor.h"
 #include "blaze/epilogue/block/block_epilogue_finalize_routing.h"
-#include "blaze/gemm/block/block_mmad_qgmm_mx.h"
+#include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
 #include "blaze/gemm/kernel/kernel_universal.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
+
+#if defined(ASCENDC_CPU_DEBUG)
+#undef __fp4e1m2x2
+#undef __fp4e2m1x2
+#undef __fp8e4m3
+#undef Cast
+#endif
 
 namespace GroupedMatmulFinalizeRoutingUt {
 struct AlignedCaseConfig {
@@ -73,14 +81,7 @@ __aicore__ inline void Run(GM_ADDR x, GM_ADDR weight, GM_ADDR weightScale, GM_AD
     params.blockMmadParams = {x, weight, y, bias, xScale, weightScale};
     params.prologueParams = {sharedInput,   y,   0, Config::SHARED_INPUT_LEN, static_cast<int32_t>(Config::N),
                              Config::BATCH, 1.0F};
-    params.epilogueParams = {y,
-                             weightScale,
-                             xScale,
-                             bias,
-                             logit,
-                             rowIndex,
-                             static_cast<int32_t>(Config::BASE_M),
-                             static_cast<int32_t>(Config::BASE_N)};
+    params.epilogueParams = {y, weightScale, xScale, bias, logit, rowIndex};
     params.groupListGmAddr = groupList;
     params.gmmParams = {static_cast<uint32_t>(Config::GROUP_NUM),
                         static_cast<uint32_t>(Config::BATCH),

@@ -68,10 +68,11 @@ public:
                       AscendC::Std::is_same_v<ScaleBType, AscendC::fp8_e8m0_t>,
                   "Weight Quant MX expects E8M0 scales");
 
-    // 只接受现有两种策略组合，避免未配套的调度类型、分块及 ScaleB 来源进入公共流水。
+    // Accept the paired QBMM, GMM and finalize-routing schedules only.
     static_assert(AscendC::Std::is_same_v<DispatchPolicy, MatmulWithWeightQuantMx> ||
-                      AscendC::Std::is_same_v<DispatchPolicy, GroupedMatmulWithWeightQuantMx>,
-                  "MX weight prologue supports only QBMM fixed K/AIC ScaleB or GMM dynamic K/AIV ScaleB");
+                      AscendC::Std::is_same_v<DispatchPolicy, GroupedMatmulWithWeightQuantMx> ||
+                      AscendC::Std::is_same_v<DispatchPolicy, GroupedMatmulFinalizeRoutingWithWeightQuantMx>,
+                  "MX weight prologue requires a supported QBMM, GMM or finalize-routing policy");
 
     struct Params {
         GM_ADDR aGmAddr{nullptr};
@@ -400,6 +401,10 @@ private:
             PostProcess(releaseScaleBuffer, l1BufIdx);
             scaleWindowIter = releaseScaleBuffer ? 0U : scaleWindowIter + 1U;
         }
+        if constexpr (AscendC::Std::is_same_v<DispatchPolicy, GroupedMatmulFinalizeRoutingWithWeightQuantMx>) {
+            // The next two weight strips are staged before AIV releases its W8/output arena.
+            Sync::WaitForVector<SyncProtocol::MODE, PIPE_FIX>(FINALIZE_ROUTING_OUTPUT_FREE_FLAG, true);
+        }
         CopyCL0c2Gm(tensorC, tensorL0C, l0cSlot);
     }
 
@@ -644,10 +649,16 @@ private:
     template <typename TensorC, typename TensorL0C>
     __aicore__ inline void CopyCL0c2Gm(const TensorC& tensorC, const TensorL0C& tensorL0C, const BufferSlot& l0cSlot)
     {
-        constexpr uint64_t FP32_64_AS_UINT64 = 0x42800000;
-        auto copyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
-        asc::te::copy(copyL0C2GM.with(asc::te::l0c_to_gm_params{asc::te::unit_flag_mode::enable_update}), tensorC,
-                      tensorL0C, FP32_64_AS_UINT64);
+        if constexpr (AscendC::Std::is_same_v<asc::te::get_mem_location<TensorC>, asc::te::location::ub>) {
+            auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Tile::CopyL0C2UBTraitMixSplitM{});
+            asc::te::copy(copyL0C2UB.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::enable_update}), tensorC,
+                          tensorL0C);
+        } else {
+            constexpr uint64_t FP32_64_AS_UINT64 = 0x42800000;
+            auto copyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
+            asc::te::copy(copyL0C2GM.with(asc::te::l0c_to_gm_params{asc::te::unit_flag_mode::enable_update}), tensorC,
+                          tensorL0C, FP32_64_AS_UINT64);
+        }
     }
 
     __aicore__ inline void PostProcess(bool releaseScaleBuffer, uint64_t l1BufIdx)
@@ -660,6 +671,7 @@ private:
     }
 
     using BufferLayout = BufferIdLayout<QUADRUPLE_BUFFER_COUNT, QUADRUPLE_BUFFER_COUNT, DOUBLE_BUFFER_COUNT>;
+    static constexpr uint16_t FINALIZE_ROUTING_OUTPUT_FREE_FLAG = 3U;
     static constexpr uint32_t SCALE_A_SLOT_BASE = 0U;
     static constexpr uint32_t SCALE_B_SLOT_BASE = DOUBLE_BUFFER_COUNT;
     // Disjoint local lock IDs: A 0..3, scales 4..7, B 8..11, BT 12, L0C 13, L0 14..15.

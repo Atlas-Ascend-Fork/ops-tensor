@@ -14,10 +14,10 @@
  * (kernel_universal_decl.h) and then every kernel_xx.h specialization fragment in this directory.
  * Users of these kernels include this header only; the fragments themselves include
  * kernel_universal_decl.h so they stay self-contained without including this header back.
- * The only kernel headers not aggregated here are kernel_wqgmm_mix_weight_prologue.h, which defines
- * the standalone GmmWeightQuantMxKernel class rather than a GemmUniversal specialization, and
- * kernel_gmm_fixpipe_quant.h, which is a deprecated rename shim for kernel_qgmm_mix_fixpipe_quant.h;
- * users of those two include them directly.
+ * Standalone kernel classes are included directly rather than aggregated here:
+ * kernel_wqgmm_mix_weight_prologue.h defines GmmWeightQuantMxKernel, and
+ * kernel_wqgmm_mx_mix_finalize_routing.h defines GmmWqgmmMxFinalizeRoutingKernel.
+ * The deprecated rename shim kernel_gmm_fixpipe_quant.h is also included directly.
  */
 #pragma once
 
@@ -59,3 +59,4 @@
 #include "blaze/gemm/kernel/kernel_wqmm_mix_antiquant.h"
 #include "blaze/gemm/kernel/kernel_wqmm_mix_pergroup.h"
 #include "blaze/gemm/kernel/kernel_rotate_quant.h"
+#include "blaze/gemm/kernel/kernel_qgmm_mix_pertoken_finalize_routing.h"

@@ -19,7 +19,7 @@
 
 #include "acl/acl.h"
 #include "blaze/epilogue/block/block_epilogue_finalize_routing.h"
-#include "blaze/gemm/block/block_mmad_qgmm_mx.h"
+#include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
 #include "blaze/gemm/kernel/kernel_universal.h"
 #include "blaze/gemm/policy/dispatch_policy.h"

@@ -134,3 +134,9 @@ TEST(GroupedMatmulFinalizeRoutingKernelTest, MxFp4WeightDnFp32OutputTailWithBias
     RunCase<GroupedMatmulFinalizeRoutingUt::TailCaseConfig, fp4x2_e2m1_t, fp4x2_e2m1_t, float, float, int64_t,
             asc::te::dn_ext_layout_ptn>();
 }
+
+TEST(GroupedMatmulFinalizeRoutingKernelTest, MxFp4WeightNdFp32Output)
+{
+    RunCase<GroupedMatmulFinalizeRoutingUt::AlignedCaseConfig, fp4x2_e2m1_t, fp4x2_e2m1_t, float, float, int64_t,
+            asc::te::nd_ext_layout_ptn>();
+}

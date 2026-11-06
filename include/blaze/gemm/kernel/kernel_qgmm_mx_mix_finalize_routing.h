@@ -18,10 +18,9 @@
 #include <cstdint>
 
 #include "kernel_basic_intf.h"
-#include "reg_compute/kernel_reg_compute_intf.h"
+#include "blaze/epilogue/tile/compute.h"
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
-#include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/sync.h"
@@ -30,22 +29,6 @@
 namespace Blaze {
 namespace Gemm {
 namespace Kernel {
-
-#ifdef __NPU_ARCH__
-static constexpr AscendC::Reg::CastTrait CAST_GMM_FR_BF16_TO_FP32 = {
-    AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
-    AscendC::RoundMode::UNKNOWN};
-#endif // __NPU_ARCH__
-
-__aicore__ inline uint16_t FloatToBf16Bits(float value)
-{
-    union {
-        float f;
-        uint32_t u;
-    } converter{value};
-    uint32_t roundingBias = 0x7FFFU + ((converter.u >> 16) & 1U);
-    return static_cast<uint16_t>((converter.u + roundingBias) >> 16);
-}
 
 #define GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS template <typename DataTypeOut_, typename DataTypeIn_>
 #define GMM_FR_PROLOGUE_FUNC_LOCAL_PARAMS DataTypeOut_, DataTypeIn_
@@ -81,14 +64,6 @@ public:
 
 private:
     __aicore__ inline void InitAllLocalTensor();
-    __aicore__ inline void Compute(uint64_t singleCount, uint64_t outOffset, uint64_t baseOffset, uint64_t curCount);
-    __aicore__ inline void CopyInShareInput(uint64_t residualUbOffset, uint64_t offset, uint64_t size);
-    __aicore__ inline void CopyOutShareInput(uint64_t yUbOffset, uint64_t offset, uint64_t size);
-    static __simd_vf__ inline void VfDoSharedCastAndMuls(__ubuf__ DataTypeOut* dstPtr,
-                                                         __ubuf__ DataTypeIn* residualLocalUbAddr, float sharedWeight,
-                                                         uint16_t sharedWeightBf16, uint16_t loopNum,
-                                                         uint64_t curCount);
-
     const Params* params_{nullptr};
     uint64_t shareInputUbPingOffset_{0};
     uint64_t shareInputUbPongOffset_{0};
@@ -108,123 +83,12 @@ __aicore__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_P
 }
 
 GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS
-__aicore__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_PARAMS>::CopyInShareInput(
-    uint64_t residualUbOffset, uint64_t offset, uint64_t size)
-{
-    const auto layout = asc::te::make_layout(asc::te::make_shape(size), asc::te::make_stride(1L));
-    const auto residualGm = asc::te::make_tensor(
-        asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ DataTypeIn*>(params_->residualGm) +
-                                                     offset),
-        layout);
-    const auto residualUb = asc::te::make_tensor(
-        asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(residualUbOffset), layout);
-    asc::te::copy(asc::te::make_copy(asc::te::copy_gm_to_ub{}), residualUb, residualGm);
-}
-
-GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS
-__aicore__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_PARAMS>::CopyOutShareInput(
-    uint64_t yUbOffset, uint64_t offset, uint64_t size)
-{
-    if (size == 0) {
-        return;
-    }
-    const auto layout = asc::te::make_layout(asc::te::make_shape(size), asc::te::make_stride(1L));
-    const auto yGm = asc::te::make_tensor(
-        asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ DataTypeOut*>(params_->yGmAddr) + offset),
-        layout);
-    const auto yUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, DataTypeOut>(yUbOffset), layout);
-    asc::te::copy(asc::te::make_copy(asc::te::copy_ub_to_gm{}), yGm, yUb);
-}
-
-GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS
 __aicore__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_PARAMS>::InitAllLocalTensor()
 {
     shareInputUbPingOffset_ = 0UL;
     shareInputUbPongOffset_ = shareInputUbPingOffset_ + GMM_FR_UB_DOUBLE_BUFFER_LEN * sizeof(DataTypeIn);
     ubOutPingOffset_ = shareInputUbPongOffset_ + GMM_FR_UB_DOUBLE_BUFFER_LEN * sizeof(DataTypeIn);
     ubOutPongOffset_ = ubOutPingOffset_ + GMM_FR_UB_DOUBLE_BUFFER_LEN * sizeof(DataTypeOut);
-}
-
-#ifdef __NPU_ARCH__
-GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS
-__simd_vf__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_PARAMS>::VfDoSharedCastAndMuls(
-    __ubuf__ DataTypeOut* dstPtr, __ubuf__ DataTypeIn* residualLocalUbAddr, float sharedWeight,
-    uint16_t sharedWeightBf16, uint16_t loopNum, uint64_t curCount)
-{
-    constexpr uint32_t vectorRegLen = AscendC::IsSameType<DataTypeOut, bfloat16_t>::value ?
-                                          AscendC::VECTOR_REG_WIDTH / sizeof(float) :
-                                          AscendC::VECTOR_REG_WIDTH / sizeof(DataTypeOut);
-    uint32_t elementNum = static_cast<uint32_t>(curCount);
-    AscendC::Reg::MaskReg mask;
-    uint16_t oneRepeatSize = vectorRegLen;
-    if constexpr (AscendC::IsSameType<DataTypeOut, bfloat16_t>::value) {
-        for (uint16_t i = 0; i < loopNum; ++i) {
-            mask = AscendC::Reg::UpdateMask<float>(elementNum);
-            AscendC::Reg::RegTensor<DataTypeIn> vSrcReg;
-            AscendC::Reg::RegTensor<uint16_t> vSharedWeightReg;
-            AscendC::Reg::RegTensor<bfloat16_t> vDstReg;
-            AscendC::Reg::Duplicate<uint16_t, AscendC::Reg::MaskMergeMode::ZEROING>(vSharedWeightReg, sharedWeightBf16,
-                                                                                    mask);
-            AscendC::Reg::LoadAlign<DataTypeIn, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
-                vSrcReg, residualLocalUbAddr + i * oneRepeatSize);
-            AscendC::Reg::Mul<bfloat16_t, AscendC::Reg::MaskMergeMode::ZEROING>(
-                vDstReg, vSrcReg, reinterpret_cast<AscendC::Reg::RegTensor<bfloat16_t>&>(vSharedWeightReg), mask);
-            AscendC::Reg::StoreAlign<bfloat16_t, AscendC::Reg::StoreDist::DIST_PACK_B32>(dstPtr + i * oneRepeatSize,
-                                                                                         vDstReg, mask);
-        }
-    } else {
-        for (uint16_t i = 0; i < loopNum; ++i) {
-            mask = AscendC::Reg::UpdateMask<DataTypeOut>(elementNum);
-            AscendC::Reg::RegTensor<DataTypeIn> vSrcReg;
-            AscendC::Reg::RegTensor<DataTypeOut> vRegCast;
-            AscendC::Reg::RegTensor<DataTypeOut> vDstReg;
-            AscendC::Reg::LoadAlign<DataTypeIn, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
-                vSrcReg, residualLocalUbAddr + i * oneRepeatSize);
-            AscendC::Reg::Cast<DataTypeOut, DataTypeIn, CAST_GMM_FR_BF16_TO_FP32>(vRegCast, vSrcReg, mask);
-            AscendC::Reg::Muls(vDstReg, vRegCast, sharedWeight, mask);
-            AscendC::Reg::StoreAlign<DataTypeOut, AscendC::Reg::StoreDist::DIST_NORM_B32>(dstPtr + i * oneRepeatSize,
-                                                                                          vDstReg, mask);
-        }
-    }
-}
-#endif // __NPU_ARCH__
-
-GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS
-__aicore__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_PARAMS>::Compute(uint64_t singleCount,
-                                                                                                uint64_t outOffset,
-                                                                                                uint64_t baseOffset,
-                                                                                                uint64_t curCount)
-{
-    uint32_t pingPongId = 0;
-    for (uint32_t offset = 0; offset < singleCount; offset += curCount) {
-        if (unlikely(offset + curCount > singleCount)) {
-            curCount = singleCount - offset;
-        }
-        const uint64_t residualUbOffset = pingPongId == 0 ? shareInputUbPingOffset_ : shareInputUbPongOffset_;
-        const Gemm::BufferSlot bufferSlot{0UL, static_cast<uint8_t>(pingPongId)};
-        {
-            auto mte2Lock = bufferSlot.LockMte2();
-            CopyInShareInput(residualUbOffset, baseOffset + offset, curCount);
-        }
-        const uint64_t yUbOffset = pingPongId == 0 ? ubOutPingOffset_ : ubOutPongOffset_;
-        auto residualLocalUbAddr = reinterpret_cast<__ubuf__ DataTypeIn*>(residualUbOffset);
-        auto outUbAddr = reinterpret_cast<__ubuf__ DataTypeOut*>(yUbOffset);
-        constexpr uint32_t vectorRegLen = AscendC::IsSameType<DataTypeOut, bfloat16_t>::value ?
-                                              AscendC::VECTOR_REG_WIDTH / sizeof(float) :
-                                              AscendC::VECTOR_REG_WIDTH / sizeof(DataTypeOut);
-        uint16_t loopNum = CeilDiv(curCount, static_cast<uint64_t>(vectorRegLen));
-        uint16_t sharedWeightBf16 = FloatToBf16Bits(params_->residualScale);
-        {
-            auto vectorLock = bufferSlot.LockV();
-            asc_vf_call<VfDoSharedCastAndMuls>(outUbAddr, residualLocalUbAddr, params_->residualScale, sharedWeightBf16,
-                                               loopNum, curCount);
-        }
-        {
-            auto mte3Lock = bufferSlot.LockMte3();
-            CopyOutShareInput(yUbOffset, outOffset + offset, curCount);
-        }
-        pingPongId = (pingPongId + 1) & 1;
-    }
 }
 
 GMM_FR_PROLOGUE_CLASS_LOCAL_PARAMS
@@ -257,7 +121,19 @@ __aicore__ inline void BlockPrologueFinalizeRouting<GMM_FR_PROLOGUE_FUNC_LOCAL_P
         singleCount = totalOutput - baseOffset;
     }
     const uint64_t outOffset = firstZeroSize + baseOffset;
-    Compute(singleCount, outOffset, baseOffset, GMM_FR_UB_DOUBLE_BUFFER_LEN);
+    using ProcessSharedInput = Blaze::Epilogue::Tile::ProcessSharedInput<DataTypeOut>;
+    const auto layout = asc::te::make_layout(asc::te::make_shape(singleCount), asc::te::make_stride(1L));
+    const auto sharedInput = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ bfloat16_t*>(params_->residualGm) +
+                                                     baseOffset),
+        layout);
+    const auto sharedOutput = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ DataTypeOut*>(params_->yGmAddr) +
+                                                     outOffset),
+        layout);
+    ProcessSharedInput::Run(sharedInput, sharedOutput, params_->residualScale,
+                            {shareInputUbPingOffset_, shareInputUbPongOffset_, ubOutPingOffset_, ubOutPongOffset_,
+                             GMM_FR_UB_DOUBLE_BUFFER_LEN});
 }
 
 template <class ProblemShape_, class BlockMmad_, class BlockPrologue_, class BlockEpilogue_, class BlockScheduler_>

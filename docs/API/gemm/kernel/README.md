@@ -21,6 +21,9 @@
 | [kernel_qbmm_mix](./kernel_qbmm_mix.md) | 支持多 Batch 的 A8W8 MIX Matmul，AIC 计算、AIV 反量化 |
 | [kernel_qbmm_mix_without_batch](./kernel_qbmm_mix_without_batch.md) | Batch 固定为 1 的 A8W8 MIX Matmul，不处理多 Batch 广播 |
 | [kernel_qgmm_mx_basic](./kernel_qgmm_mx_basic.md) | MX 量化 Grouped Matmul，支持 group list 与 tail split |
+| [grouped_matmul_finalize_routing](./grouped_matmul_finalize_routing.md) | GMMFR 三数据流的接口、存储、初始化及调用约束 |
+| [kernel_qgmm_mix_pertoken_finalize_routing](./kernel_qgmm_mix_pertoken_finalize_routing.md) | pertoken 全量化 GMMFR，支持可选 token scale 和确定性 workspace |
+| [kernel_wqgmm_mx_mix_finalize_routing](./kernel_wqgmm_mx_mix_finalize_routing.md) | MX A8W4 GMMFR，FP32 路由输出、AIV 权重转换和路由参数预取 |
 | [kernel_qgmm_mx_mix_finalize_routing](./kernel_qgmm_mx_mix_finalize_routing.md) | GroupedMatmulFinalizeRouting MX TensorAPI Kernel，支持 shared input、logit 融合和 rowIndex 原子写回 |
 | [kernel_qgmm_swiglu_mx](./kernel_qgmm_swiglu_mx.md) | MXFP8 Grouped Matmul + SwiGLU mode 2 + MX 输出量化，支持 ND/DN/NZ/ZN weight |
 | [kernel_qgmm_mix_fixpipe_quant](./kernel_qgmm_mix_fixpipe_quant.md) | 量化 Grouped Matmul，通过 Fixpipe 输出，支持 per-channel/per-group 和可选 offset 后处理 |
@@ -38,7 +41,7 @@
 
 ## 公共框架
 
-所有 Kernel 组件均基于 [kernel.md](./kernel.md) 公共框架实现，统一包含：
+多数 Kernel 组件基于 [kernel.md](./kernel.md) 公共框架实现，统一包含：
 - 模板参数
 - 数据结构，如 `Params`、`Arguments`
 - 核心方法，如 `Init`、`operator()`

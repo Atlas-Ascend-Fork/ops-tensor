@@ -11,6 +11,7 @@
 | [arch35/swish](./arch35/swish.md) | FP32 Swish → BF16 RINT，尾部补零到 32 元素边界 |
 | [arch35/dequant](./arch35/dequant.md) | Tile 级反量化（双轴 API：类模板 tag 选量化对象、Run 模板 `DequantMode` 选粒度）：Fp4ToFp8Tag per-group 权重 → FP8；B32ToFpTag int32/fp32 ×scale + bias → fp32/bf16/fp16 |
 | [arch35/mx_quant](./arch35/mx_quant.md) | Tile 级 MX 动态量化链（eMax → scale → FP8/FP4 量化 → 布局转置） |
+| [arch35/process_shared_input](./arch35/process_shared_input.md) | GM→UB 前处理组件：ProcessSharedInput 完成 BF16 shared input 加权初始化，支持 FP32/BF16 输出 |
 | `arch35/initialize_empty_softmax.h` | BlockAttnResPrepare 空输入场景的 softmax 统计量初始化 |
 | `arch35/reduce_square.h` | Tile 级 V 平方和归约，BlockAttnResPrepare 依赖 |
 | `arch35/rms_softmax.h` | Tile 级 RMS-softmax 计算，BlockAttnResPrepare 依赖 |

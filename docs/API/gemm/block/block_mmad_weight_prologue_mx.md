@@ -3,7 +3,7 @@
 
 ## 功能说明
 
-这是 QBMM/GMM 共用的 arch35 BlockMmad，负责 AIC（Cube）侧的单 tile
+本组件是 QBMM、GMM 和 GMMFR 共用的 arch35 BlockMmad，负责 AIC（Cube）侧的单 tile
 MX MMAD。B 和 bias 由 Kernel 内的 AIV（Vector）前处理写入共享 L1，因此本 BlockMmad 不接收
 B/Bias Tensor，也不执行 B GM→L1 搬运。
 
@@ -17,15 +17,17 @@ B/Bias Tensor，也不执行 B GM→L1 搬运。
 
 ### 架构和 policy
 
-仅支持 `__NPU_ARCH__ == 3510`（arch35）。`DispatchPolicy` 指定 K 分块方式和 ScaleB 来源：
+本文接口面向 DAV_3510（arch35）。`DispatchPolicy` 指定 K 分块方式和 ScaleB 来源：
 
 - `MatmulWithWeightQuantMx`：固定 K 分块，AIC 从 GM 搬运 ScaleB。
 - `GroupedMatmulWithWeightQuantMx`：执行 GMM Kernel 根据当前 M/N 选择的 ka/kb/k0，A 在 ka 窗口内跨 B 块复用；
   ScaleB 由 AIV 转换并写入 L1，AIC 只消费其 L1 视图。
 
-GMM 的构造参数包含 L1 分区、缓冲容量、ready/free 标志和初始 B 槽位写入许可，
+- `GroupedMatmulFinalizeRoutingWithWeightQuantMx`：动态 K 分块，由 AIC 搬运 ScaleB，结果写入 split-M UB。
+
+GMM/GMMFR 的构造参数包含 L1 分区、缓冲容量、ready/free 标志和初始 B 槽位写入许可，
 由配套 Kernel 提供；ka/kb/k0 随每个 tile 的四个 Tensor 传入计算接口。
-两条路径共用 L0 搬运、bias 累加、K64 补零、MMAD 和 Fixpipe 写回。
+三种策略共用 L0 搬运、bias 累加、K64 补零和 MMAD。QBMM/GMM 写回 GM，GMMFR 写回 UB，由后续 epilogue 完成路由。
 
 ### 模板类型约束
 
@@ -35,7 +37,7 @@ GMM 的构造参数包含 L1 分区、缓冲容量、ready/free 标志和初始 
 - 配套 GMM Kernel 的 A 输入使用 `nd_ext_layout_ptn` 布局。
 - `LayoutB` 必须是转置布局：NZ 使用 `zn_layout_ptn`，ND 使用 `dn_ext_layout_ptn`。
 - 当前算子组装中 `LayoutC`/`LayoutBias` 均为 `nd_ext_layout_ptn`；bias 可选，有 bias 时
-  `BiasType` 与 `CType` 一致。
+  QBMM/GMM 的 `BiasType` 与 `CType` 一致；GMMFR 的 `CType=float`、`BiasType=bfloat16_t`。
 
 ### 缓冲和同步
 
@@ -54,18 +56,19 @@ template <
     class ATypeTuple, class LayoutATuple, class BTypeTuple, class LayoutBTuple,
     class CType, class LayoutC, class BiasType, class LayoutBias>
 class BlockMmad;
-// DispatchPolicy 为 MatmulWithWeightQuantMx 或 GroupedMatmulWithWeightQuantMx。
+// DispatchPolicy 为 QBMM、GMM 或 GMMFR 的 WeightQuantMxPolicy 别名。
 ```
 
 `dispatch_policy.h` 中的策略只声明调度类型和两类行为，不包含 K 分块算法：
 
 - QBMM：`K_SCHEDULE=WeightPrologueMxKSchedule::FIXED`，`SCALE_B_SOURCE=WeightPrologueMxScaleBSource::AIC`。
 - GMM：`K_SCHEDULE=WeightPrologueMxKSchedule::DYNAMIC`，`SCALE_B_SOURCE=WeightPrologueMxScaleBSource::AIV`。
+- GMMFR：`K_SCHEDULE=WeightPrologueMxKSchedule::DYNAMIC`，`SCALE_B_SOURCE=WeightPrologueMxScaleBSource::AIC`。
 
 公共实现按上述枚举选择入口和 ScaleB 搬运分支。动态 K 的选择属于
 [GMM Kernel](../kernel/kernel_wqgmm_mix_weight_prologue.md#动态-k-分块选择)：
 AIC、AIV 共用 Kernel 内的 `CalcDynamicKBlock`，Block 只按传入的 ka/kb/k0 执行。
-GMM 的 L1 布局与握手配置由 Params 工厂提供。
+GMM 的 L1 布局与握手配置由 Kernel 配置；GMMFR 的对应参数由其 Kernel 私有方法配置。
 
 | 模板参数 | 公开类型别名 |
 | :--- | :--- |
@@ -109,7 +112,7 @@ struct Params {
 | :--- | :--- |
 | `aGmAddr` | A 矩阵 GM 地址 |
 | `scaleAGmAddr` / `scaleBGmAddr` | ScaleA/ScaleB GM 地址 |
-| `cGmAddr` | 输出 C GM 地址 |
+| `cGmAddr` | QBMM/GMM 输出 C GM 地址；GMMFR 的结果由传入的 UB Tensor 接收 |
 | `biasGmAddr` | Bias GM 地址，由配套 Kernel 的 AIV 分支使用 |
 | `l1TileShape` | `(baseM, baseN, kL1, scaleKL1)` |
 | `l0TileShape` | `(baseM, baseN, baseK)` |
@@ -169,7 +172,7 @@ __aicore__ inline void operator()(
     uint64_t kaL1Size, uint64_t kbL1Size, uint64_t l0KSize);
 ```
 
-A、ScaleA、C Tensor 为当前 scheduler tile 的 GM slice。QBMM 的 ScaleB 也传当前 tile 的 GM slice；
+A、ScaleA Tensor 为当前 scheduler tile 的 GM slice；QBMM/GMM 的 C 为 GM slice，GMMFR 的 C 为 split-M UB Tensor。QBMM/GMMFR 的 ScaleB 传当前 tile 的 GM slice；
 GMM 的入口额外接收 ka/kb/k0；AIC 不解引用或切分传入的 ScaleB GM Tensor，直接消费 AIV 写入的 L1 ScaleB。
 B/bias 不作为参数传入，而由 AIV 通过共享 L1 提供。
 QBMM 的固定 K 来自构造时的 tiling 参数；GMM 的 ka/kb/k0 必须由 Kernel 随当前 tile 传入。
@@ -194,12 +197,12 @@ L1 分区、缓冲容量和 ready/free 标志编号由 GMM Kernel 配置，AIC �
 
 ## 计算流程
 
-1. Scale 窗口开始时，AIC 在对应 L1 槽位锁保护下搬运 ScaleA；QBMM 还由 AIC 搬运 ScaleB，GMM 的 ScaleB 由 AIV 转换后写入 L1。
+1. Scale 窗口开始时，AIC 在对应 L1 槽位锁保护下搬运 ScaleA；QBMM/GMMFR 还由 AIC 搬运 ScaleB，GMM 的 ScaleB 由 AIV 转换后写入 L1。
 2. A 窗口开始时，AIC 在对应 L1 槽位锁保护下搬运 A，随后清理当前 B 块的 `[Align32(K), Align64(K))` 物理尾部。
 3. 等待 AIV 为当前 L1 weight buffer 设置 ready 标志。
 4. QBMM 按固定 `baseK`、GMM 按动态 `k0` 将 A、B、ScaleA、ScaleB 搬入 L0，
-   使用 `MmadTraitMX` 累加到 L0C。
-5. 首个 K tile 消费 AIV 已按 `1/64` 缩放的 bias，Fixpipe 将结果写回 C。
+   使用 `MmadTraitMX` 累加到 L0C。GMMFR 同样消费 Kernel 提供的动态 K 分块。
+5. 首个 K tile 消费 AIV 已按 `1/64` 缩放的 bias。QBMM/GMM 经 Fixpipe 写回 GM，GMMFR 经 Fixpipe 写入 UB 后由 epilogue 乘 64 并执行路由。
 6. 释放 weight buffer，允许 AIV 继续生产下一 tile。
 
 GMM 的 A 槽位按 ka 窗口切换，Scale 槽位按独立的 4096 元素 K 窗口切换；两者均可跨多个 kb 块复用。
@@ -237,3 +240,12 @@ blockMmad(gmBlockA, gmBlockScaleA, tensorScaleBGm, gmBlockC, kaL1Size, kbL1Size,
 - `GemmUniversal` Weight Prologue 特化的 AIC 计算侧。
 - 配套 Kernel 支持 arch35 MXA8W4 Weight ND/NZ 输入，并由 AIV 负责 packed FP4→FP8 和 bias 前处理。
 - 不适合单独调用；没有对应 AIV producer 时，B/bias L1 数据和 ready 标志不存在。
+
+
+## GMMFR 输出与缓冲约定
+
+`GroupedMatmulFinalizeRoutingWithWeightQuantMx` 使用公共特化的动态 K 入口，由 AIC 从 GM 搬运 ScaleB。配套 Kernel 提供有效的 L1 分区和 AIV 权重生产端。
+
+GMMFR 的结果目标为 split-M UB。公共 BlockMmad 在完成 MMAD 后、Fixpipe 写 UB 前等待两个 AIV 子核交还 W8/输出区域，使用跨核事件 3 及其双 AIV 对应编号。UB 输出不在 Fixpipe 中乘 64；公共 routing epilogue 执行该乘法，再乘 logit。QBMM/GMM 的 GM 输出在 Fixpipe 写回时乘 64。
+
+调用方应使用 [GMMFR A8W4 Kernel](../kernel/kernel_wqgmm_mx_mix_finalize_routing.md) 配套组装，不得省略 AIV producer、结果缓冲释放或最终消费通知。
