@@ -196,6 +196,9 @@ private:
                 }
             } else {
                 // AIC_ONLY(原有行为): B/C按batch切片, mmad直写GM
+                if (asc::te::get<MNK_M>(blockShape) <= 0 || shapeN <= 0) {
+                    continue;
+                }
                 auto layoutC = MakeLayoutC{}(batch_, m_, n_); // ND layout for C
                 auto gmC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(cGmAddr_), layoutC);
                 // Block offset

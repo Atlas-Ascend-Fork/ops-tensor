@@ -199,6 +199,9 @@ private:
             auto shapeN = asc::te::get<MNK_N>(blockShape);
             auto shapeK = asc::te::get<MNK_K>(blockShape);
             shapeN = AscendC::Std::min(shapeN, static_cast<int64_t>(n_) - coordN);
+            if (shapeM <= 0 || shapeN <= 0) {
+                continue;
+            }
             TupleShape validBlockShape{shapeM, shapeN, shapeK, asc::te::get<MNK_B>(blockShape)};
 
             auto gmBlockA = MakeBlockA(gmA, params, coordM, shapeM, shapeK);

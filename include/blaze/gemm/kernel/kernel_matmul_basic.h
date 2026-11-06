@@ -146,6 +146,9 @@ private:
             auto shapeM = asc::te::get<MNK_M>(blockShape);
             auto shapeN = asc::te::get<MNK_N>(blockShape);
             auto shapeK = asc::te::get<MNK_K>(blockShape);
+            if (shapeM <= 0 || shapeN <= 0) {
+                continue;
+            }
             curBatchIdx_ = static_cast<uint64_t>(asc::te::get<MNK_B>(blockCoord));
 
             // Block offset
@@ -201,6 +204,9 @@ private:
             auto shapeM = asc::te::get<MNK_M>(blockShape);
             auto shapeN = asc::te::get<MNK_N>(blockShape);
             auto shapeK = asc::te::get<MNK_K>(blockShape);
+            if (shapeM <= 0 || shapeN <= 0) {
+                continue;
+            }
 
             int64_t sliceM = static_cast<int64_t>(params.schParams.sliceM);
             auto gmBlockA = gmA.slice(asc::te::make_coord(coordM / sliceM, asc::te::make_coord(0L, 0L)),

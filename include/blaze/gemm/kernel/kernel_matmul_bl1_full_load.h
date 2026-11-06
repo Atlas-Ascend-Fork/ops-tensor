@@ -190,7 +190,11 @@ private:
             auto tileCoord = bs.GetBlockCoord(blockIdx);
             auto coordM = asc::te::get<MNK_M>(tileCoord);
             auto shapeM = asc::te::get<MNK_M>(tileShape);
+            auto shapeN = asc::te::get<MNK_N>(tileShape);
             auto shapeK = asc::te::get<MNK_K>(tileShape);
+            if (shapeM <= 0 || shapeN <= 0) {
+                continue;
+            }
             curBatchIdx_ = static_cast<uint64_t>(asc::te::get<MNK_B>(tileCoord));
             if (preBatchIdx != curBatchIdx_) {
                 UpdateBatchOffset(params);
@@ -239,6 +243,9 @@ private:
             }
             int64_t offsetC = coordM * n_ + coordN;
             shapeN = AscendC::Std::min(shapeN, static_cast<int64_t>(n_) - coordN);
+            if (shapeM <= 0 || shapeN <= 0) {
+                continue;
+            }
             TupleShape validBlockShape{shapeM, shapeN, shapeK, asc::te::get<MNK_B>(tileShape)};
             auto layoutUB = MakeLayoutC{}(shapeM, shapeN);
             auto ubLocal = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0), layoutUB);

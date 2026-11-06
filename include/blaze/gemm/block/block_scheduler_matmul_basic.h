@@ -126,6 +126,8 @@ public:
     __aicore__ inline BlockShape GetBlockShape(int64_t blockIdx)
     {
         UpdateMNBlockIdx(blockIdx);
+        mSplitOffset_ = 0;
+        nSplitOffset_ = 0;
         int64_t blkM = mL1_;
         int64_t blkN = nL1_;
         int64_t nAlignSize;
@@ -153,16 +155,17 @@ public:
         }
         if constexpr (!IsNdFormat_) {
             splitBlkN = CeilAlign(splitBlkN, nAlignSize);
-            nTailCnt_ = CeilDiv(blkN, splitBlkN);
         }
         // must divide origin blockIdx
         int64_t mSplitIdx = (oriBlockIdx_ % tailCnt_) % mTailCnt_;
         int64_t nSplitIdx = (oriBlockIdx_ % tailCnt_) / mTailCnt_;
-        mSplitOffset_ = mSplitIdx * splitBlkM;
-        nSplitOffset_ = nSplitIdx * splitBlkN;
-        if (mSplitOffset_ >= blkM || nSplitOffset_ >= blkN) {
+        int64_t mSplitOffset = mSplitIdx * splitBlkM;
+        int64_t nSplitOffset = nSplitIdx * splitBlkN;
+        if (mSplitOffset >= blkM || nSplitOffset >= blkN) {
             return {0, 0, k_, batch_};
         }
+        mSplitOffset_ = mSplitOffset;
+        nSplitOffset_ = nSplitOffset;
         splitBlkM = AscendC::Std::min(blkM - mSplitOffset_, splitBlkM);
         splitBlkN = AscendC::Std::min(blkN - nSplitOffset_, splitBlkN);
 

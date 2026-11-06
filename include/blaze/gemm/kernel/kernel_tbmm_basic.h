@@ -142,6 +142,9 @@ private:
             auto shapeM = asc::te::get<MNK_M>(blockShape);
             auto shapeN = asc::te::get<MNK_N>(blockShape);
             auto shapeK = asc::te::get<MNK_K>(blockShape);
+            if (shapeM <= 0 || shapeN <= 0) {
+                continue;
+            }
             curBatchIdx_ = asc::te::get<MNK_B>(blockCoord);
 
             // Block offset

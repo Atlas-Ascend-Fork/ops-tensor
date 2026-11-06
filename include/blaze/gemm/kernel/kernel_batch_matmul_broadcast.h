@@ -130,6 +130,9 @@ public:
             auto shapeM = asc::te::get<MNK_M>(tileShape);
             auto shapeN = asc::te::get<MNK_N>(tileShape);
             auto shapeK = asc::te::get<MNK_K>(tileShape);
+            if (shapeM <= 0 || shapeN <= 0) {
+                continue;
+            }
             curBatchIdx_ = static_cast<uint64_t>(asc::te::get<MNK_B>(tileCoord));
 
             if (preBatchIdx != curBatchIdx_) {
