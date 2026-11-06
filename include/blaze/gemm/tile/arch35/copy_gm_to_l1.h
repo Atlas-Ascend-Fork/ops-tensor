@@ -85,7 +85,7 @@ private:
         asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for ND2NZ DMA instructions
         asc_copy_gm2l1_nd2nz(dst, src, loop1SrcStride, static_cast<asc_load_l2_cache_mode>(cacheMode), nValue, dValue,
                              loop4SrcStride, enableSmallC0);
-#elif defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+#elif defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
         uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
         mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
         mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
