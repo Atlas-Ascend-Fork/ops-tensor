@@ -3,11 +3,11 @@
 
 # ----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
-# This program is free software; you can redistribute it and/or modify it under the terms and conditions of
-# the CANN Open Software License Agreement Version 2.0 (the "License).
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
@@ -20,6 +20,7 @@ Outputs of the kernel per batch b (row-major MxN matrix, flattened to mn element
     b * ceil(mn / 64) * 2 (== b * mn / 32 when mn % 64 == 0).
 
 Checks:
+  - golden: all float32 reference values must be finite before comparison.
   - scale: the NPU scale byte must match the golden DYN_DTYPE_RANGE exponent derived
     from the BF16-rounded golden reference within +/-1 (a 1-ulp BF16 difference of the
     group amax may flip the rounded exponent by one).
@@ -66,6 +67,8 @@ def verify(golden_dir, actual_dir, k, m, n):
     golden = np.fromfile(
         os.path.join(golden_dir, "golden_ref.bin"), dtype=np.float32
     ).reshape(k, m, n)
+    if not np.all(np.isfinite(golden)):
+        raise ValueError("Golden reference contains non-finite values")
     npu_y = np.fromfile(os.path.join(actual_dir, "npu_y.bin"), dtype=np.uint8)
     npu_scale = np.fromfile(os.path.join(actual_dir, "npu_scale.bin"), dtype=np.uint8)
 
