@@ -47,7 +47,7 @@ M 轴分组场景按 M 维度拆分多个分组并拼接输出结果；K 轴分�
 - weight NZ/ZN 场景要求 `k` 和 `n` 均大于 1；
 - MXFP4 E1M2 仅覆盖 weight NZ/ZN 场景；
 - MXFP4（E2M1/E1M2）场景要求 `k` 为偶数且不等于 2；当 weight 为非转置布局（ND/NZ）时，还要求 `n` 为偶数；
-- K 轴分组当前仅覆盖 `groupType=2`、A 为 DN 布局、MXFP8、单 Tensor weight ND、无 Bias、Length/Offset Group List 场景；
+- K 轴分组当前仅覆盖 `groupType=2`、A 为 DN 布局、MXFP8/MXFP4 E2M1、单 Tensor weight ND、无 Bias、Length/Offset Group List 场景；
 - L1 buffer 数量仅支持 2 或 3。
 
 ## CSV 驱动测试
@@ -133,7 +133,7 @@ bash examples/acl/common/run.sh --ops=grouped_matmul --target=quant_grouped_matm
 bash build.sh --opkernel -u --ops=quant_grouped_matmul
 ```
 
-内核单元测试覆盖数据类型、数据格式、矩阵形状、M 轴分组、weight 转置、Group List、Bias、L0C 双缓冲、L1 三缓冲以及 NZ 多 Tensor weight 和 scale 等场景。单元测试用于检查各内核分支能否正常执行，数值正确性由 NPU 样例验证。
+内核单元测试覆盖数据类型、数据格式、矩阵形状、M 轴分组、K 轴分组、weight 转置、Group List、Bias、L0C 双缓冲、L1 三缓冲以及 NZ 多 Tensor weight 和 scale 等场景。单元测试用于检查各内核分支能否正常执行，数值正确性由 NPU 样例验证。
 
 ## 目录结构
 

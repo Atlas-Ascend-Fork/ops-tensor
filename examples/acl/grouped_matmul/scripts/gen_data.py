@@ -147,14 +147,14 @@ def _validate_args(args):
     if args.group_type != 2:
         return
     if (
-        args.dtype.startswith("mxfp4")
+        args.dtype == "mxfp4_e1m2"
         or args.layout_b != "nd"
         or args.single_w != 1
         or args.is_bias != 0
         or args.group_list_type == 2
     ):
         raise ValueError(
-            "K-axis grouping supports MXFP8, single weight ND, no bias and Length/Offset Group List"
+            "K-axis grouping supports MXFP8/MXFP4 E2M1, single weight ND, no bias and Length/Offset Group List"
         )
 
 

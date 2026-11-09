@@ -379,7 +379,7 @@ private:
             cOffset_ = prevSplitOffset * n;
         } else {
             aOffset_ = IsFp4<AType>() ? ((m * prevSplitOffset) >> 1) : (m * prevSplitOffset);
-            bOffset_ = n * prevSplitOffset;
+            bOffset_ = IsFp4<BType>() ? ((n * prevSplitOffset) >> 1) : (n * prevSplitOffset);
             const int64_t transScaleGroupOffset = prevSplitOffset >> MXFP_DIVISOR_SHIFT;
             const int64_t transScaleStart = (transScaleGroupOffset + static_cast<int64_t>(groupIdx))
                                             << MXFP_MULTI_BASE_SHIFT;

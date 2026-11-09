@@ -282,6 +282,61 @@ void RunQgmmShapeCase(uint32_t e, int64_t m, int64_t n, int64_t k, uint8_t l1Buf
                               groupList.Get(), tiling.Get()));
 }
 
+// K-axis grouping: A is DN (physical [totalK, m]) and each group contributes its own k_g.
+// The scale layout holds totalK/64 + groupNum rows, plus one spare row for the last group's
+// tail over-read. The example validates numerics; this UT exercises the FP4 K-group branch,
+// including the padded A L1 buffer allocation (baseM < C0).
+template <typename MxType>
+void RunQgmmKGroupCase(uint32_t e, int64_t m, int64_t n, const std::vector<int64_t>& kGroups, uint8_t l1BufferStage = 2)
+{
+    ASSERT_EQ(kGroups.size(), static_cast<size_t>(e));
+    int64_t totalK = 0;
+    for (int64_t groupK : kGroups) {
+        ASSERT_GT(groupK, 0);
+        totalK += groupK;
+    }
+    const size_t scaleSlots = static_cast<size_t>(totalK / 64 + static_cast<int64_t>(e) + 1);
+    const size_t aSize = MxDataSize<MxType>(static_cast<size_t>(m) * static_cast<size_t>(totalK));
+    const size_t bSize = MxDataSize<MxType>(static_cast<size_t>(totalK) * static_cast<size_t>(n));
+    const size_t scaleASize = scaleSlots * static_cast<size_t>(m) * 2UL;
+    const size_t scaleBSize = scaleSlots * static_cast<size_t>(n) * 2UL;
+    GmBuffer a(aSize);
+    GmBuffer b(bSize);
+    GmBuffer scaleA(scaleASize);
+    GmBuffer scaleB(scaleBSize);
+    GmBuffer bias(static_cast<size_t>(e) * static_cast<size_t>(n) * sizeof(float));
+    GmBuffer c(static_cast<size_t>(e) * static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(float));
+    GmBuffer groupList(static_cast<size_t>(e) * sizeof(int64_t));
+    GmBuffer tiling(sizeof(QGMMUT::QgmmTilingData));
+    ASSERT_NE(a.Get(), nullptr);
+    ASSERT_NE(b.Get(), nullptr);
+    ASSERT_NE(scaleA.Get(), nullptr);
+    ASSERT_NE(scaleB.Get(), nullptr);
+    ASSERT_NE(c.Get(), nullptr);
+    ASSERT_NE(groupList.Get(), nullptr);
+    ASSERT_NE(tiling.Get(), nullptr);
+
+    std::fill_n(reinterpret_cast<uint8_t*>(a.Get()), aSize, MxOneByte<MxType>());
+    std::fill_n(reinterpret_cast<uint8_t*>(b.Get()), bSize, MxOneByte<MxType>());
+    std::fill_n(reinterpret_cast<uint8_t*>(scaleA.Get()), scaleASize, 0x7fU);
+    std::fill_n(reinterpret_cast<uint8_t*>(scaleB.Get()), scaleBSize, 0x7fU);
+    std::fill_n(reinterpret_cast<uint8_t*>(c.Get()),
+                static_cast<size_t>(e) * static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(float), 0U);
+    auto* groupListData = reinterpret_cast<int64_t*>(groupList.Get());
+    for (uint32_t i = 0; i < e; ++i) {
+        groupListData[i] = kGroups[i];
+    }
+
+    auto* t = reinterpret_cast<QGMMUT::QgmmTilingData*>(tiling.Get());
+    // groupType=2 selects the K-split axis from LayoutA (DN); scaleKAL1/scaleKBL1 are K lengths.
+    *t = {e, m, n, totalK, 16, 64, 128, 128, 128, 128, 128, 0, 1, l1BufferStage, 2, 1, 1};
+    AscendC::SetKernelMode(KernelMode::MIX_MODE);
+    auto
+        fn = qgmm_mx_kernel_entry<MxType, MxType, float, float, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
+    ASSERT_TRUE(KERNEL_RUN_KF(fn, BLOCK_NUM, a.Get(), b.Get(), scaleA.Get(), scaleB.Get(), bias.Get(), c.Get(),
+                              groupList.Get(), tiling.Get()));
+}
+
 class QgmmMxKernelTest : public testing::Test {
 protected:
     static void TearDownTestCase()
@@ -375,6 +430,12 @@ TEST_F(QgmmMxKernelTest, MxFp8NdL1TripleBuffer)
 TEST_F(QgmmMxKernelTest, TransB)
 {
     RunQgmmShapeCase<fp8_e4m3fn_t, asc::te::nd_ext_layout_ptn, asc::te::dn_ext_layout_ptn>(2, 16, 64, 64);
+}
+
+TEST_F(QgmmMxKernelTest, MxFp4KGroupSplitK)
+{
+    // Unequal and non-64-aligned k_g, including the 64 boundary.
+    RunQgmmKGroupCase<fp4x2_e2m1_t>(3, 64, 128, {63, 64, 65});
 }
 
 } // namespace

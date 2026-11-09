@@ -26,3 +26,8 @@ qgmm_mgroup_e2_m16_k64_n64_fp8_e4m3_weight_nd_single_length_a_full_load,2,16,64,
 qgmm_mgroup_e2_m64_k256_n128_fp8_e4m3_weight_nd_single_length_large_k,2,64,128,256,16,64,64,64,64,2,2,0,1,2,0,1,1,mxfp8_e4m3,nd,nd,64;64,0,float32
 qgmm_kgroup_e3_m17_k128_n33_fp8_e4m3_weight_nd_single_length_tail,3,17,33,128,16,64,128,128,128,4,4,0,2,2,2,1,1,mxfp8_e4m3,dn,nd,32;32;64,0,float16
 qgmm_kgroup_e3_m32_k128_n64_fp8_e5m2_weight_nd_single_offset_tail,3,32,64,128,16,64,128,128,128,4,4,0,2,2,2,0,1,mxfp8_e5m2,dn,nd,17;64;128,0,bfloat16
+qgmm_kgroup_e2_m64_k64_n128_fp4_e2m1_weight_nd_single_length_l1_2,2,64,128,64,16,64,128,128,128,128,128,0,2,2,2,1,1,mxfp4_e2m1,dn,nd,32;32,0,bfloat16
+qgmm_kgroup_e3_m64_k192_n128_fp4_e2m1_weight_nd_single_length_odd_tail,3,64,128,192,16,64,128,128,128,128,128,0,2,2,2,1,1,mxfp4_e2m1,dn,nd,63;64;65,0,float16
+qgmm_kgroup_e3_m128_k128_n256_fp4_e2m1_weight_nd_single_offset_odd,3,128,256,128,16,64,128,128,128,128,128,0,2,2,2,0,1,mxfp4_e2m1,dn,nd,17;64;128,0,float32
+qgmm_kgroup_e4_m64_k256_n256_fp4_e2m1_weight_nd_single_offset_l1_2,4,64,256,256,16,64,128,128,128,128,128,0,2,2,2,0,1,mxfp4_e2m1,dn,nd,1;64;128;256,0,float16
+qgmm_kgroup_e8_m512_k512_n1024_fp4_e2m1_weight_nd_single_length_l1_3,8,512,1024,512,16,64,128,128,128,128,128,0,2,3,2,1,1,mxfp4_e2m1,dn,nd,1;31;33;63;64;65;96;159,0,bfloat16

@@ -136,7 +136,8 @@ public:
 
         constexpr uint64_t sizeShift = IS_FP4_TYPE ? 1UL : 0UL;
         scaleKL1Span_ = CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
-        aL1OneBuffer_ = (baseM_ * CeilAlign(kAL1_, MXFP_DIVISOR_SIZE)) >> sizeShift;
+        const uint64_t aMAlign = (IS_FP4_TYPE && TRANS_A) ? CeilAlign(baseM_, C0_SIZE) : baseM_;
+        aL1OneBuffer_ = (aMAlign * CeilAlign(kAL1_, MXFP_DIVISOR_SIZE)) >> sizeShift;
         bL1OneBuffer_ = (baseN_ * CeilAlign(kBL1_, MXFP_DIVISOR_SIZE)) >> sizeShift;
         concatBL1OneBuffer_ = (baseN_ * CONCAT_N_FACTOR * CeilAlign(kBL1_, MXFP_DIVISOR_SIZE)) >> sizeShift;
         scaleAL1OneBuffer_ = baseM_ * scaleKL1Span_;

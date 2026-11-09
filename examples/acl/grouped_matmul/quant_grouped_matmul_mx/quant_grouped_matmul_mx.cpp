@@ -513,9 +513,9 @@ bool CheckKGroupedConfig(const QgmmCaseConfig& config, std::string& reason)
     if (config.tiling.groupType != 2) {
         return true;
     }
-    if (IsFp4Type(config.dtype) || config.layoutB != "nd" || config.tiling.singleW != 1 || config.tiling.isBias != 0 ||
-        config.tiling.groupListType == 2) {
-        reason = "K-axis grouping supports MXFP8, single weight ND, no bias and Length/Offset Group List";
+    if (config.dtype == "mxfp4_e1m2" || config.layoutB != "nd" || config.tiling.singleW != 1 ||
+        config.tiling.isBias != 0 || config.tiling.groupListType == 2) {
+        reason = "K-axis grouping supports MXFP8/MXFP4 E2M1, single weight ND, no bias and Length/Offset Group List";
         return false;
     }
     return true;
