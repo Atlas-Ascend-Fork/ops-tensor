@@ -54,6 +54,9 @@ public:
         // tiling). The kernel also consumes it as the epilogue row clamp /
         // N chunk bound.
         uint32_t block = 0;
+        // HF32 (TF32-mantissa) cube mode for FP32 inputs, mirrors the
+        // BlockSchedulerMatmulBasic param consumed by Blaze::Gemm::SetHF32.
+        uint8_t isHf32 = 0;
     };
 
 public:

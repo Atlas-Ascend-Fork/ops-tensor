@@ -104,6 +104,10 @@ public:
             return;
         }
 
+        // FP32 inputs run in HF32 (TF32-mantissa) cube mode; no-op for the
+        // 16-bit element types (mirrors the basic matmul kernel).
+        Blaze::Gemm::SetHF32(params.schParams.isHf32);
+
         BlockEpilogue epilogueOp;
         BlockMmad blockMmad;
         epilogueOp.Init(params.epilogueParams);
@@ -111,6 +115,7 @@ public:
             blockMmad.Init(params.mmadParams);
         }
         MatmulProcess(params, epilogueOp, blockMmad, bs, curBlockIdx, AscendC::GetBlockNum(), bs.GetBlockNums());
+        Blaze::Gemm::UnsetHF32(params.schParams.isHf32);
     }
 
 private:
