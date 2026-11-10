@@ -16,4 +16,12 @@ struct CopyInstruction {
     uint8_t sid = 0;
 };
 inline thread_local CopyInstruction* observedCopy = nullptr;
+// Active only on AIV while a weight-antiquant execution test is running.
+// tikicpulib selects the calling AIV's bank automatically; the device policy
+// encodes that selection explicitly in bit 4. The instruction wrapper removes
+// that bit before forwarding and records every real SDK handoff.
+struct AntiquantSyncTrace {
+    uint64_t sets = 0, waits = 0, normalizedSets = 0, normalizedWaits = 0, unexpectedFlags = 0;
+};
+inline thread_local AntiquantSyncTrace* antiquantSyncTrace = nullptr;
 } // namespace WeightQuantBatchMatmulUT

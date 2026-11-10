@@ -27,17 +27,6 @@ namespace {
 using Blaze::Gemm::QuantMode;
 using namespace WeightQuantBatchMatmulUT;
 
-using Fp16Int8 = Components<half, int8_t, half, half, 512, 2, true, QuantMode::PERCHANNEL_MODE, false, false>;
-using Fp16Int8Offset = Components<half, int8_t, half, half, 256, 4, false, QuantMode::PERTENSOR_MODE, true, true>;
-using Bf16Int8 = Components<bfloat16_t, int8_t, bfloat16_t, bfloat16_t, 1024, 2, true, QuantMode::PERCHANNEL_MODE, true,
-                            false>;
-using Fp16Fp8 = Components<half, float8_e4m3_t, half, half, 512, 4, false, QuantMode::PERCHANNEL_MODE, false, false>;
-using Bf16Fp8 = Components<bfloat16_t, float8_e4m3_t, bfloat16_t, bfloat16_t, 512, 2, true, QuantMode::PERTENSOR_MODE,
-                           false, true>;
-using Fp16HiFloat8 = Components<half, hifloat8_t, half, half, 1024, 2, true, QuantMode::PERCHANNEL_MODE, true, false>;
-using Bf16HiFloat8 = Components<bfloat16_t, hifloat8_t, bfloat16_t, bfloat16_t, 256, 4, false,
-                                QuantMode::PERTENSOR_MODE, false, false>;
-
 TEST(WeightQuantBatchMatmulTest, InstantiatesSupportedB8Matrix)
 {
     ASSERT_NE(&weight_quant_batch_matmul_kernel_entry<Fp16Int8>, nullptr);

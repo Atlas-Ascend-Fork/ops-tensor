@@ -12,12 +12,10 @@
  * \file test_quant_batch_matmul_pergroup_a8w4.cpp
  * \brief Compile-instantiation and layout-contract tests for the T-CG per-group A8W4 kernel.
  *
- * The kernel itself is NOT executed on the CPU debug simulator: its AIV prologue addresses UB through
- * base-0 logical pointers ("(__ubuf__ uint8_t*)0 + offset", the on-device convention carried over from
- * ops-nn), which have no physical mapping under tikicpulib — the first UB access would fault and leave
- * the paired cores spinning on cross-core flags. The tests therefore cover what the simulator can
- * faithfully verify: public template instantiations (type assembly, tiling mapping, cross-core flag
- * protocol compilation) and the converted-weight layout contracts shared by Dequant and CopyPaddedUBToL1.
+ * Runtime coverage is provided separately by test_wqmm_pergroup_execution.cpp.
+ * Its fixture maps only the scale-mask scratch page for direct device-address
+ * stores and translates register accesses into tikicpulib's physical UB. These
+ * tests retain the public template-instantiation and layout contracts.
  */
 
 #include <cstdint>

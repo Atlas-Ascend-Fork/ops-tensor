@@ -30,6 +30,7 @@
 #define __fp8e4m3 fp8_e4m3fn_t
 #define __fp4e2m1x2 fp4x2_e2m1_t
 #endif
+#include "pergroup_cpu_debug.h"
 #include "blaze/gemm/kernel/kernel_wqmm_mix_pergroup.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #if defined(ASCENDC_CPU_DEBUG)
@@ -56,6 +57,8 @@ struct TilingData {
     uint16_t al1Pingpong{2U};
     uint16_t bl1Pingpong{4U};
     uint32_t dbL0C{2U};
+    int64_t kAL1Tile{0};
+    int64_t kBL1Tile{0};
 };
 
 template <bool IS_WEIGHT_NZ>
@@ -70,8 +73,9 @@ __aicore__ inline void Run(GM_ADDR x1Gm, GM_ADDR x2Gm, GM_ADDR x2ScaleGm, GM_ADD
     using LayoutC = asc::te::nd_ext_layout_ptn;
     using LayoutB = AscendC::Std::conditional_t<IS_WEIGHT_NZ, asc::te::nz_layout_ptn, asc::te::dn_ext_layout_ptn>;
     using BTypeTuple = AscendC::Std::tuple<BType, ScaleType>;
-    using BlockMmadType = Blaze::Gemm::Block::BlockMmad<Blaze::Gemm::MatmulWithWeightQuantPergroup, AType, LayoutA,
-                                                        BTypeTuple, LayoutB, CType, LayoutC, void, void>;
+    using ProductionBlockMmad = Blaze::Gemm::Block::BlockMmad<Blaze::Gemm::MatmulWithWeightQuantPergroup, AType,
+                                                              LayoutA, BTypeTuple, LayoutB, CType, LayoutC, void, void>;
+    using BlockMmadType = CpuDebug::ObservedBlock<ProductionBlockMmad>;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t>;
     using BlockSchedulerType = Blaze::Gemm::Block::BlockSchedulerWqmmBlockSplit<ProblemShape, LayoutB, AType>;
     using KernelImpl = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmadType, void, BlockSchedulerType>;
@@ -81,8 +85,8 @@ __aicore__ inline void Run(GM_ADDR x1Gm, GM_ADDR x2Gm, GM_ADDR x2ScaleGm, GM_ADD
     mmadParams.cGmAddr = yGm;
     mmadParams.yScaleGmAddr = yScaleGm;
     mmadParams.l1TileShape = asc::te::make_shape(static_cast<int64_t>(tiling.baseM), static_cast<int64_t>(tiling.baseN),
-                                                 static_cast<int64_t>(tiling.baseK),
-                                                 static_cast<int64_t>(tiling.baseK));
+                                                 tiling.kAL1Tile ? tiling.kAL1Tile : int64_t(tiling.baseK),
+                                                 tiling.kBL1Tile ? tiling.kBL1Tile : int64_t(tiling.baseK));
     mmadParams.l0TileShape = asc::te::make_shape(static_cast<int64_t>(tiling.baseM), static_cast<int64_t>(tiling.baseN),
                                                  static_cast<int64_t>(tiling.baseK));
     mmadParams.vecCoreParallel = tiling.vecCoreParallel;

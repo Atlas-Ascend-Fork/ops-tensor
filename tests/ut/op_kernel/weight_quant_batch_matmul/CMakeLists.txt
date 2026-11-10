@@ -14,4 +14,6 @@ AddOpTestCase(weight_quant_batch_matmul "ascend950pr_9599" "")
 # use a directory property to retain the framework's CMake 3.16 compatibility.
 get_filename_component(_wqmm_ut_parent "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 set_property(DIRECTORY "${_wqmm_ut_parent}" APPEND PROPERTY LINK_OPTIONS
-    "$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,ops_tensor_kernel_ut_ascend950>:LINKER:--wrap=_Z17copy_ubuf_to_cbufPvS_htttt>")
+    "$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,ops_tensor_kernel_ut_ascend950>:LINKER:--wrap=_Z17copy_ubuf_to_cbufPvS_htttt>"
+    "$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,ops_tensor_kernel_ut_ascend950>:LINKER:--wrap=_Z15set_intra_block6pipe_tm>"
+    "$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,ops_tensor_kernel_ut_ascend950>:LINKER:--wrap=_Z16wait_intra_block6pipe_tm>")
