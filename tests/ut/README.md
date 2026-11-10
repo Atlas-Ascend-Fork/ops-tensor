@@ -291,11 +291,12 @@ sequenceDiagram
     rect rgb(255, 245, 238)
         loop 🔁 每个 tile
             AIC->>FLAG: WaitFlag(ping) 🟢
-            Note right of AIC: MMAD: A×B → UB
+            Note right of AIC: MMAD: A×B → L0C
             AIC->>AIC: blockMmad(…)
+            Note right of AIC: Fixpipe: L0C → UB
             AIC->>FLAG: SetFlag(→AIV, done=6) ✅
             AIV->>FLAG: WaitFlag(done=6) 🟢
-            Note right of AIV: Fixpipe: UB → GM
+            Note right of AIV: DataCopy(MTE3): UB → GM
             AIV->>AIV: epilogueOp(…)
             AIV->>FLAG: SetFlag(→AIC, pong=5) ✅
         end
@@ -313,6 +314,6 @@ sequenceDiagram
 | ----------- | ------- | ---------- | -------------------------------------- |
 | `ping`    | 4       | AIV → AIC | AIV 完成 copy-out，AIC 可开始下一 tile |
 | `pong`    | 5       | AIV → AIC | 乒乓交替                               |
-| `done`    | 6       | AIC → AIV | AIC 完成 MMAD，AIV 可开始 copy-out     |
+| `done`    | 6       | AIC → AIV | AIC 完成 MMAD 与 Fixpipe（UB 数据就绪），AIV 可开始 copy-out |
 | `ping+16` | 20      | AIV → AIC | splitM 场景 M 轴信号                   |
 | `pong+16` | 21      | AIV → AIC | splitM 场景 M 轴信号                   |

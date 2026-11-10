@@ -77,7 +77,7 @@ using DispatchPolicy = Blaze::Attention::BlockFlatQuant<>;
 using BlockMmad = Blaze::Attention::Block::BlockMmad<
     DispatchPolicy, QType, LayoutQ, KType, LayoutK, VType, LayoutV, OutType, LayoutOut>;
 using BlockScheduler = Blaze::Attention::Block::BlockSchedulerFlatQuant<ProblemShape>;
-using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueFlatQuant<bfloat16_t, int8_t, uint8_t>;
+using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueFlatQuant<bfloat16_t, fp4x2_e2m1_t, uint8_t>;
 
 using Kernel = Blaze::Attention::Kernel::AttentionUniversal<
     ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;

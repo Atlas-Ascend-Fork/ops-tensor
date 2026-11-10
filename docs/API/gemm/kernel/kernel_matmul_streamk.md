@@ -23,7 +23,7 @@ StreamK 矩阵乘 Kernel，支持 AIC + AIV 双核协同计算。支持 workspac
 - 最终结果输出到 GM
 
 ### BlockScheduler 限制
-仅支持 `BlockSchedulerStreamK` 调度器，支持 DP+SK 混合策略。
+仅支持 `BlockSchedulerMatmulStreamK` 调度器，支持 DP+SK 混合策略。
 
 ### HF32 模式
 可选 HF32 计算模式，通过 scheduler 参数控制。
@@ -205,8 +205,8 @@ using LayoutBias = LayoutC;                            // Bias 布局
 using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
 
 // ============== 3. BlockScheduler 组装 ==============
-// StreamK 使用专门的 BlockSchedulerStreamK
-using BlockScheduler = Blaze::Gemm::Block::BlockSchedulerStreamK<ProblemShape>;
+// StreamK 使用专门的 BlockSchedulerMatmulStreamK
+using BlockScheduler = Blaze::Gemm::Block::BlockSchedulerMatmulStreamK<ProblemShape>;
 
 // ============== 4. BlockMmad 组装 ==============
 // DispatchPolicy: 调度策略，支持 L0C2Out 模式选择
@@ -299,11 +299,13 @@ params.schParams.l2CacheMode = Blaze::Gemm::ALL_L2_CACHE_DISABLE;  // 避免缓�
 
 **Workspace 大小配置**：
 ```cpp
-// Workspace 大小计算：tailMNTileNum × skKTileNum × BLOCK_BASE_M × BLOCK_BASE_N × sizeof(float)
+// Workspace 大小计算：tailMNTileNum × skKTileNum × BLOCK_BASE_M × CeilAlign(BLOCK_BASE_N, 32) × sizeof(float)
+// N 方向需按 32 元素向上对齐（与实现 kernel_matmul_streamk.h 中 alignedBaseN 的划分一致）
 // 示例：假设尾块 tile 数量为 4，SK 切分 K 轴数量为 2
 constexpr int64_t BLOCK_BASE_M = 128;
 constexpr int64_t BLOCK_BASE_N = 128;
-size_t workspaceSize = 4 * 2 * BLOCK_BASE_M * BLOCK_BASE_N * sizeof(float);
+constexpr int64_t BLOCK_BASE_N_ALIGNED = (BLOCK_BASE_N + 31) / 32 * 32;  // CeilAlign(BLOCK_BASE_N, 32)
+size_t workspaceSize = 4 * 2 * BLOCK_BASE_M * BLOCK_BASE_N_ALIGNED * sizeof(float);
 GM_ADDR workspaceGM = AllocWorkspace(workspaceSize);
 ```
 
@@ -315,11 +317,10 @@ params.mmadParams.l1Stages = 2;                      // 双缓冲支持 Preload
 params.schParams.usedCoreNum = 8;
 ```
 
-**HF32 计算模式**：
+**HF32 计算模式（仅 float32 输入合法）**：
 ```cpp
-// 启用 HF32 模式提升 FP16 计算精度
-params.schParams.isHf32 = 1;                         // 启用 HF32 模式
-// 注意：HF32 模式会增加 L0C 存储需求
+// float32 输入时启用 HF32 模式，FP32 以 HF32 格式参与 Cube 计算，提升计算性能
+params.schParams.isHf32 = 1;                         // 启用 HF32 模式（仅 dtype=float32 时有效）
 ```
 
 ## 数据流
@@ -363,10 +364,10 @@ AIV 后处理 → 输出到 GM
 ### Workspace 布局
 ```
 workspace 布局：
-offsetWorkspace = ((tileIdx % usedCoreNum) / skKTileNum) * skKTileNum + kCntIndex) * BLOCK_BASE_M * BLOCK_BASE_N
+offsetWorkspace = (((tileIdx % usedCoreNum) / skKTileNum) * skKTileNum + kCntIndex) * BLOCK_BASE_M * CeilAlign(BLOCK_BASE_N, 32)
 ```
 
-说明：每个 (m, n) tile 的 K 轴切分结果按顺序存储在 workspace 中。
+说明：每个 (m, n) tile 的 K 轴切分结果按顺序存储在 workspace 中；`offsetWorkspace` 以 float 元素（非字节）为单位，实现中 workspace 指针为 `__gm__ float*`，直接在该元素偏移上寻址。
 
 ## 性能优化建议
 
@@ -424,8 +425,8 @@ offsetWorkspace = ((tileIdx % usedCoreNum) / skKTileNum) * skKTileNum + kCntInde
   - 提升数据搬运效率
 
 ### Workspace 配置
-- **大小计算**：
-  - 基本公式：`tailMNTileNum × skKTileNum × BLOCK_BASE_M × BLOCK_BASE_N × sizeof(float)`
+  - **大小计算**：
+    - 基本公式：`tailMNTileNum × skKTileNum × BLOCK_BASE_M × CeilAlign(BLOCK_BASE_N, 32) × sizeof(float)`（N 方向按 32 元素向上对齐）
   - 示例：尾块 4 个，SK 切分 2 次，Block 128×128
     ```cpp
     size_t workspaceSize = 4 * 2 * 128 * 128 * sizeof(float);  // 512KB
@@ -461,12 +462,13 @@ offsetWorkspace = ((tileIdx % usedCoreNum) / skKTileNum) * skKTileNum + kCntInde
   - 合理设置 `usedCoreNum`，预留 AIV 资源
 
 ### HF32 计算模式
-- **精度提升**：启用 HF32 模式提升 FP16 计算精度
+- **适用条件**：仅 float32 输入可启用（isHf32 只与 float32 输入组合有效）
+- **作用**：FP32 数据以 HF32 格式参与 Cube 计算，提升计算性能
 - **配置方式**：`params.schParams.isHf32 = 1;`
 - **注意事项**：
-  - HF32 模式会增加 L0C 存储需求
-  - 适用于对精度要求较高的场景
-  - 可能影响性能，需权衡精度和性能
+  - HF32 对 FP32 输入做舍入（尾数位数减少），计算结果存在相应精度损失
+  - 适用于允许该精度损失、以计算性能为优先的场景，启用前需验证输出误差
+  - isHf32 仅切换 Cube 的 HF32 计算模式，不改变 L0C 累加类型与布局
 
 ### NZ 格式优化
 - **权重矩阵（B）**：优先使用 NZ 格式，提升 L1/L0 搬运效率
@@ -477,4 +479,4 @@ offsetWorkspace = ((tileIdx % usedCoreNum) / skKTileNum) * skKTileNum + kCntInde
 - **大矩阵场景**：(m × n × k) 较大，需要多核并行
 - **K 轴切分场景**：K 维度远大于 M/N，需要 K 轴切分优化
 - **高并行度场景**：需要充分利用 AIC 和 AIV 双核
-- **高精度场景**：需要 HF32 模式提升计算精度
+- **FP32 高吞吐场景**：float32 输入可启用 HF32 模式提升计算性能（存在相应精度损失）

@@ -2,7 +2,7 @@
 > [代码位置](../../../../include/blaze/gemm/block/block_scheduler_matmul_basic.h)
 
 ## 功能说明
-MatmulBasic 调度器，支持 tile 切分、Z 型扫描、尾块切分、FP32 SplitK 切分等。适用于 Basic Kernel 场景。
+MatmulBasic 调度器，支持 tile 切分、Z 型扫描、尾块切分等。适用于 Basic Kernel 场景。K 轴不做切分（`GetBlockCoord` 的 kOffset 恒为 0）；SplitK 由 BlockMmad 层的 `splitKNum`/`splitKIdx` 参数或 StreamK 调度器实现。
 
 **继承自**：无（独立类）
 
@@ -19,7 +19,7 @@ MatmulBasic 调度器，支持 tile 切分、Z 型扫描、尾块切分、FP32 S
 
 | 值 | 说明 | 适用场景 |
 |----|------|----------|
-| 0 | 非全载模式（默认） | 通用场景，支持 SplitK |
+| 0 | 非全载模式（默认） | 通用场景，K 轴不切分 |
 | 1 | A 矩阵全载 | A 矩阵较小，可完全载入 L1 |
 | 2 | B 矩阵全载 | B 矩阵较小，可完全载入 L1 |
 
@@ -127,7 +127,7 @@ mTailCnt=2, nTailCnt=2  // 尾块切为 4 份，4 个 Block 并行处理
 
 #### 5. HF32 模式 (isHf32)
 
-**作用**：启用 HF32 计算模式，用于特定精度场景。
+**作用**：启用 HF32 计算模式（仅 float32 输入有效，FP32 以 HF32 舍入参与 Cube 计算提升性能，存在相应精度损失）。
 
 **传值建议**：
 | 值 | 说明 |
@@ -297,9 +297,10 @@ BlockScheduler scheduler(shape, params);
 
 ### 获取 block 数量
 ```cpp
+int64_t curBlockIdx = AscendC::GetBlockIdx();  // 当前核编号
 int64_t blockNums = scheduler.GetBlockNums();
 int64_t coreNums = scheduler.GetCoreNums();
-for (int64_t blockIdx = blockIdx; blockIdx < blockNums; blockIdx += coreNums) {
+for (int64_t blockIdx = curBlockIdx; blockIdx < blockNums; blockIdx += coreNums) {
     // 处理 block
 }
 ```
@@ -307,7 +308,7 @@ for (int64_t blockIdx = blockIdx; blockIdx < blockNums; blockIdx += coreNums) {
 ### 获取 Block 形状
 ```cpp
 using BType_ = half;
-bool TransB = false;
+constexpr bool TransB = false;  // 模板实参须为编译期常量
 auto blockShape = scheduler.GetBlockShape<TransB, BType_>(blockIdx);
 int64_t mL1 = Get<0>(blockShape);
 int64_t nL1 = Get<1>(blockShape);

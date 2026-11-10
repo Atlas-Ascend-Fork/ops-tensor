@@ -11,7 +11,7 @@
 ### BlockScheduler（任务调度）
 | 组件名 | 描述 |
 | :----------------------------------------------------------- | :------: |
-| [block_scheduler_flat_quant](./block_scheduler_flat_quant.md) | FlatQuant 调度器，按 Batch/K 迭代维度切分任务、尾块处理 |
+| [block_scheduler_flat_quant](./block_scheduler_flat_quant.md) | FlatQuant 调度器，按 Batch 维度切分任务、尾块处理 |
 
 ## 公共框架
 
@@ -30,7 +30,7 @@ BlockMmadFlatQuant (AIC)
     └── BufferManager (L1/L0/L0C 缓冲管理)
 
 BlockSchedulerFlatQuant
-    ├── Batch/K 迭代维度切分
+    ├── Batch 维度切分
     ├── 尾块处理（mainTailBatch / mainTailBlock）
     └── Block 坐标计算
 ```

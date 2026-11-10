@@ -21,7 +21,7 @@ class BlockScheduler;
 | Scheduler | 特有参数 | 说明 |
 |-----------|----------|------|
 | BlockSchedulerMatmulBasic | FullLoadMode_, IsFp32_, IsNdFormat_ | 全载模式（0/1/2）、是否 FP32、是否 ND 格式 |
-| BlockSchedulerStreamK | - | - |
+| BlockSchedulerMatmulStreamK | - | - |
 | BlockSchedulerQuantBatchMatmulV3 | FullLoadMode_, LayoutA_, LayoutB_, AType_ | 全载模式、布局、数据类型 |
 
 ## 类型别名
@@ -31,7 +31,7 @@ class BlockScheduler;
 using BlockShape = Shape<int64_t, int64_t, int64_t, int64_t>;
 using ProblemShape = ProblemShape_;
 
-// BlockSchedulerMatmulBasic / BlockSchedulerStreamK
+// BlockSchedulerMatmulBasic / BlockSchedulerMatmulStreamK
 using BlockCoord = Coord<int64_t, int64_t, int64_t, int64_t>;
 
 // BlockSchedulerQuantBatchMatmulV3
@@ -139,14 +139,14 @@ if (rowIdx % 2 != 0) {
 | Scheduler | 尾块判断 |
 |-----------|----------|
 | BlockSchedulerMatmulBasic | `mTileIdx >= mL1NormCnt_` 或 `nTileIdx >= nL1NormCnt_` |
-| BlockSchedulerStreamK | `mTileIdx == (mTileNum - 1)` 或 `nTileIdx == (nTileNum - 1)` |
+| BlockSchedulerMatmulStreamK | `mTileIdx == (mTileNum - 1)` 或 `nTileIdx == (nTileNum - 1)` |
 | BlockSchedulerQuantBatchMatmulV3 | `mIdx >= mBaseNormCnt_` 或 `nIdx >= nBaseNormCnt_` |
 
 ### 尾块切分
 | Scheduler | 尾块切分支持 |
 |-----------|--------------|
 | BlockSchedulerMatmulBasic | 支持（mTailCnt, nTailCnt） |
-| BlockSchedulerStreamK | 支持（K 轴尾块） |
+| BlockSchedulerMatmulStreamK | 支持（K 轴尾块） |
 | BlockSchedulerQuantBatchMatmulV3 | 支持（mTailTile, nTailTile） |
 
 
@@ -185,10 +185,10 @@ BlockScheduler::Params params = {
 ProblemShape shape{m, n, k, batch};
 BlockScheduler scheduler(shape, params);
 
-int64_t blockIdx = AscendC::GetBlockIdx();
+int64_t curBlockIdx = AscendC::GetBlockIdx();
 int64_t coreNums = scheduler.GetCoreNums();
 
-for (int64_t blockIdx = blockIdx; blockIdx < scheduler.GetBlockNums(); blockIdx += coreNums) {
+for (int64_t blockIdx = curBlockIdx; blockIdx < scheduler.GetBlockNums(); blockIdx += coreNums) {
     auto blockShape = scheduler.GetBlockShape<TRANS_B, BType>(blockIdx);
     auto blockCoord = scheduler.GetBlockCoord(blockIdx);
     // BlockMmad 计算

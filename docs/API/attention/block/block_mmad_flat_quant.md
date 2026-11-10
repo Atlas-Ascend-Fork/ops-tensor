@@ -73,7 +73,7 @@ struct Params {
     GM_ADDR aGmAddr{nullptr};       // A 矩阵 GM 地址
     GM_ADDR bGmAddr{nullptr};       // P1 矩阵 GM 地址
     GM_ADDR cGmAddr{nullptr};       // P2 矩阵 GM 地址
-    TupleShape problemShape{};      // 问题规模 (m, n, k, batch)
+    TupleShape problemShape{};      // 问题规模 (m, n, k, batch)，FlatQuant 中 k == n
     TupleShape tileL1{};            // L1 tile 形状 (mL1, nL1, kL1, iterBatch)
     TupleShape tileL0{};            // L0 tile 形状 (0, 0, baseK, 0)
     bool hasP2{true};               // 是否执行 Phase 1（A×P2）
@@ -87,7 +87,7 @@ struct Params {
 | aGmAddr | GM_ADDR | A 矩阵 GM 地址 | aGM |
 | bGmAddr | GM_ADDR | P1 矩阵 GM 地址 | p1GM |
 | cGmAddr | GM_ADDR | P2 矩阵 GM 地址 | p2GM |
-| problemShape | TupleShape | 问题规模 (m, n, k, batch) | {128, 128, 64, 1} |
+| problemShape | TupleShape | 问题规模 (m, n, k, batch)，FlatQuant 中 k == n（P2 为 n×n 矩阵，A 矩阵列数为 n） | {128, 128, 128, 1} |
 | tileL1 | TupleShape | L1 tile (mL1, nL1, kL1, iterBatch) | {128, 128, 128, 2} |
 | tileL0 | TupleShape | L0 tile，仅 baseK 有效 | {0, 0, 64, 0} |
 | hasP2 | bool | 是否执行 Phase 1 | true |
@@ -240,7 +240,7 @@ BlockMmad::Params params = {
     .aGmAddr = aGM,
     .bGmAddr = p1GM,
     .cGmAddr = p2GM,
-    .problemShape = {m, n, k, batch},
+    .problemShape = {m, n, k, batch},   // FlatQuant 中 k == n（P2 为 n×n 矩阵）
     .tileL1 = {mL1, nL1, kL1, iterBatch},
     .tileL0 = {0, 0, baseK, 0},
     .hasP2 = true

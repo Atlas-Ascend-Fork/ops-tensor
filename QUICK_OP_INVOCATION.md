@@ -60,8 +60,8 @@ cd my_operator
 ```cpp
 // my_operator.cpp
 #pragma once
+#include <cstring>
 #include "my_operator_impl.h"
-#include "my_operator_tiling_data.h"
 
 namespace MyOpUT {
 
@@ -74,10 +74,13 @@ template <int OP_TYPE, class DTYPE_X, class DTYPE_Y>
 __global__ __aicore__ void my_operator_kernel_entry(
     GM_ADDR xGM, GM_ADDR yGM, GM_ADDR tilingGM)
 {
+    MyOperatorTilingData tilingData;
+    memcpy(&tilingData, tilingGM, sizeof(MyOperatorTilingData));
+
     if constexpr (OP_TYPE == OP_TYPE_BASIC) {
-        MyOperatorBasicWrapper<DTYPE_X, DTYPE_Y>(xGM, yGM, tilingGM);
+        MyOperatorBasicWrapper<DTYPE_X, DTYPE_Y>(xGM, yGM, tilingData);
     } else if constexpr (OP_TYPE == OP_TYPE_ADVANCED) {
-        MyOperatorAdvancedWrapper<DTYPE_X, DTYPE_Y>(xGM, yGM, tilingGM);
+        MyOperatorAdvancedWrapper<DTYPE_X, DTYPE_Y>(xGM, yGM, tilingData);
     } else {
         static_assert(sizeof(OP_TYPE) == 0, "Unsupported OP_TYPE");
     }

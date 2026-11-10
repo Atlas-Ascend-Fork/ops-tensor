@@ -306,7 +306,7 @@ using DispatchPolicy = Blaze::Gemm::MatmulMultiBlockBasic<
     Blaze::Gemm::NON_CONTIGUOUS_TYPE_PERM_X1>;
 ```
 
-**HF32 模式（FP16 输入 + FP32 累加）**：
+**HF32 模式（仅 FP32 输入）**：
 ```cpp
 params.schParams.isHf32 = 1;  // Kernel 会在结束时自动 SetHF32Mode(0)
 ```
@@ -360,7 +360,7 @@ SetL2Cache：配置 L2 Cache（可选）
 - Bias 为跨 Batch 共享的单行向量（`(1, n)`），`biasGmAddr = nullptr` 表示无 bias
 
 ### HF32 模式
-- FP16 输入 + FP32 累加输出场景建议启用 `isHf32`，Kernel 会在结束时自动关闭
+- 仅 float32 输入可启用 `isHf32`（以 HF32 舍入参与 Cube 计算，性能提升、精度有损），Kernel 会在结束时自动关闭
 
 ### 适用场景
 - **多 Batch Matmul**：Batch > 1 的批量矩阵乘

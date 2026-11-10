@@ -106,11 +106,17 @@ cd ops-tensor
 ops-tensor 提供一键式编译能力，使用 `build.sh` 脚本：
 
 ```bash
-# 编译所有算子
+# 默认模式：配置并构建 header-only 库（不编译任何算子/样例二进制）
 ./build.sh
 
 # 指定编译线程数（默认 8）
 ./build.sh -j16
+
+# 编译并运行样例
+./build.sh --examples
+
+# 仅编译指定样例（不运行、不验证）
+bash examples/acl/common/run.sh --ops=mat_mul --target=mat_mul_streamk --build-only
 
 # 查看完整帮助信息
 ./build.sh --help
@@ -265,9 +271,9 @@ bash examples/acl/common/run.sh --ops=mat_mul --target=mat_mul_streamk
 每个样例目录下有一个与样例同名的 CSV 文件，定义所有测试用例：
 
 ```csv
-casename,m,k,n,bias,dtype,transA,transB,hf32,format
-mat_mul_streamk_fp16,100,8192,100,100,float16,false,false,false,"(ND,ND)"
-mat_mul_streamk_fp32,100,8192,100,100,float32,false,false,false,"(ND,ND)"
+casename,m,k,n,bias,dtype,transA,transB,hf32,layoutA,layoutB
+mat_mul_streamk_fp16,100,8192,100,100,float16,false,false,false,ND,ND
+mat_mul_streamk_fp32,100,8192,100,100,float32,false,false,false,ND,ND
 ```
 
 若提示如下信息，则说明 Samples 测试通过：

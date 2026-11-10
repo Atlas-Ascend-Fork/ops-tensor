@@ -43,7 +43,7 @@ class BlockEpilogueFlatQuant;
 | 参数 | 说明 |
 |------|------|
 | `DataTypeIn_` | 输入数据类型，当前为 `bfloat16_t` |
-| `DataTypeOut_` | 量化输出数据类型，当前为 `int8_t`（FP4 packed） |
+| `DataTypeOut_` | 量化输出数据类型，当前为 `fp4x2_e2m1_t`（FP4 packed，底层以 int8_t 存储） |
 | `DataTypeScale_` | Scale 数据类型，当前为 `uint8_t`（E8M0） |
 | `FusionOp_` | 融合操作类型，默认为 `Fusion::DefaultFusion` |
 
@@ -56,7 +56,7 @@ class BlockEpilogueFlatQuant;
 | DataTypeScale | Scale 数据类型（继承自模板参数） |
 | FusionOp | 融合操作类型（继承自模板参数） |
 | BlockShape | `Shape<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>` |
-| ProblemShape | `Shape<int64_t, int64_t, int64_t, int64_t>` (m, n, k, batch) |
+| ProblemShape | `Shape<int64_t, int64_t, int64_t, int64_t>` (m, n, k, b)，FlatQuant 中 k == n |
 
 ## Params 参数结构
 
@@ -65,7 +65,7 @@ class BlockEpilogueFlatQuant;
 struct Params {
     GM_ADDR outGmAddr{nullptr};       // 量化输出 GM 地址（int8/FP4 packed）
     GM_ADDR scaleGmAddr{nullptr};    // Scale 输出 GM 地址（E8M0）
-    ProblemShape problemShape{};     // 问题规模 (m, n, k, batch)
+    ProblemShape problemShape{};     // 问题规模 (m, n, k, b)，FlatQuant 中 k == n
     float dstTypeMax{0.0f};          // 量化目标最大值
     float invDstTypeMax{0.0f};       // 量化目标最大值的倒数
 };
@@ -77,7 +77,7 @@ struct Params {
 |------|------|------|------|
 | outGmAddr | GM_ADDR | 量化输出 GM 地址 | outGM |
 | scaleGmAddr | GM_ADDR | Scale 输出 GM 地址 | scaleGM |
-| problemShape | ProblemShape | 问题规模 (m, n, k, batch) | {128, 128, 64, 1} |
+| problemShape | ProblemShape | 问题规模 (m, n, k, b)，FlatQuant 中 k == n | {128, 128, 128, 1} |
 | dstTypeMax | float | 量化目标最大值，决定 scale 计算路径 | 6.0f |
 | invDstTypeMax | float | 量化目标最大值的倒数 | 1.0f / 6.0f |
 
@@ -157,7 +157,7 @@ __aicore__ inline void Init(Params const& params)
 
 执行流程：
 1. 设置 GM GlobalTensor（cGlobal_, scaleGlobal_）
-2. 解析 problemShape：m, n, k（batch）
+2. 解析 problemShape：m, n, b（Batch 数量）
 3. 设置 dstTypeMax_ / invDstTypeMax_ / addValueBit_
 4. 计算对齐参数：mCeil, nCeil, alignM_
 5. 初始化 UB Buffer 和 Tensor
@@ -262,7 +262,7 @@ GM (量化输出 + scale)
 ### 组件组装
 ```cpp
 using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueFlatQuant<
-    bfloat16_t, int8_t, uint8_t>;
+    bfloat16_t, fp4x2_e2m1_t, uint8_t>;
 ```
 
 ### 参数准备
@@ -270,7 +270,7 @@ using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueFlatQuant<
 BlockEpilogue::Params params = {
     .outGmAddr = outGM,
     .scaleGmAddr = scaleGM,
-    .problemShape = {m, n, k, batch},
+    .problemShape = {m, n, k, batch},   // FlatQuant 中 k == n
     .dstTypeMax = 6.0f,
     .invDstTypeMax = 1.0f / 6.0f
 };

@@ -16,7 +16,7 @@ StreamK 矩阵乘后处理 Block，运行在 AIV 核。从 workspace 读取 AIC 
 ### Workspace 必需
 必须提供 workspace 用于存储 AIC 计算的中间结果：
 - workspace 数据类型：`WorkspaceType`（通常为 float）
-- 大小：`tailMNTileNum × skKTileNum × BLOCK_BASE_M × BLOCK_BASE_N × sizeof(WorkspaceType)`
+- 大小：`tailMNTileNum × skKTileNum × BLOCK_BASE_M × CeilAlign(BLOCK_BASE_N, 32) × sizeof(WorkspaceType)`（N 方向按 32 元素向上对齐）
 
 ### 输出类型
 支持两种输出类型：
@@ -24,9 +24,9 @@ StreamK 矩阵乘后处理 Block，运行在 AIV 核。从 workspace 读取 AIC 
 - **float → half/bfloat16**：执行 Cast 转换后输出
 
 ### ReLU 支持
-- **float 输出**：支持 ReLU（非 bfloat16_t）
-- **half 输出**：支持 ReLU
-- **bfloat16_t 输出**：不支持 ReLU（硬件限制）
+- **float 输出**：支持 ReLU（在 FP32 累加结果上执行）
+- **half 输出**：支持 ReLU（Cast 后在 half 上执行）
+- **bfloat16_t 输出**：支持 ReLU（硬件 Relu 指令不支持 bfloat16_t，先在 FP32 累加结果上执行 ReLU 再 Cast 为 bfloat16_t）
 
 ### L0C2Out 模式
 支持两种 Fixpipe 输出模式：
@@ -162,7 +162,7 @@ __aicore__ inline void Run()
    - 搬运 workspace → UB：`DataCopyPad<float>`
    - 等待 MTE2 完成：`WaitFlag<MTE2_V>`
    - **K 轴切分累加**：循环执行 `Add`
-   - **ReLU 激活**（可选）：`Relu`
+   - **ReLU 激活**（可选）：`Relu`（float/bfloat16 输出在 FP32 域执行；half 输出在 Cast 后执行）
    - **类型转换**（可选）：`Cast<float → half/bfloat16>`
    - 等待 V 完成：`WaitFlag<V_MTE3>`
    - 搬运 UB → GM：`DataCopyPad<OutType>`
@@ -261,7 +261,8 @@ blockEpilogue();  // 或 blockEpilogue.Run();
 
 ### 存储层次
 ```
-Workspace (float) → UB → Add 汇聚 → Cast → ReLU → GM (OutType)
+Workspace (float) → UB → Add 汇聚 → ReLU → Cast → GM (OutType)
+（float/bfloat16 输出：ReLU 在 FP32 域、Cast 前；half 输出：先 Cast 后 ReLU）
 ```
 
 ### 执行流程
@@ -280,9 +281,9 @@ WaitFlag<MTE2_V>
     ↓
 Add 循环：K 轴切分累加
     ↓
-ReLU（可选）
+ReLU（可选，float/bfloat16 输出在 FP32 域执行）
     ↓
-Cast（可选）：float → half/bfloat16
+Cast（可选）：float → half/bfloat16（half 输出时 ReLU 在 Cast 后执行）
     ↓
 WaitFlag<V_MTE3>
     ↓
@@ -317,7 +318,7 @@ offsetCGm = nCntIndex * nL1_ + mCntIndex * mL1_ * n_ + (kCntIndex * mBurstBase +
 
 ### 类型转换优化
 - float → half：使用 `Cast(ubDst, ubSrc, RoundMode::CAST_RINT, burstLen)`
-- ReLU 位置：float 输出在 Cast 前，half 输出在 Cast 后
+- ReLU 位置：float/bfloat16_t 输出在 Cast 前（FP32 域），half 输出在 Cast 后
 
 ### L0C2Out 模式选择
 - **ON_THE_FLY**：Compact 模式，`srcGap` 计算：`alignedN - actualN`

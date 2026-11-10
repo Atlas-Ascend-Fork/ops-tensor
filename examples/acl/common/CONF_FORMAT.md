@@ -13,20 +13,21 @@
 
 ```ini
 [scripts]
-gen_data=gen_data.py       # 可选，默认 gen_data.py
-verify=verify_result.py    # 可选，默认 verify_result.py
+# 以下两行为可选配置，默认值即 gen_data.py / verify_result.py
+gen_data=gen_data.py
+verify=verify_result.py
 
 [gen_data]
 params=...
-bool_flags=...  # 可选
+# bool_flags=... （可选）
 
 [kernel]
 params=...
-bool_flags=...  # 可选
+# bool_flags=... （可选）
 
 [verify]
 params=...
-bool_flags=...  # 可选
+# bool_flags=... （可选）
 ```
 
 | Section | 用途 |
@@ -131,10 +132,10 @@ bool_flags=++trans-a:transA,++hf32:hf32
 
 ```ini
 [gen_data]
-params=m,k,n,transA,transB,dtype,bias,format
+params=m,k,n,transA,transB,dtype
 
 [kernel]
-params=m,k,n,transA,transB,dtype,hf32,bias,format
+params=m,k,n,transA,transB,dtype,hf32,bias,layoutB
 
 [verify]
 params=m,n,dtype
@@ -145,13 +146,13 @@ bool_flags=++hf32:hf32
 
 ```ini
 [gen_data]
-params=--group-num:groupNum,--m:m,--n:n,--k:k,--dtype:dtype,--layout-b:layoutB,--group-list-type:groupListType,--group-type:groupType,--single-w:singleW,--is-bias:isBias,--group-list:groupList,--output-dir:$OUTPUT_DIR
+params=--group-num:groupNum,--m:m,--n:n,--k:k,--dtype:dtype,--output-dtype:outputDtype,--layout-b:layoutB,--group-list-type:groupListType,--group-type:groupType,--single-w:singleW,--is-bias:isBias,--group-list:groupList,--output-dir:$OUTPUT_DIR
 
 [kernel]
-params=groupNum,m,n,k,baseM,baseN,baseK,kAL1,kBL1,scaleKAL1,scaleKBL1,isBias,dbL0C,l1BufferStage,groupType,groupListType,singleW,dtype,layoutA,layoutB,aFullLoad,$OUTPUT_DIR,$OUTPUT_DIR/npu_out.bin
+params=groupNum,m,n,k,baseM,baseN,baseK,kAL1,kBL1,scaleKAL1,scaleKBL1,isBias,dbL0C,l1BufferStage,groupType,groupListType,singleW,dtype,outputDtype,layoutA,layoutB,aFullLoad,$OUTPUT_DIR,$OUTPUT_DIR/npu_out.bin
 
 [verify]
-params=$OUTPUT_DIR/golden_c.bin,$OUTPUT_DIR/npu_out.bin,--groups:groupNum,--m:m,--n:n
+params=$OUTPUT_DIR/golden_c.bin,$OUTPUT_DIR/npu_out.bin,--dtype:outputDtype,--groups:groupNum,--m:m,--n:n
 ```
 
 使用了：flag 参数（`--group-num:groupNum`）、位置参数（`groupNum,m,n,k,...`）、布尔 flag（无）、运行时令牌（`$OUTPUT_DIR`）、路径拼接（`$OUTPUT_DIR/npu_out.bin`）。

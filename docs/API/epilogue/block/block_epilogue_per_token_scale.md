@@ -21,13 +21,14 @@ offset 非空： y[m,n] =
 
 | 参数 | 说明 |
 |------|------|
-| `OutType` | 最终输出类型，支持 `half`、`bfloat16_t` |
-| `FixpipeType` | Fixpipe 中间结果类型，支持 `half` |
+| `OutType` | 最终输出类型，支持 `float`、`half`、`bfloat16_t` |
+| `FixpipeType` | Fixpipe 中间结果类型，支持 `float`、`half`；默认为 `half` |
 
 ## Params
 
 | 字段 | 说明 |
 |------|------|
+| `workspaceGmAddr` | Fixpipe 中间结果 workspace 地址；`operator()` 的 `workspaceOffset` 以 `FixpipeType` 元素数（非字节）为单位在此地址上偏移 |
 | `perTokenScaleGmAddr` | 每个 token 的 scale 地址 |
 | `offsetGmAddr` | 非对称量化 offset 地址 |
 | `xRowSumGmAddr` | 激活行归约结果地址 |

@@ -27,14 +27,14 @@ AIC 和 AIV 必须同时参与计算：
 仅支持调度策略为 `BlockFlatQuant` 的 `BlockMmad`，即 `BlockMmad::DispatchPolicy::ScheduleType` 必须为 `KernelFlatQuant`。
 
 ### BlockScheduler 限制
-使用 `BlockSchedulerFlatQuant` 调度器，按 Batch/K 迭代维度切分任务。
+使用 `BlockSchedulerFlatQuant` 调度器，按 Batch 维度切分任务。
 
 ### 输入矩阵语义
-ProblemShape `(m, n, k, b)` 在 FlatQuant 中的语义：
+ProblemShape `(m, n, k, b)` 在 FlatQuant 中的语义（四元素依次位于 `MNK_M`/`MNK_N`/`MNK_K`/`MNK_B` 位置）：
 - **m**：M 轴尺寸（A 矩阵行数）
-- **n**：N 轴尺寸（P1/P2 矩阵尺寸，即 K 和 N 维度相同）
-- **k**：存储在 ProblemShape 的 B 位置，表示迭代/Batch 数量
-- **b**：Batch 维度
+- **n**：N 轴尺寸（P2 矩阵尺寸，P1 为 `(m, m)`）
+- **k**（K 位置）：矩阵乘 K 维（A 矩阵列数），FlatQuant 中 k == n（P2 为 n×n 矩阵）
+- **b**（B 位置）：Batch 数量，BlockSchedulerFlatQuant 按此维度切分
 
 GM 地址映射：
 - `aGmAddr`：A 矩阵，形状 `(m * b, k)`，NDExt 布局
@@ -71,7 +71,7 @@ GM 地址映射：
 ### 结构定义
 ```cpp
 struct Params {
-    ProblemShape problemShape;          // 问题规模 (m, n, k, batch)
+    ProblemShape problemShape;          // 问题规模 (m, n, k, b)，FlatQuant 中 k == n
     BlockMmadParams mmadParams;         // BlockMmad 参数
     BlockEpilogueParams epilogueParams; // BlockEpilogue 参数
     BlockSchedulerParams schParams;     // BlockScheduler 参数
@@ -84,9 +84,9 @@ struct Params {
 | 参数 | 类型 | 说明 | 示例 |
 |------|------|------|------|
 | m | int64_t | M 轴尺寸 | 128 |
-| n | int64_t | N 轴尺寸（P1/P2 矩阵尺寸） | 128 |
-| k | int64_t | 存储在 B 位置，迭代/Batch 数量 | 64 |
-| batch | int64_t | Batch 维度 | 1 |
+| n | int64_t | N 轴尺寸（P2 矩阵尺寸，P1 为 `(m, m)`） | 128 |
+| k（K 位置） | int64_t | 矩阵乘 K 维（A 矩阵列数），FlatQuant 中 k == n | 128 |
+| b | int64_t | Batch 数量（B 位置，调度维度） | 64 |
 
 #### BlockMmad 参数
 详见 [BlockMmadFlatQuant Params](../block/block_mmad_flat_quant.md#params-参数结构)
@@ -212,7 +212,7 @@ using BlockMmad = Blaze::Attention::Block::BlockMmad<
 
 // ============== 6. BlockEpilogue 组装 ==============
 using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueFlatQuant<
-    bfloat16_t, int8_t, uint8_t>;
+    bfloat16_t, fp4x2_e2m1_t, uint8_t>;
 
 // ============== 7. Kernel 组装 ==============
 using FlatQuantKernel = Blaze::Attention::Kernel::AttentionUniversal<
@@ -223,26 +223,26 @@ using Params = typename FlatQuantKernel::Params;
 Params params;
 
 // --- ProblemShape 参数 ---
-params.problemShape = {m, n, k, batch};
+params.problemShape = {m, n, k, batch};   // FlatQuant 中 k == n（P2 为 n×n 矩阵）
 
 // --- BlockMmad 参数 ---
 params.mmadParams.aGmAddr = aGM;       // A 矩阵 GM 地址
 params.mmadParams.bGmAddr = p1GM;      // P1 矩阵 GM 地址
 params.mmadParams.cGmAddr = p2GM;      // P2 矩阵 GM 地址
-params.mmadParams.problemShape = {m, n, k, batch};
-params.mmadParams.tileL1 = {mL1, nL1, kL1, iterBatch};
+params.mmadParams.problemShape = {m, n, k, batch};   // FlatQuant 中 k == n
+params.mmadParams.tileL1 = {m * iterBatch, n, n, iterBatch};
 params.mmadParams.tileL0 = {0, 0, baseK, 0};
 params.mmadParams.hasP2 = true;
 
 // --- BlockScheduler 参数 ---
 params.schParams.iterBatch = iterBatch;
-params.schParams.dstTypeMax = 6.0f;       // 量化目标最大值
-params.schParams.invDstTypeMax = 1.0f / 6.0f;
+params.schParams.dstTypeMax = 6.0f;       // 预留字段，调度器当前不读取（可省略）
+params.schParams.invDstTypeMax = 1.0f / 6.0f;  // 预留字段，调度器当前不读取（可省略）
 
 // --- BlockEpilogue 参数 ---
 params.epilogueParams.outGmAddr = outGM;    // 量化输出 GM 地址
 params.epilogueParams.scaleGmAddr = scaleGM; // Scale 输出 GM 地址
-params.epilogueParams.problemShape = {m, n, k, batch};
+params.epilogueParams.problemShape = {m, n, k, batch};   // FlatQuant 中 k == n
 params.epilogueParams.dstTypeMax = 6.0f;
 params.epilogueParams.invDstTypeMax = 1.0f / 6.0f;
 
@@ -271,13 +271,15 @@ Round 0:
   AIV: WaitFlag(AIC_AIV_FLAG=9) → MX量化 → SetFlag(AIV_AIC_FLAG=8)
 
 Round 1:
-  AIC: WaitFlag(AIV_AIC_FLAG=8) → 双矩阵乘 → SetFlag(AIC_AIV_FLAG=25)
-  AIV: WaitFlag(AIC_AIV_FLAG=25) → MX量化 → SetFlag(AIV_AIC_FLAG=8)
+  AIC: WaitFlag(AIV_AIC_FLAG=8) → 双矩阵乘 → SetFlag(AIC_AIV_FLAG + FLAG_ID_MAX=25)
+  AIV: WaitFlag(AIC_AIV_FLAG=9) → MX量化 → SetFlag(AIV_AIC_FLAG=8)
 
 Round 2:
-  AIC: WaitFlag(AIV_AIC_FLAG=8) → 双矩阵乘 → SetFlag(AIC_AIV_FLAG=9)
+  AIC: WaitFlag(AIV_AIC_FLAG + FLAG_ID_MAX=24) → 双矩阵乘 → SetFlag(AIC_AIV_FLAG=9)
   ...
 ```
+
+说明：AIC 侧 `NotifyVector(id)` 会同时置位 `id` 与 `id + FLAG_ID_MAX` 两个标志（见 `Gemm::Sync` 封装），AIV 侧固定调用 `WaitForCube(AIC_AIV_FLAG)` 等待；AIC 等待侧按轮次奇偶交替 `AIV_AIC_FLAG` / `AIV_AIC_FLAG + FLAG_ID_MAX`。
 
 ## 性能优化建议
 

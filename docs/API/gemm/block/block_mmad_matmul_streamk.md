@@ -272,7 +272,16 @@ BlockMmad::Params params = {
     bGM,           // B 矩阵 GM 地址
     cGM,           // C 矩阵 GM 地址（DP 模式）
     biasGM,        // Bias GM 地址（nullptr 表示无 bias）
-    workspaceGM    // Workspace GM 地址（SK 模式）
+    nullptr,       // groupList GM 地址（分组列表，非分组场景置 nullptr）
+    workspaceGM,   // Workspace GM 地址（SK 模式）
+    mL1,           // L1 M 维度尺寸
+    nL1,           // L1 N 维度尺寸
+    kL1,           // L1 K 维度尺寸
+    baseM,         // L0 M 维度尺寸
+    baseN,         // L0 N 维度尺寸
+    baseK,         // L0 K 维度尺寸
+    2,             // l1Stages：L1 缓冲数量（双缓冲）
+    1              // l0cStages：L0C 缓冲数量（单缓冲）
 };
 ```
 
@@ -352,7 +361,8 @@ Mmad 计算（根据 kCntIndex 决定 Bias 加载）
 ### 输出目标选择
 - **DP 模式**：完整 tile，输出到 GM
 - **SK 模式**：K 轴切分，输出到 workspace
-- workspace 大小：`skKTileNum × BLOCK_BASE_M × BLOCK_BASE_N × sizeof(float)`
+- 单个 M/N tile 的 workspace 大小：`skKTileNum × BLOCK_BASE_M × CeilAlign(BLOCK_BASE_N, 32) × sizeof(float)`（N 方向按 32 元素向上对齐）；该公式仅为单个 M/N tile 的空间，不能直接作为整个 Kernel 的 workspace 分配大小
+- 整个 Kernel 的 workspace 总大小还需乘以 SK 阶段同时存放的 M/N tile 数量（`tailMNTileNum`）：`tailMNTileNum × skKTileNum × BLOCK_BASE_M × CeilAlign(BLOCK_BASE_N, 32) × sizeof(float)`，与 [StreamK Kernel](../kernel/kernel_matmul_streamk.md) 和 [BlockEpilogueMatmulStreamK](../../epilogue/block/block_epilogue_matmul_streamk.md) 的公式一致
 
 ### MM Layout Transform
 - 构造函数中设置 `SetMMLayoutTransform(true)`
