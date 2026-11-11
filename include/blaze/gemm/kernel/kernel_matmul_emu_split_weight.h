@@ -130,7 +130,7 @@ private:
 
         for (int64_t blockIdx = curBlockIdx; blockIdx < static_cast<int64_t>(totalBlocks);
              blockIdx += AscendC::GetBlockNum(), ++blockCount) {
-            uint64_t targetSubBlockId = blockCount & 1UL;
+            uint64_t targetSubBlockId = blockCount % MIX_CV_RATIO;
             bool useSubBlockOne = targetSubBlockId == 1;
             int16_t flagOffset = static_cast<int16_t>(targetSubBlockId * FLAG_ID_MAX);
 
@@ -185,7 +185,8 @@ private:
                 }
                 Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG);
                 epilogueOp_({curM, curN, 1, 1}, offsetC);
-                if (blockIdx + 2 * AscendC::GetBlockNum() < static_cast<int64_t>(totalBlocks)) {
+                if (blockIdx + static_cast<int64_t>(MIX_CV_RATIO) * AscendC::GetBlockNum() <
+                    static_cast<int64_t>(totalBlocks)) {
                     Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG);
                 }
             }
