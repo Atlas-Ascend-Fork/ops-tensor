@@ -15,7 +15,9 @@
 #include "blaze/epilogue/block/block_epilogue_block_attn_res_prepare.h"
 #include "blaze/gemm/block/block_mmad_matmul_basic.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
+#include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
+#include "blaze/gemm/utils/sync.h"
 
 namespace Blaze {
 namespace Attention {
@@ -34,13 +36,11 @@ constexpr uint32_t SINGLE_BUFFER_NUM = 1U;
 constexpr uint32_t E_BUFFER_NUM = 2U;
 constexpr uint16_t MODE4_LOCAL_FLAG_COUNT = 10U;
 
-// Mode-4 maps the sibling AIV into the peer flag space by adding 16 to the same local logical flag ID.
 constexpr uint16_t DOT_READY_FLAG = 0U;
 constexpr uint16_t E_READY_FLAG = 1U;
 constexpr uint16_t E_BUFFER_FREE_FLAG = 3U;
-constexpr uint16_t AIV1_FLAG_OFFSET = 16U;
 constexpr uint8_t WORKSPACE_STORE_EVENT_ID = 0U;
-constexpr uint8_t SYNC_MODE = 4U;
+constexpr uint16_t SYNC_MODE = Gemm::Sync::SYNC_MODE_INTRA;
 static_assert(E_BUFFER_FREE_FLAG + E_BUFFER_NUM <= MODE4_LOCAL_FLAG_COUNT,
               "BlockAttnResPrepare local mode-4 flag ID exceeds the hardware range.");
 
@@ -71,35 +71,32 @@ class Sync {
 public:
     __aicore__ inline static void NotifyDotReady()
     {
-        AscendC::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(DOT_READY_FLAG);
-        AscendC::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(DOT_READY_FLAG + AIV1_FLAG_OFFSET);
+        Gemm::Sync::NotifyVector<SYNC_MODE, PIPE_FIX>(DOT_READY_FLAG, true);
     }
 
-    __aicore__ inline static void WaitDotReady() { AscendC::CrossCoreWaitFlag<SYNC_MODE, PIPE_MTE2>(DOT_READY_FLAG); }
+    __aicore__ inline static void WaitDotReady() { Gemm::Sync::WaitForCube<SYNC_MODE, PIPE_MTE2>(DOT_READY_FLAG); }
 
     __aicore__ inline static void NotifyEReady(uint16_t eSlotIdx)
     {
         // Wait until the E workspace GM write has completed before publishing readiness to the consuming AIC.
         AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(WORKSPACE_STORE_EVENT_ID);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(WORKSPACE_STORE_EVENT_ID);
-        AscendC::CrossCoreSetFlag<SYNC_MODE, PIPE_S>(E_READY_FLAG + eSlotIdx);
+        Gemm::Sync::NotifyCube<SYNC_MODE, PIPE_S>(E_READY_FLAG + eSlotIdx);
     }
 
     __aicore__ inline static void WaitEReady(uint16_t eSlotIdx)
     {
-        AscendC::CrossCoreWaitFlag<SYNC_MODE, PIPE_MTE2>(E_READY_FLAG + eSlotIdx);
-        AscendC::CrossCoreWaitFlag<SYNC_MODE, PIPE_MTE2>(E_READY_FLAG + eSlotIdx + AIV1_FLAG_OFFSET);
+        Gemm::Sync::WaitForVector<SYNC_MODE, PIPE_MTE2>(E_READY_FLAG + eSlotIdx, true);
     }
 
     __aicore__ inline static void NotifyEBufferFree(uint16_t eSlotIdx)
     {
-        AscendC::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(E_BUFFER_FREE_FLAG + eSlotIdx);
-        AscendC::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(E_BUFFER_FREE_FLAG + eSlotIdx + AIV1_FLAG_OFFSET);
+        Gemm::Sync::NotifyVector<SYNC_MODE, PIPE_FIX>(E_BUFFER_FREE_FLAG + eSlotIdx, true);
     }
 
     __aicore__ inline static void WaitEBufferFree(uint16_t eSlotIdx)
     {
-        AscendC::CrossCoreWaitFlag<SYNC_MODE, PIPE_MTE3>(E_BUFFER_FREE_FLAG + eSlotIdx);
+        Gemm::Sync::WaitForCube<SYNC_MODE, PIPE_MTE3>(E_BUFFER_FREE_FLAG + eSlotIdx);
     }
 };
 

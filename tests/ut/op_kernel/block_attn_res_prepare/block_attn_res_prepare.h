@@ -85,7 +85,11 @@ __global__ __aicore__ void block_attn_res_prepare_kernel_entry(GM_ADDR blockResi
                                                                GM_ADDR weightedOutput, GM_ADDR softmaxSum,
                                                                GM_ADDR workspace, GM_ADDR tilingAddress)
 {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
+#else
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+#endif
     using Kernel = Blaze::Attention::Kernel::KernelBlockAttnResPrepare;
     constexpr uint32_t MM1_L0_K_MAX = 64U;
     constexpr uint32_t SINGLE_STAGE = 1U;

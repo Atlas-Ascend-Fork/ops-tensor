@@ -42,6 +42,32 @@ constexpr uint32_t MM1_L0_K_MAX = 64U;
 using Kernel = Blaze::Attention::Kernel::KernelBlockAttnResPrepare;
 using Scheduler = typename Kernel::BlockScheduler;
 using Params = typename Kernel::Params;
+constexpr uint32_t SYNC_ROUNDS = 4U;
+
+__global__ __aicore__ void block_attn_res_prepare_sync_kernel_entry(GM_ADDR progressAddress)
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
+#else
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+#endif
+    using Sync = Blaze::Attention::Kernel::BlockAttnResPrepareDetail::Sync;
+    auto* progress = reinterpret_cast<uint32_t*>(progressAddress);
+    for (uint32_t round = 0U; round < SYNC_ROUNDS; ++round) {
+        const uint16_t eSlotIdx = static_cast<uint16_t>(round % E_BUFFER_NUM);
+        if ASCEND_IS_AIC {
+            Sync::NotifyDotReady();
+            Sync::WaitEReady(eSlotIdx);
+            Sync::NotifyEBufferFree(eSlotIdx);
+            progress[0U] = round + 1U;
+        } else {
+            Sync::WaitDotReady();
+            Sync::NotifyEReady(eSlotIdx);
+            Sync::WaitEBufferFree(eSlotIdx);
+            progress[1U + AscendC::GetSubBlockIdx()] = round + 1U;
+        }
+    }
+}
 
 class GmBuffer {
 public:
@@ -206,6 +232,32 @@ void RunKernelSmoke(const Params& inputParams, uint64_t validN)
 } // namespace
 
 class BlockAttnResPrepareTest : public testing::Test {};
+
+TEST_F(BlockAttnResPrepareTest, CrossCoreSyncReusesBothESlots)
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    constexpr uint32_t EXPECTED_AIV_NUM = 1U;
+#else
+    constexpr uint32_t EXPECTED_AIV_NUM = 2U;
+#endif
+    ASSERT_EQ(Blaze::Gemm::MIX_CV_RATIO, EXPECTED_AIV_NUM);
+    // Reserve a sentinel lane as well, so an unexpected sibling AIV is visible in the result.
+    constexpr uint32_t PROGRESS_LANES = 3U;
+    GmBuffer progress(PROGRESS_LANES * sizeof(uint32_t));
+    ASSERT_NE(progress.Get(), nullptr);
+    auto* progressData = reinterpret_cast<uint32_t*>(progress.Get());
+    std::fill_n(progressData, PROGRESS_LANES, 0U);
+
+    AscendC::SetKernelMode(KernelMode::MIX_MODE);
+    ASSERT_TRUE(KERNEL_RUN_KF(block_attn_res_prepare_sync_kernel_entry, 1U, progress.Get()));
+    EXPECT_EQ(progressData[0U], SYNC_ROUNDS);
+    for (uint32_t lane = 1U; lane <= EXPECTED_AIV_NUM; ++lane) {
+        EXPECT_EQ(progressData[lane], SYNC_ROUNDS) << "AIV lane=" << lane - 1U;
+    }
+    for (uint32_t lane = EXPECTED_AIV_NUM + 1U; lane < PROGRESS_LANES; ++lane) {
+        EXPECT_EQ(progressData[lane], 0U) << "Unexpected AIV lane=" << lane - 1U;
+    }
+}
 
 TEST_F(BlockAttnResPrepareTest, TemplateContracts)
 {
