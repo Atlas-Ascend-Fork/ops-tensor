@@ -103,7 +103,7 @@ struct CopyConcatGM2L1 {
      * \brief Copies and concatenates B or ScaleB according to the source layout.
      *
      * Leading <Tp, traits> follow the copy_traits detection convention
-     * (defaulted for direct callers); the concat path ignores them.
+     * (defaulted for direct callers); pre_allocation is forwarded to the DMA helpers.
      *
      * \param dst Concatenated L1 destination.
      * \param src GM source.
@@ -117,9 +117,9 @@ struct CopyConcatGM2L1 {
         constexpr bool isScaleB = AscendC::Std::is_one_of_v<SrcLayoutPtn, asc::te::scaleb_nd_layout_ptn,
                                                             asc::te::scaleb_dn_layout_ptn>;
         if constexpr (isScaleB) {
-            CopyScaleB(dst, src, params);
+            CopyScaleB(dst, src, params, traits.pre_allocation);
         } else {
-            CopyB(dst, src, params);
+            CopyB(dst, src, params, traits.pre_allocation);
         }
     }
 
@@ -129,7 +129,8 @@ private:
     static constexpr uint32_t CONCAT_N_SHIFT = 1U;
 
     template <typename T, typename U>
-    __aicore__ inline static void CopyB(const T& dst, const U& src, const CopyConcatGM2L1Params& params)
+    __aicore__ inline static void CopyB(const T& dst, const U& src, const CopyConcatGM2L1Params& params,
+                                        bool preAllocation)
     {
         using ElementType = asc::te::get_attribute_element_type<typename U::element_type*>;
         using CopyType = AscendC::Std::conditional_t<(sizeof(ElementType) == 1), int8_t, ElementType>;
@@ -160,11 +161,12 @@ private:
         CopyGmToCbufMultiNd2nz(reinterpret_cast<__cbuf__ CopyType*>(dst.data().get()),
                                reinterpret_cast<__gm__ CopyType*>(src.data().get()), CONCAT_MATRIX_NUM, loop2DstStride,
                                loop3DstStride, loop4DstStride, loop1SrcStride, cacheMode, nValue, dValue,
-                               loop4SrcStride, false);
+                               loop4SrcStride, false, preAllocation);
     }
 
     template <typename T, typename U>
-    __aicore__ inline static void CopyScaleB(const T& dst, const U& src, const CopyConcatGM2L1Params& params)
+    __aicore__ inline static void CopyScaleB(const T& dst, const U& src, const CopyConcatGM2L1Params& params,
+                                             bool preAllocation)
     {
         using SrcLayoutPtn = asc::te::get_layout_pattern<typename U::layout_type>;
         constexpr bool isTrans = IsTrans<SrcLayoutPtn>::value;
@@ -185,7 +187,7 @@ private:
             (isTrans ? Align16(singleN) : CeilAlign(singleN, BLOCK_CUBE)) * scaleKL1Block / halfC0Element);
 
         CopyWithStrides<half, isTrans>(dst, src, nValue, dValue, srcMatrixStride, srcDValue, dstMatrixStride,
-                                       dstRowStride);
+                                       dstRowStride, preAllocation);
     }
 
     template <typename ElementType>
@@ -200,7 +202,7 @@ private:
     template <typename CopyType, bool IsTrans, typename T, typename U>
     __aicore__ inline static void CopyWithStrides(const T& dst, const U& src, uint16_t nValue, uint32_t dValue,
                                                   uint64_t srcMatrixStride, uint64_t srcDValue,
-                                                  uint16_t dstMatrixStride, uint16_t dstRowStride)
+                                                  uint16_t dstMatrixStride, uint16_t dstRowStride, bool preAllocation)
     {
         constexpr uint16_t loop2DstStride = 1U;
         const uint16_t loop3DstStride = dstRowStride;
@@ -212,12 +214,12 @@ private:
             CopyGmToCbufMultiDn2nz(reinterpret_cast<__cbuf__ CopyType*>(dst.data().get()),
                                    reinterpret_cast<__gm__ CopyType*>(src.data().get()), CONCAT_MATRIX_NUM,
                                    loop2DstStride, loop3DstStride, loop4DstStride, loop1SrcStride, cacheMode, nValue,
-                                   dValue, loop4SrcStride, false);
+                                   dValue, loop4SrcStride, false, preAllocation);
         } else {
             CopyGmToCbufMultiNd2nz(reinterpret_cast<__cbuf__ CopyType*>(dst.data().get()),
                                    reinterpret_cast<__gm__ CopyType*>(src.data().get()), CONCAT_MATRIX_NUM,
                                    loop2DstStride, loop3DstStride, loop4DstStride, loop1SrcStride, cacheMode, nValue,
-                                   dValue, loop4SrcStride, false);
+                                   dValue, loop4SrcStride, false, preAllocation);
         }
     }
 
@@ -226,7 +228,8 @@ private:
                                                          uint16_t loop2DstStride, uint16_t loop3DstStride,
                                                          uint16_t loop4DstStride, uint64_t loop1SrcStride,
                                                          uint8_t cacheMode, uint16_t nValue, uint32_t dValue,
-                                                         uint64_t loop4SrcStride, bool enableSmallC0)
+                                                         uint64_t loop4SrcStride, bool enableSmallC0,
+                                                         bool preAllocation)
     {
         if ASCEND_IS_AIV {
             return;
@@ -239,6 +242,14 @@ private:
         asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for ND2NZ DMA instructions
         asc_copy_gm2l1_nd2nz(dst, src, loop1SrcStride, static_cast<asc_load_l2_cache_mode>(cacheMode), nValue, dValue,
                              loop4SrcStride, enableSmallC0);
+#elif defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+        uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
+        mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
+        mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
+        mte2NzPara |= static_cast<uint64_t>(ndNum);                        // MTE2_NZ_PARA[15:0]
+        asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for ND2NZ DMA instructions
+        asc_copy_gm2l1_nd2nz(dst, src, loop1SrcStride, static_cast<asc_load_l2_cache_mode>(cacheMode), nValue, dValue,
+                             loop4SrcStride, enableSmallC0, preAllocation);
 #endif
     }
 
@@ -247,7 +258,8 @@ private:
                                                          uint16_t loop2DstStride, uint16_t loop3DstStride,
                                                          uint16_t loop4DstStride, uint64_t loop1SrcStride,
                                                          uint8_t cacheMode, uint16_t nValue, uint32_t dValue,
-                                                         uint64_t loop4SrcStride, bool enableSmallC0)
+                                                         uint64_t loop4SrcStride, bool enableSmallC0,
+                                                         bool preAllocation)
     {
         if ASCEND_IS_AIV {
             return;
@@ -260,6 +272,14 @@ private:
         asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for DN2NZ DMA instructions
         asc_copy_gm2l1_dn2nz(dst, src, loop1SrcStride, static_cast<asc_load_l2_cache_mode>(cacheMode), nValue, dValue,
                              loop4SrcStride, enableSmallC0);
+#elif defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+        uint64_t mte2NzPara = static_cast<uint64_t>(loop4DstStride) << 48; // MTE2_NZ_PARA[63:48]
+        mte2NzPara |= static_cast<uint64_t>(loop3DstStride) << 32;         // MTE2_NZ_PARA[47:32]
+        mte2NzPara |= static_cast<uint64_t>(loop2DstStride) << 16;         // MTE2_NZ_PARA[31:16]
+        mte2NzPara |= static_cast<uint64_t>(dnNum);                        // MTE2_NZ_PARA[15:0]
+        asc::te::set_mte2_nz_para(mte2NzPara); // CCE: store parameters for DN2NZ DMA instructions
+        asc_copy_gm2l1_dn2nz(dst, src, loop1SrcStride, static_cast<asc_load_l2_cache_mode>(cacheMode), nValue, dValue,
+                             loop4SrcStride, enableSmallC0, preAllocation);
 #endif
     }
 };
