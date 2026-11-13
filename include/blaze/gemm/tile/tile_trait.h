@@ -14,9 +14,27 @@
  */
 #pragma once
 
+#include "blaze/gemm/utils/common_utils.h"
+#include "blaze/gemm/utils/layout_utils.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze::Gemm::Tile {
+
+template <typename AType, typename LayoutA, typename BType, typename LayoutB>
+struct MxKZeroPaddingTrait {
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+    // A4W4 场景要求 K 轴为偶数，当且仅当 A 转置 B 不转置时 K 轴同时为外轴，可能为奇数，需要额外补零并对齐；
+    // 其余 A4W4 场景 A / B 矩阵中总有一个 K 轴为内轴，A8W4 场景支持 K 轴为奇数，均无需额外补零和对齐操作；
+    // 无需额外补零和对齐时，K_ALIGNMENT 设为 1，表示保持原 K 轴大小。
+    static constexpr uint64_t K_ALIGNMENT = (Blaze::Gemm::IsFp4<AType>() && Blaze::Gemm::IsFp4<BType>() &&
+                                             Blaze::Gemm::IsTrans<LayoutA>::value &&
+                                             !Blaze::Gemm::IsTrans<LayoutB>::value) ?
+                                                2UL :
+                                                1UL;
+#else
+    static constexpr uint64_t K_ALIGNMENT = 64UL;
+#endif
+};
 
 constexpr asc::te::mmad_trait MX_MMAD_TRAIT = asc::te::mmad_trait{0, false, false, true, asc::te::mmad_type::mx};
 struct MmadTraitMX {

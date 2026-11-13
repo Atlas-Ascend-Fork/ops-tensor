@@ -44,6 +44,7 @@ public:
         int64_t nBaseTailSplitCnt;
         int64_t mTailMain;
         int64_t nTailMain;
+        int64_t windowLen = WINDOW_LEN;
     };
 
     __aicore__ inline BlockSchedulerQuantBatchMatmulV3(const ProblemShape& shape, const Params& params)
@@ -60,7 +61,7 @@ public:
         if (coreNums_ <= 0) {
             return;
         }
-        mainWindow_ = Blaze::Gemm::Min(WINDOW_LEN, mBlockNums_);
+        mainWindow_ = Blaze::Gemm::Min(params.windowLen, mBlockNums_);
         if (mainWindow_ != 0) {
             mainRow_ = mBlockNums_ / mainWindow_ - 1;
         }

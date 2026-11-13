@@ -193,6 +193,17 @@ __aicore__ inline constexpr bool IsFp8()
     return AscendC::IsSameType<T, fp8_e4m3fn_t>::value || AscendC::IsSameType<T, fp8_e5m2_t>::value;
 }
 
+template <typename AType, typename BType>
+__aicore__ inline constexpr bool IsSupportedWeightQuantMxCube()
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
+    return AscendC::Std::is_same_v<AType, fp8_e4m3fn_t> &&
+           (AscendC::Std::is_same_v<BType, fp4x2_e2m1_t> || AscendC::Std::is_same_v<BType, hifloat4x2_t>);
+#else
+    return false;
+#endif
+}
+
 template <typename T>
 __aicore__ inline constexpr uint64_t GetScaleC0()
 {

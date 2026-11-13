@@ -43,7 +43,8 @@ public:
     using BType = typename BlockMmad::BType;
     using CType = typename BlockMmad::CType;
     using BiasType = typename BlockMmad::BiasType;
-    using ScaleType = MxScaleType<AType>;
+    using ScaleAType = MxScaleType<AType>;
+    using ScaleBType = MxScaleType<BType>;
     using LayoutA = typename BlockMmad::LayoutA;
     using LayoutB = typename BlockMmad::LayoutB;
     using LayoutScaleB = typename BlockMmad::LayoutScaleB;
@@ -54,9 +55,10 @@ public:
     using BlockSchedulerParams = typename BlockScheduler::Params;
 
     static_assert((IsFp8<AType>() && IsFp8<BType>()) || (IsFp4<AType>() && IsFp4<BType>()) ||
-                      (IsHif4<AType>() && IsHif4<BType>()),
+                      (IsHif4<AType>() && IsHif4<BType>()) || IsSupportedWeightQuantMxCube<AType, BType>(),
                   "QBMM MX Without Batch: AType/BType must each be fp8_e4m3fn_t/fp8_e5m2_t, or each be "
-                  "fp4x2_e2m1_t/fp4x2_e1m2_t/hifloat4x2_t.");
+                  "fp4x2_e2m1_t/fp4x2_e1m2_t/hifloat4x2_t, or fp8_e4m3fn_t with fp4x2_e2m1_t/hifloat4x2_t "
+                  "on dav9201/dav9202.");
     static_assert(AscendC::Std::is_one_of_v<CType, half, bfloat16_t, float>,
                   "QBMM MX Without Batch: BlockMmad::CType must be half/bfloat16_t/float.");
     static_assert(AscendC::Std::is_one_of_v<LayoutA, asc::te::nd_ext_layout_ptn, asc::te::dn_ext_layout_ptn>,
@@ -94,12 +96,14 @@ private:
     static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool IS_ATOMIC_ADD = BlockMmad::DispatchPolicy::IS_ATOMIC_ADD;
-    static constexpr bool IS_HIF4 = IsHif4<AType>();
-    static constexpr int64_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
+    static constexpr bool IS_HIF4_A = IsHif4<AType>();
+    static constexpr bool IS_HIF4_B = IsHif4<BType>();
+    static constexpr int64_t C0_SIZE_A = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
+    static constexpr int64_t C0_SIZE_B = IsFp4<BType>() ? C0_SIZE_B4 : C0_SIZE_B8;
     static constexpr int64_t SCALE_N_ALIGN = IsScaleNz<LayoutScaleB>::value ? MATMUL_MNK_ALIGN : 1;
 
-    using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE>>;
-    using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE>>;
+    using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE_A>>;
+    using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE_B>>;
     using MakeLayoutC = asc::te::frame_layout_format<LayoutC, AscendC::Std::Int<asc::te::c0_element<CType>>>;
     using MakeLayoutScaleA = AscendC::Std::conditional_t<
         TRANS_A, asc::te::frame_layout_format<asc::te::scalea_dn_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>,
@@ -115,7 +119,8 @@ private:
     __aicore__ inline void ProcessOneBlock(const GmTensorA& gmA, const GmTensorB& gmB, const GmTensorScaleA& gmScaleA,
                                            const GmTensorScaleB& gmScaleB, const GmTensorBias& gmBias,
                                            const GmTensorC& gmC, const BlockShape& singleShape, int64_t mPos,
-                                           int64_t nPos, int64_t baseM, int64_t baseN, int64_t k, int64_t scaleKLen);
+                                           int64_t nPos, int64_t baseM, int64_t baseN, int64_t k, int64_t scaleAKLen,
+                                           int64_t scaleBKLen);
 
     template <typename TensorB>
     __aicore__ inline void SetBL2Cache(const ProblemShape& problemShape, uint64_t currentBasicBlockM,
@@ -127,8 +132,8 @@ private:
     __gm__ BType* bGmAddr_;
     __gm__ CType* cGmAddr_;
     __gm__ BiasType* biasGmAddr_ = nullptr; // optional input
-    __gm__ ScaleType* scaleAGmAddr_;
-    __gm__ ScaleType* scaleBGmAddr_;
+    __gm__ ScaleAType* scaleAGmAddr_;
+    __gm__ ScaleBType* scaleBGmAddr_;
 };
 
 QBMM_MX_WITHOUT_BATCH_KERNEL_CLASS_TEM_PARAMS
@@ -146,8 +151,8 @@ __aicore__ inline void GemmUniversal<QBMM_MX_WITHOUT_BATCH_KERNEL_TEM_PARAMS>::R
     aGmAddr_ = reinterpret_cast<__gm__ AType*>(params.mmadParams.aGmAddr);
     bGmAddr_ = reinterpret_cast<__gm__ BType*>(params.mmadParams.bGmAddr);
     cGmAddr_ = reinterpret_cast<__gm__ CType*>(params.mmadParams.cGmAddr);
-    scaleAGmAddr_ = reinterpret_cast<__gm__ ScaleType*>(params.mmadParams.scaleAGmAddr);
-    scaleBGmAddr_ = reinterpret_cast<__gm__ ScaleType*>(params.mmadParams.scaleBGmAddr);
+    scaleAGmAddr_ = reinterpret_cast<__gm__ ScaleAType*>(params.mmadParams.scaleAGmAddr);
+    scaleBGmAddr_ = reinterpret_cast<__gm__ ScaleBType*>(params.mmadParams.scaleBGmAddr);
     if (isBias) {
         biasGmAddr_ = reinterpret_cast<__gm__ BiasType*>(params.mmadParams.biasGmAddr);
     }
@@ -184,21 +189,21 @@ template <class GmTensorA, class GmTensorB, class GmTensorScaleA, class GmTensor
 __aicore__ inline void GemmUniversal<QBMM_MX_WITHOUT_BATCH_KERNEL_TEM_PARAMS>::ProcessOneBlock(
     const GmTensorA& gmA, const GmTensorB& gmB, const GmTensorScaleA& gmScaleA, const GmTensorScaleB& gmScaleB,
     const GmTensorBias& gmBias, const GmTensorC& gmC, const BlockShape& singleShape, int64_t mPos, int64_t nPos,
-    int64_t baseM, int64_t baseN, int64_t k, int64_t scaleKLen)
+    int64_t baseM, int64_t baseN, int64_t k, int64_t scaleAKLen, int64_t scaleBKLen)
 {
     constexpr int64_t kPos = 0L; // K is not split, so the K coordinate is 0.
     int64_t scaleAPos = mPos;
-    if constexpr (IS_HIF4 && TRANS_A) {
+    if constexpr (IS_HIF4_A && TRANS_A) {
         scaleAPos = mPos >> 1;
     }
     int64_t scaleBPos = nPos;
-    if constexpr (IS_HIF4 && !TRANS_B) {
+    if constexpr (IS_HIF4_B && !TRANS_B) {
         scaleBPos = nPos >> 1;
     }
     auto gmBlockA = gmA.slice(asc::te::make_coord(mPos, kPos), asc::te::make_shape(baseM, k));
-    auto gmBlockScaleA = gmScaleA.slice(asc::te::make_coord(scaleAPos, kPos), asc::te::make_shape(baseM, scaleKLen));
+    auto gmBlockScaleA = gmScaleA.slice(asc::te::make_coord(scaleAPos, kPos), asc::te::make_shape(baseM, scaleAKLen));
     auto gmBlockB = gmB.slice(asc::te::make_coord(kPos, nPos), asc::te::make_shape(k, baseN));
-    auto gmBlockScaleB = gmScaleB.slice(asc::te::make_coord(kPos, scaleBPos), asc::te::make_shape(scaleKLen, baseN));
+    auto gmBlockScaleB = gmScaleB.slice(asc::te::make_coord(kPos, scaleBPos), asc::te::make_shape(scaleBKLen, baseN));
     auto gmBlockBias = gmBias.slice(asc::te::make_coord(0L, nPos), asc::te::make_shape(1L, baseN));
     auto gmBlockC = gmC.slice(asc::te::make_coord(mPos, nPos), asc::te::make_shape(baseM, baseN));
 
@@ -213,11 +218,12 @@ __aicore__ inline void GemmUniversal<QBMM_MX_WITHOUT_BATCH_KERNEL_TEM_PARAMS>::P
     const auto m = asc::te::get<MNK_M>(problemShape);
     const auto n = asc::te::get<MNK_N>(problemShape);
     const auto k = asc::te::get<MNK_K>(problemShape);
-    const auto scaleKLen = MxScaleKLen<AType>(k);
+    const auto scaleAKLen = MxScaleKLen<AType>(k);
+    const auto scaleBKLen = MxScaleKLen<BType>(k);
     auto layoutA = MakeLayoutA{}(m, k);
-    auto layoutScaleA = MakeLayoutScaleA{}(m, scaleKLen);
+    auto layoutScaleA = MakeLayoutScaleA{}(m, scaleAKLen);
     auto layoutB = MakeLayoutB{}(k, n);
-    auto layoutScaleB = MakeLayoutScaleB{}(scaleKLen, n);
+    auto layoutScaleB = MakeLayoutScaleB{}(scaleBKLen, n);
     auto layoutBias = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1L, n);
     auto layoutC = MakeLayoutC{}(m, n);
     auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aGmAddr_), layoutA);
@@ -249,7 +255,8 @@ __aicore__ inline void GemmUniversal<QBMM_MX_WITHOUT_BATCH_KERNEL_TEM_PARAMS>::P
         }
         bs.GetTileCoord(blockCoord, mPos, nPos);
         SetBL2Cache(problemShape, baseM, baseN, params.qbmmParams.bMustHitL2, gmB);
-        ProcessOneBlock(gmA, gmB, gmScaleA, gmScaleB, gmBias, gmC, singleShape, mPos, nPos, baseM, baseN, k, scaleKLen);
+        ProcessOneBlock(gmA, gmB, gmScaleA, gmScaleB, gmBias, gmC, singleShape, mPos, nPos, baseM, baseN, k, scaleAKLen,
+                        scaleBKLen);
     }
 }
 } // namespace Kernel

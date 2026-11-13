@@ -151,7 +151,7 @@ private:
         if (params.mmadParams.BL1Pingpong != BlockMmad::QUADRUPLE_BUFFER) {
             if constexpr (IsTrans<LayoutB>::value) {
                 vecPingpong = static_cast<uint8_t>(
-                    Min(static_cast<int64_t>(params.mmadParams.BL1Pingpong), static_cast<int64_t>(2)));
+                    Min<int64_t>(params.mmadParams.BL1Pingpong, BlockMmad::DOUBLE_BUFFER));
             } else {
                 vecPingpong = static_cast<uint8_t>(params.mmadParams.BL1Pingpong);
             }

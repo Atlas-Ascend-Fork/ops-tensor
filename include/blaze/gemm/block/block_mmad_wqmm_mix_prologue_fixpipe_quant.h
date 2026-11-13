@@ -196,7 +196,7 @@ public:
             bufMgr_.InitAL1(i, aL1Offsets_[i], BufferLayout::L1ADataBufferId(i));
             bufMgr_.InitBL1(i, bL1Offsets_[i], BufferLayout::L1BDataBufferId(i));
         }
-        dbL0C_ = (params_.dbL0C > 0) ? params_.dbL0C : 2;
+        dbL0C_ = (params_.dbL0C > 0) ? params_.dbL0C : DOUBLE_BUFFER;
         bufMgr_.InitL0();
         bufMgr_.InitL0C();
         bufMgr_.InitScaleL1(L1_BUFFER_SIZE - baseN_ * sizeof(uint64_t));
@@ -211,23 +211,23 @@ private:
             int32_t bL1DataSizeTotal = DOUBLE_BUFFER * bL1DataSize * sizeof(AType);
             if (al1Pingpong == QUADRUPLE_BUFFER) {
                 bL1Offsets_[0] = 0;
-                bL1Offsets_[2] = bL1DataSize * sizeof(AType);
+                bL1Offsets_[IDX_2] = bL1DataSize * sizeof(AType);
                 bL1Offsets_[1] = L1_BUFFER_HALF_SIZE;
                 bL1Offsets_[IDX_3] = L1_BUFFER_HALF_SIZE + bL1DataSize * sizeof(AType);
                 aL1Offsets_[0] = L1_BUFFER_HALF_SIZE + bL1DataSizeTotal;
-                aL1Offsets_[2] = L1_BUFFER_HALF_SIZE + bL1DataSizeTotal + aL1DataSize * sizeof(AType);
+                aL1Offsets_[IDX_2] = L1_BUFFER_HALF_SIZE + bL1DataSizeTotal + aL1DataSize * sizeof(AType);
                 aL1Offsets_[1] = bL1DataSizeTotal;
                 aL1Offsets_[IDX_3] = bL1DataSizeTotal + aL1DataSize * sizeof(AType);
             } else if (al1Pingpong == DOUBLE_BUFFER) {
                 bL1Offsets_[0] = 0;
-                bL1Offsets_[2] = bL1DataSize * sizeof(AType);
+                bL1Offsets_[IDX_2] = bL1DataSize * sizeof(AType);
                 bL1Offsets_[1] = L1_BUFFER_HALF_SIZE;
                 bL1Offsets_[IDX_3] = L1_BUFFER_HALF_SIZE + bL1DataSize * sizeof(AType);
                 aL1Offsets_[0] = L1_BUFFER_HALF_SIZE + bL1DataSizeTotal;
                 aL1Offsets_[1] = bL1DataSizeTotal;
             } else {
                 bL1Offsets_[0] = 0;
-                bL1Offsets_[2] = bL1DataSize * sizeof(AType);
+                bL1Offsets_[IDX_2] = bL1DataSize * sizeof(AType);
                 bL1Offsets_[IDX_3] = bL1Offsets_[1] + bL1DataSize * sizeof(AType);
                 aL1Offsets_[0] = bL1DataSizeTotal;
                 aL1Offsets_[1] = Blaze::Gemm::Max(L1_BUFFER_HALF_SIZE, bL1DataSizeTotal + aL1DataSize * sizeof(AType));
@@ -240,7 +240,7 @@ private:
             aL1Offsets_[0] = vecPingpong * bL1DataSize * sizeof(AType);
             if (al1Pingpong == QUADRUPLE_BUFFER) {
                 aL1Offsets_[1] = (aL1DataSize + bl1Pingpong * bL1DataSize) * sizeof(AType);
-                aL1Offsets_[2] = (aL1DataSize * IDX_2 + bl1Pingpong * bL1DataSize) * sizeof(AType);
+                aL1Offsets_[IDX_2] = (aL1DataSize * IDX_2 + bl1Pingpong * bL1DataSize) * sizeof(AType);
                 aL1Offsets_[IDX_3] = (aL1DataSize * IDX_3 + bl1Pingpong * bL1DataSize) * sizeof(AType);
             } else if (al1Pingpong == DOUBLE_BUFFER) {
                 aL1Offsets_[1] = (aL1DataSize + bl1Pingpong * bL1DataSize) * sizeof(AType);
@@ -378,7 +378,8 @@ private:
     uint64_t bL1Offsets_[QUADRUPLE_BUFFER] = {0, 0, 0, 0};
     uint64_t aL1Offsets_[QUADRUPLE_BUFFER] = {0, 0, 0, 0};
     using BufferLayout = BufferIdLayout<QUADRUPLE_BUFFER, QUADRUPLE_BUFFER, DOUBLE_BUFFER>;
-    Blaze::Gemm::BufferManager<4, 4, 2> bufMgr_; // <MaxL1ASlots, MaxL1BSlots, MaxL0Slots>: A/B pipeline, L0 ping-pong
+    Blaze::Gemm::BufferManager<QUADRUPLE_BUFFER, QUADRUPLE_BUFFER, DOUBLE_BUFFER>
+        bufMgr_; // <MaxL1ASlots, MaxL1BSlots, MaxL0Slots>: A/B pipeline, L0 ping-pong
 
     int64_t madLoopIdx_ = 0;
     int64_t totalKLoopIdx_ = 0;

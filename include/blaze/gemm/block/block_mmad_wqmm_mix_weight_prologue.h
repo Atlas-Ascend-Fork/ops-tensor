@@ -88,13 +88,13 @@ public:
         kSize_ = params.kSize;
         hasBias_ = params.hasBias;
         nBase_ = static_cast<uint64_t>(asc::te::get<MNK_N>(params.l1TileShape));
-        kL1Size_ = static_cast<uint64_t>(asc::te::get<3>(params.l1TileShape));
+        kL1Size_ = static_cast<uint64_t>(asc::te::get<L1_KB_INDEX>(params.l1TileShape));
         kL0Size_ = static_cast<uint64_t>(asc::te::get<MNK_K>(params.l0TileShape));
         nL0Size_ = static_cast<uint64_t>(asc::te::get<MNK_N>(params.l0TileShape));
         kTileCount_ = CeilDiv(kSize_, kL1Size_);
         aTilesPerBank_ = CeilDiv(kTileCount_, DOUBLE_BUFFER_COUNT);
         // Load the complete x tile when KaL1 exceeds KbL1, including K tails.
-        aFullLoad_ = static_cast<uint64_t>(asc::te::get<2>(params.l1TileShape)) > kL1Size_;
+        aFullLoad_ = static_cast<uint64_t>(asc::te::get<MNK_K>(params.l1TileShape)) > kL1Size_;
         InitBufferSlots();
 
         if ASCEND_IS_AIV {
@@ -142,6 +142,7 @@ public:
     }
 
 private:
+    static constexpr int32_t L1_KB_INDEX = 3;
     using SyncProtocol = typename DispatchPolicy::SyncProtocol;
     using MakeAL1Layout = asc::te::frame_layout_format<asc::te::nz_layout_ptn, asc::te::layout_trait_default<AType>>;
     // LayoutB uses (N,K) coordinates for weight: ND stores N x K, DN stores K x N.
