@@ -145,7 +145,21 @@ public:
         nL1Iter_ = CeilDiv(curN, curBaseN_);
         const uint64_t curKL1Base = Min(curK, kL1_);
         const uint64_t kL1Iter = CeilDiv(curK, curKL1Base);
+        using UbElemType = asc::te::get_attribute_element_type<typename TensorC::element_type*>;
+        // B16/H16+splitM: 双AIV路径——L0C按M对半slice成两份, 经subBlockId路由到各自AIV的UB
+        // (两条单目的地fixpipe, 弃用te层DUAL_DST与unit-flag对的形状约束);
+        // FP32+splitM保持主线te DUAL_DST路径(设备已验证).
+        const bool usePerAivFixpipe = splitM_ && (AscendC::IsSameType<UbElemType, half>::value ||
+                                                  AscendC::IsSameType<UbElemType, bfloat16_t>::value);
+
         for (uint64_t iterN = 0; iterN < nL1Iter_; ++iterN) {
+            const uint16_t l0cSlot = static_cast<uint16_t>(l0cPingPong_ & 0x1);
+            if (usePerAivFixpipe) {
+                // B16/H16双AIV路径弃用unit-flag对, L0C槽位以M/FIX双侧锁门控(锁初始态即空闲):
+                // M侧持有期间MMAD写该槽, UnLockM后FIX侧LockFix等待MMAD完成, UnLockFix后
+                // 下轮MMAD的LockM等待fixpipe读毕(与syrk的L0C锁同款原语, 槽位索引对齐本块L0锁).
+                Gemm::LockM(L0C_BUFFER_ID_BASE + l0cSlot);
+            }
             auto tileN = (iterN + 1 == nL1Iter_) ? (curN - curBaseN_ * iterN) : curBaseN_;
             uint64_t l0cOffset = HALF_L0C_SIZE * (l0cPingPong_ & 0x1);
             // L0C always describes the valid MMAD tile. Destination alignment and row pitch are physical UB
@@ -187,7 +201,8 @@ public:
                         Gemm::LockM(l0BufferId + L0_BUFFER_ID_BASE);
                         bool initCmatrix = iter0 == 0 && iter1 == 0 && !isBias_;
                         bool isFinalK = iter0 + 1 == kL1Iter && iter1 + 1 == kL0Iter;
-                        uint8_t unitFlag = isFinalK ? FINAL_ACCUMULATION : NON_FINAL_ACCUMULATION;
+                        uint8_t unitFlag = usePerAivFixpipe ? 0U :
+                                                              (isFinalK ? FINAL_ACCUMULATION : NON_FINAL_ACCUMULATION);
                         Compute(tensorAL0, tensorBL0, tensorBiasL0, tensorL0C, l0Shape, needBias, unitFlag,
                                 initCmatrix);
                         Gemm::UnLockM(l0BufferId + L0_BUFFER_ID_BASE);
@@ -195,6 +210,9 @@ public:
                     l0PingPong_++;
                 }
                 abL1LoopCnt_++;
+            }
+            if (usePerAivFixpipe) {
+                Gemm::UnLockM(L0C_BUFFER_ID_BASE + l0cSlot);
             }
 
             uint16_t slot = (ubDB_ > 1) ? static_cast<uint16_t>(cvPingPong_ & 0x1) : 0U;
@@ -325,6 +343,33 @@ private:
         auto ubTensor = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::ub>(tensorC.data().get() + slotIdx * ubSlotElems), layoutUB);
         if (splitM_) {
+            if constexpr (AscendC::IsSameType<TensorUbType, half>::value ||
+                          AscendC::IsSameType<TensorUbType, bfloat16_t>::value) {
+                // B16/H16双AIV: L0C按M对半slice, ubTensor同基址切两半, subBlockId路由各自AIV的UB;
+                // 源/目的切片均取c0对齐宽度(te按布局自动派生n_size/quantPre/nz2nd);
+                // 弃用unit-flag对(MMAD与fixpipe区域不一致), L0C槽位以FIX侧锁等待MMAD完成.
+                const uint64_t halfM = Blaze::Gemm::CeilDiv(curM, SPLIT_M_ALIGN);
+                const uint64_t restM = curM - halfM;
+                const uint16_t l0cSlot = static_cast<uint16_t>(l0cPingPong_ & 0x1);
+                const auto origin = asc::te::make_coord(0L, 0L);
+                auto ubHalf0 = ubTensor.slice(origin, asc::te::make_shape(halfM, tileNAlign));
+                auto l0cHalf0 = tensorL0C.slice(origin, asc::te::make_shape(halfM, tileNAlign));
+
+                Gemm::LockFix(L0C_BUFFER_ID_BASE + l0cSlot);
+                auto copyL0C2UBHalf0 = asc::te::make_copy(asc::te::copy_l0c_to_ub{});
+                asc::te::copy(copyL0C2UBHalf0.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::disable, 0}),
+                              ubHalf0, l0cHalf0);
+                if (restM > 0) {
+                    auto l0cHalf1 = tensorL0C.slice(asc::te::make_coord(halfM, 0L),
+                                                    asc::te::make_shape(restM, tileNAlign));
+                    auto ubHalf1 = ubTensor.slice(origin, asc::te::make_shape(restM, tileNAlign));
+                    auto copyL0C2UBHalf1 = asc::te::make_copy(asc::te::copy_l0c_to_ub{});
+                    asc::te::copy(copyL0C2UBHalf1.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::disable, 1}),
+                                  ubHalf1, l0cHalf1);
+                }
+                Gemm::UnLockFix(L0C_BUFFER_ID_BASE + l0cSlot);
+                return;
+            }
             auto copyL0C2UBSplitM = asc::te::make_copy(asc::te::copy_l0c_to_ub{},
                                                        Blaze::Gemm::Tile::CopyL0C2UBTraitSplitM{});
             asc::te::copy(copyL0C2UBSplitM.with(fixpParams), ubTensor, tensorL0C);
