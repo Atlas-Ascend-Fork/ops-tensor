@@ -58,6 +58,7 @@ private:
     }
 
 public:
+    using DispatchPolicy = typename BlockMmad::DispatchPolicy;
     using AType = typename BlockMmad::AType;
     using BType = typename BlockMmad::BType;
     using CType = typename BlockMmad::CType;
@@ -67,8 +68,23 @@ public:
     using LayoutC = typename BlockMmad::LayoutC;
     using LayoutScaleB = typename BlockMmad::LayoutScaleB;
     using LayoutBias = typename BlockMmad::LayoutBias;
-    static_assert((IsFp4<AType>() && IsFp4<BType>()) || (IsFp8<AType>() && IsFp8<BType>()),
-                  "QGMM MX only supports same bit-width MXFP4/MXFP8 AType and BType.");
+
+    static constexpr bool ENABLE_UB_INPLACE_ADD = !AscendC::Std::is_same_v<BlockEpilogue, Block::BlockEpilogueEmpty>;
+    static constexpr bool ENABLE_ATOMIC_ADD = DispatchPolicy::IS_ATOMIC_ADD;
+    static constexpr bool ENABLE_INPLACE_ADD = ENABLE_UB_INPLACE_ADD || ENABLE_ATOMIC_ADD;
+    static_assert(!ENABLE_ATOMIC_ADD || AscendC::Std::is_same_v<BlockEpilogue, Block::BlockEpilogueEmpty>,
+                  "QGMM MX atomic add requires an empty epilogue.");
+    static constexpr bool IS_MIXED_INPUT = AscendC::Std::is_same_v<AType, fp8_e4m3fn_t> &&
+                                           (AscendC::Std::is_same_v<BType, fp4x2_e2m1_t> || IsHif4<BType>());
+    using ScaleBType = MxScaleType<BType>;
+    static_assert((IsFp4<AType>() && !IsHif4<AType>() && IsFp4<BType>() && !IsHif4<BType>()) ||
+                      (IsFp8<AType>() && IsFp8<BType>()) || (ENABLE_INPLACE_ADD && IS_MIXED_INPUT),
+                  "QGMM MX requires same-width inputs or FP8 E4M3 x FP4/HIF4 inplace add.");
+    static_assert(!ENABLE_INPLACE_ADD || (IS_MIXED_INPUT && AscendC::Std::is_same_v<CType, float> &&
+                                          AscendC::Std::is_same_v<LayoutA, asc::te::dn_ext_layout_ptn> &&
+                                          AscendC::Std::is_same_v<LayoutB, asc::te::nd_ext_layout_ptn> &&
+                                          AscendC::Std::is_same_v<LayoutC, asc::te::nd_ext_layout_ptn>),
+                  "QGMM MX inplace add requires FP8 x FP4/HIF4, DN A, ND B/C, FP32 C.");
     static_assert(AscendC::Std::is_one_of_v<CType, half, bfloat16_t, float>,
                   "QGMM MX only supports half/bfloat16_t/float CType.");
     static_assert(AscendC::Std::is_same_v<BiasType, float>, "QGMM MX only supports float BiasType.");
@@ -131,17 +147,20 @@ public:
 
 private:
     static constexpr uint32_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
+    static constexpr uint32_t C0_SIZE_B = IsFp4<BType>() ? C0_SIZE_B4 : C0_SIZE_B8;
     using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE>>;
-    using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE>>;
+    using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE_B>>;
     using MakeLayoutC = asc::te::frame_layout_format<LayoutC, AscendC::Std::Int<asc::te::c0_element<CType>>>;
     using MakeLayoutScaleA = AscendC::Std::conditional_t<
         TRANS_A, asc::te::frame_layout_format<asc::te::scalea_dn_layout_ptn, AscendC::Std::Int<SCALE_C0>>,
         asc::te::frame_layout_format<asc::te::scalea_nd_layout_ptn, AscendC::Std::Int<SCALE_C0>>>;
-    using MakeLayoutScaleB = asc::te::frame_layout_format<LayoutScaleB, AscendC::Std::Int<SCALE_C0>>;
+    using MakeLayoutScaleB = asc::te::frame_layout_format<LayoutScaleB, AscendC::Std::Int<GetScaleC0<BType>()>>;
 
     __aicore__ inline void SetSchedulerTailAlign(BlockScheduler& scheduler)
     {
-        if constexpr (!TRANS_A) {
+        if constexpr (ENABLE_INPLACE_ADD) {
+            scheduler.SetTailAlign(1, C0_SIZE_B);
+        } else if constexpr (!TRANS_A) {
             constexpr uint32_t mTailAlign = 1;
             constexpr uint32_t nTailAlign = TRANS_B ? static_cast<uint32_t>(BLOCK_CUBE) :
                                                       static_cast<uint32_t>(C0_SIZE);
@@ -191,13 +210,15 @@ private:
 
     __aicore__ inline void Run(const Params& params)
     {
-        if ASCEND_IS_AIV {
+        if constexpr (!ENABLE_UB_INPLACE_ADD) {
+            if ASCEND_IS_AIV {
+                return;
+            }
+        }
+        if (params.gmmParams.groupNum == 0) {
             return;
         }
         Init(params);
-        if (groupNum_ == 0) {
-            return;
-        }
         const int64_t groupListSize = static_cast<int64_t>(groupNum_) *
                                       (groupListType_ == GROUP_LIST_TYPE_SPARSE ? SPARSE_GROUP_LIST_ITEM_STRIDE : 1UL);
         const auto groupListLayout = asc::te::make_layout(asc::te::make_shape(groupListSize), asc::te::make_stride(1L));
@@ -207,6 +228,12 @@ private:
         const auto& gmmParams = params.gmmParams;
         BlockScheduler scheduler(gmmParams.baseM, gmmParams.baseN, gmmParams.baseK);
         SetSchedulerTailAlign(scheduler);
+        if constexpr (ENABLE_UB_INPLACE_ADD) {
+            epilogueOp_.Init(params.epilogueParams);
+        }
+        if constexpr (ENABLE_ATOMIC_ADD) {
+            AscendC::SetAtomicAdd<float>();
+        }
         const uint32_t lastGroupIdx = groupNum_ - 1;
         for (uint32_t loopIdx = 0; loopIdx < lastGroupIdx; ++loopIdx) {
             uint32_t groupIdx = loopIdx;
@@ -246,19 +273,20 @@ private:
                 ProcessSingleGroup<false>(scheduler, groupIdx);
             }
         }
+        if constexpr (ENABLE_ATOMIC_ADD) {
+            AscendC::PipeBarrier<PIPE_FIX>();
+            AscendC::SetAtomicNone();
+        }
     }
 
     __aicore__ inline void Init(const Params& params)
     {
-        if ASCEND_IS_AIV {
-            return;
-        }
         const auto& gmmParams = params.gmmParams;
         aBasePtr_ = reinterpret_cast<__gm__ AType*>(params.mmadParams.aGmAddr);
         bBasePtr_ = reinterpret_cast<__gm__ BType*>(params.mmadParams.bGmAddr);
         cBasePtr_ = reinterpret_cast<__gm__ CType*>(params.mmadParams.cGmAddr);
         scaleABasePtr_ = reinterpret_cast<__gm__ fp8_e8m0_t*>(params.mmadParams.scaleAGmAddr);
-        scaleBBasePtr_ = reinterpret_cast<__gm__ fp8_e8m0_t*>(params.mmadParams.scaleBGmAddr);
+        scaleBBasePtr_ = reinterpret_cast<__gm__ ScaleBType*>(params.mmadParams.scaleBGmAddr);
         singleW_ = params.gmmParams.singleW == 1;
         if (gmmParams.isBias == 1) {
             biasBasePtr_ = reinterpret_cast<__gm__ BiasType*>(params.mmadParams.biasGmAddr);
@@ -284,11 +312,19 @@ private:
             }
         }
 
+        if ASCEND_IS_AIV {
+            return; // Both sides need group/address metadata; only AIC initializes MMAD resources.
+        }
         const BlockShape l0Shape{static_cast<int64_t>(gmmParams.baseM), static_cast<int64_t>(gmmParams.baseN),
                                  static_cast<int64_t>(gmmParams.baseK), 0};
         // MX uses one shared scale K window for ScaleA/ScaleB. Tiling must provide scaleKAL1 == scaleKBL1.
-        const L1Params l1Params{static_cast<uint64_t>(gmmParams.kAL1), static_cast<uint64_t>(gmmParams.kBL1),
-                                static_cast<uint64_t>(gmmParams.scaleKAL1)};
+        uint64_t scaleKL1 = gmmParams.scaleKAL1;
+        if constexpr (ENABLE_INPLACE_ADD) {
+            const uint64_t outerKL1 = Max(static_cast<uint64_t>(gmmParams.kAL1), static_cast<uint64_t>(gmmParams.kBL1));
+            // Scale reloads must stay on complete outer K-strip boundaries.
+            scaleKL1 = Min(Max(scaleKL1 / outerKL1, 1UL) * outerKL1, static_cast<uint64_t>(gmmParams.k));
+        }
+        const L1Params l1Params{static_cast<uint64_t>(gmmParams.kAL1), static_cast<uint64_t>(gmmParams.kBL1), scaleKL1};
         const typename BlockMmad::MmadParams mmadParams{
             l0Shape, l1Params, isBias_, gmmParams.dbL0C == DOUBLE_BUFFER_COUNT, gmmParams.l1BufferStage};
         mmadOp_.Init(initProblemShape, mmadParams);
@@ -310,6 +346,9 @@ private:
 
     __aicore__ inline bool IsLastGroupAndNeedSplit(const BlockScheduler& scheduler)
     {
+        if constexpr (ENABLE_INPLACE_ADD) {
+            return false;
+        }
         return (scheduler.GetEndBlockIdx() + 1) <= (AscendC::GetBlockNum() >> 1);
     }
 
@@ -385,6 +424,10 @@ private:
                                             << MXFP_MULTI_BASE_SHIFT;
             scaleAOffset_ = m * transScaleStart;
             scaleBOffset_ = n * transScaleStart;
+            if constexpr (IsHif4<BType>()) {
+                // HiFloat4 has one hif4_scale per K64 group; FP8 has two scale elements.
+                scaleBOffset_ >>= 1;
+            }
             cOffset_ = static_cast<int64_t>(groupIdx) * m * n;
         }
         biasOffset_ = static_cast<int64_t>(groupIdx) * n;
@@ -395,9 +438,27 @@ private:
         return ((k + MXFP_DIVISOR_SIZE - 1) >> MXFP_DIVISOR_SHIFT) << MXFP_MULTI_BASE_SHIFT;
     }
 
-    template <bool isLastGroupAndNeedSplit>
+    template <bool isLastGroupAndNeedSplit, bool UseUb = ENABLE_UB_INPLACE_ADD>
     __aicore__ inline void ProcessSingleGroup(BlockScheduler& scheduler, uint32_t groupIdx)
     {
+        if constexpr (UseUb) {
+            // Match PR14161's per-group K policy; the host only knows total K.
+            constexpr int64_t MIN_UB_GROUP_K = 2048;
+            constexpr int64_t MAX_UB_GROUP_K = 16384;
+            const int64_t groupK = asc::te::get<MNK_K>(problemShape_);
+            if (groupK < MIN_UB_GROUP_K || groupK > MAX_UB_GROUP_K) {
+                if ASCEND_IS_AIC {
+                    AscendC::SetAtomicAdd<float>();
+                }
+                // Both processors must advance the same scheduler and group offsets.
+                ProcessSingleGroup<isLastGroupAndNeedSplit, false>(scheduler, groupIdx);
+                if ASCEND_IS_AIC {
+                    AscendC::PipeBarrier<PIPE_FIX>();
+                    AscendC::SetAtomicNone();
+                }
+                return;
+            }
+        }
         BlockCoord blockCoord;
         if (!scheduler.GetNextBlockCoord(blockCoord)) {
             return;
@@ -406,17 +467,20 @@ private:
 
         // Different groups may carry different split-M / split-K sizes. Keep the double-buffer phase continuous
         // across groups and only refresh the problem shape.
-        mmadOp_.UpdateParamsForNextProblem(problemShape_);
+        if ASCEND_IS_AIC {
+            mmadOp_.UpdateParamsForNextProblem(problemShape_);
+        }
 
         const int64_t problemM = asc::te::get<MNK_M>(problemShape_);
         const int64_t problemN = asc::te::get<MNK_N>(problemShape_);
         const int64_t problemK = asc::te::get<MNK_K>(problemShape_);
         const int64_t scaleK = GetScaleK(problemK);
+        const int64_t scaleKB = static_cast<int64_t>(MxScaleKLen<BType>(static_cast<uint64_t>(problemK)));
         const int64_t baseN = static_cast<int64_t>(baseN_);
         auto layoutA = MakeLayoutA{}(problemM, problemK);
         auto layoutScaleA = MakeLayoutScaleA{}(problemM, scaleK);
         auto layoutB = MakeLayoutB{}(problemK, problemN);
-        auto layoutScaleB = MakeLayoutScaleB{}(scaleK, problemN);
+        auto layoutScaleB = MakeLayoutScaleB{}(scaleKB, problemN);
         auto layoutC = MakeLayoutC{}(problemM, problemN);
         auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aBasePtr_ + aOffset_), layoutA);
         auto gmScaleA = asc::te::make_tensor(
@@ -425,10 +489,9 @@ private:
             asc::te::make_mem_ptr<asc::te::location::gm>(
                 (singleW_ ? bBasePtr_ : GetTensorAddrFromTensorList(groupIdx, bBasePtr_)) + bOffset_),
             layoutB);
-        auto gmScaleB = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::gm>(
-                (singleW_ ? scaleBBasePtr_ : GetTensorAddrFromTensorList(groupIdx, scaleBBasePtr_)) + scaleBOffset_),
-            layoutScaleB);
+        auto scaleBPtr = (singleW_ ? scaleBBasePtr_ : GetTensorAddrFromTensorList(groupIdx, scaleBBasePtr_)) +
+                         scaleBOffset_;
+        auto gmScaleB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(scaleBPtr), layoutScaleB);
         auto gmC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(cBasePtr_ + cOffset_), layoutC);
         auto biasPtr = isBias_ ? (biasBasePtr_ + biasOffset_) : nullptr;
         auto layoutBias = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(static_cast<int64_t>(1), problemN);
@@ -460,24 +523,58 @@ private:
                                                 asc::te::make_shape(blockM, scaleK));
             auto gmBlockB = gmB.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos),
                                       asc::te::make_shape(blockK, blockN));
-            auto gmBlockScaleB = gmScaleB.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos),
-                                                asc::te::make_shape(scaleK, blockN));
+            // HiF4 ND scales store Ea/Eb and Ec as two B16 rows, as emitted by QuantHiF4.
+            const int64_t scaleNPos = IsHif4<BType>() &&
+                                              AscendC::Std::is_same_v<LayoutScaleB, asc::te::scaleb_nd_layout_ptn> ?
+                                          (nPos >> 1) :
+                                          nPos;
+            auto gmBlockScaleB = gmScaleB.slice(asc::te::make_coord(static_cast<int64_t>(0), scaleNPos),
+                                                asc::te::make_shape(scaleKB, blockN));
             auto gmBlockBias = gmBias.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos),
                                             asc::te::make_shape(static_cast<int64_t>(1), blockN));
             auto gmBlockC = gmC.slice(asc::te::make_coord(mPos, nPos), asc::te::make_shape(blockM, blockN));
-            mmadOp_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, gmBlockC, blockShape);
+            if constexpr (UseUb) {
+                auto ubPing = epilogueOp_.GetAccumulatorTensor({blockM, blockN, 0});
+                auto ubPong = epilogueOp_.GetAccumulatorTensor({blockM, blockN, 1});
+                const int64_t panelM = static_cast<int64_t>(asc::te::get<0, 1>(ubPing.layout().shape()));
+                if (panelM <= 0) {
+                    continue;
+                }
+                if ASCEND_IS_AIC {
+                    // Compute the full tile once; alternate the two UB panel tensors on output.
+                    mmadOp_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, ubPing, ubPong, blockShape,
+                            inplacePanelIndex_);
+                }
+                if ASCEND_IS_AIV {
+                    for (int64_t row = 0, panel = 0; row < blockM; row += panelM, ++panel) {
+                        const int64_t rows = Min(panelM, blockM - row);
+                        const uint64_t panelIndex = inplacePanelIndex_ + panel;
+                        auto ubResult = epilogueOp_.GetAccumulatorTensor(
+                            {rows, blockN, static_cast<uint32_t>(panelIndex & 1UL)});
+                        auto panelC = gmBlockC.slice(asc::te::make_coord(row, 0L), asc::te::make_shape(rows, blockN));
+                        epilogueOp_(ubResult, panelC, rows, blockN, panelIndex);
+                    }
+                }
+                inplacePanelIndex_ += static_cast<uint64_t>(CeilDiv(blockM, panelM));
+            } else {
+                if ASCEND_IS_AIC {
+                    mmadOp_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, gmBlockC, blockShape);
+                }
+            }
         } while (scheduler.GetNextBlockCoord(blockCoord));
     }
 
 private:
     BlockMmad mmadOp_;
+    BlockEpilogue epilogueOp_;
+    uint64_t inplacePanelIndex_{0};
     ProblemShape problemShape_{};
     __gm__ AType* aBasePtr_{nullptr};
     __gm__ BType* bBasePtr_{nullptr};
     __gm__ CType* cBasePtr_{nullptr};
     __gm__ BiasType* biasBasePtr_{nullptr};
     __gm__ fp8_e8m0_t* scaleABasePtr_{nullptr};
-    __gm__ fp8_e8m0_t* scaleBBasePtr_{nullptr};
+    __gm__ ScaleBType* scaleBBasePtr_{nullptr};
 
     int64_t preOffset_{0};
     int64_t aOffset_{0};

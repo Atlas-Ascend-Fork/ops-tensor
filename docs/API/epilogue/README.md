@@ -24,6 +24,7 @@
 | [block_epilogue_gelu_tanh_mx_quant](./block/block_epilogue_gelu_tanh_mx_quant.md) | GELU（tanh）激活 + 动态 MXFP8/MXFP4 量化 |
 | [block_epilogue_block_attn_res_prepare](./block/block_epilogue_block_attn_res_prepare.md) | BlockAttnResPrepare AIV 后处理，执行 V 平方和、RMS-softmax、空输入处理和结果搬运 |
 | [block_epilogue_iterbatch](./block/block_epilogue_iterbatch.md) | IterBatch AIV 后处理组件，双 sub-block 奇偶消费 AIC fixpipe 写入的 UB 帧并 ND 写回 GM（ND_FIXPIPE_1_2） |
+| [block_epilogue_inplace_add](./block/block_epilogue_inplace_add.md) | QGMM MX FP32 原地累加，双结果面板与旧 C 分块预取 |
 | [tile](./tile/README.md) | Tile 级可复用计算组件（compute.h 架构派发 + arch35 实现：Gelu、Sigmoid、RmsSoftmax 等） |
 
 ## 公共框架
@@ -66,6 +67,7 @@ BlockEpilogue
 | BlockEpilogueSwigluMxQuant | SwiGLU + MXFP8 量化 | AIV 核 | 不支持 | 支持 float → bf16 → FP8 | SwiGLU | QBMM/QGMM MIX Kernel |
 | BlockEpilogueGeluTanhMxQuant | GELU（tanh） + OCP/cuBLAS MXFP8 或 MXFP4 量化 | AIV 核 | 不支持 | float → GELU（tanh） → FP8/FP4 | GELU（tanh） | QGMM MX ActivationQuant MIX Kernel |
 | BlockEpilogueBlockAttnResPrepare | V 平方和、RMS-softmax、空输入处理和结果搬运 | AIV 核 | 支持 | FP32 | 不支持 | BlockAttnResPrepare Kernel |
+| BlockEpilogueInplaceAdd | FP32 UB 结果 + GM 旧 C，写回原地址 | AIV 核 | 不支持 | 无，固定 FP32 | 不支持 | QGMM MX 1:1 MIX 原地累加 |
 | BlockEpilogueIterbatch | 无融合计算，AIV 消费 AIC fixpipe 写入的 UB 帧，ND 搬出 GM | AIV 核 | 不支持 | 不支持 | 不支持 | IterBatch ND_FIXPIPE_1_2 Kernel |
 
 ## 使用流程

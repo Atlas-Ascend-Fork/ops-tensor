@@ -20,7 +20,7 @@
 | [kernel_qbmm_mx_activation_quant](./kernel_qbmm_mx_activation_quant.md) | 支持多 Batch 的 MX 量化 Matmul，融合 GELU/SwiGLU/Swish 激活和动态 MX 量化 |
 | [kernel_qbmm_mix](./kernel_qbmm_mix.md) | 支持多 Batch 的 A8W8 MIX Matmul，AIC 计算、AIV 反量化 |
 | [kernel_qbmm_mix_without_batch](./kernel_qbmm_mix_without_batch.md) | Batch 固定为 1 的 A8W8 MIX Matmul，不处理多 Batch 广播 |
-| [kernel_qgmm_mx_basic](./kernel_qgmm_mx_basic.md) | MX 量化 Grouped Matmul，支持 group list 与 tail split |
+| [kernel_qgmm_mx_basic](./kernel_qgmm_mx_basic.md) | MX 量化 Grouped Matmul，支持 group list、tail split 和 FP8 × FP4/HiFloat4 原地累加 |
 | [grouped_matmul_finalize_routing](./grouped_matmul_finalize_routing.md) | GMMFR 三数据流的接口、存储、初始化及调用约束 |
 | [kernel_qgmm_mix_pertoken_finalize_routing](./kernel_qgmm_mix_pertoken_finalize_routing.md) | pertoken 全量化 GMMFR，支持可选 token scale 和确定性 workspace |
 | [kernel_wqgmm_mx_mix_finalize_routing](./kernel_wqgmm_mx_mix_finalize_routing.md) | MX A8W4 GMMFR，FP32 路由输出、AIV 权重转换和路由参数预取 |
