@@ -79,36 +79,28 @@ __aicore__ inline ~BlockEpilogueFmmWithScaleAdd()
 ```cpp
 __aicore__ inline void Init(const Params& params)
 ```
-从 `params` 读取 x3 和输出地址、alpha、beta、完整 `problemShape` 及 `splitM/baseM/baseN` 配置。入口组装时填写完整的后处理参数，公共 Kernel 直接调用 `Init(params.epilogueParams)`。
+从 `params` 读取 x3 和输出地址、alpha、beta、完整 `problemShape`、`splitM`、`baseM` 和 `baseN`。入口组装时填写完整的后处理参数，公共 Kernel 直接调用 `Init(params.epilogueParams)`。
 
-SYRK 同样使用 `Init(const Params&)`，在组装入口填写 `epilogueParams.problemShape`；`splitM/baseM/baseN` 保持原有默认值。原六参数、八参数计算接口及 SYRK 的显式 staging 窗口保持不变。
+旧双参 `Init(const Params&, const ProblemShape&)` 接口在CANN 9.2.0版本标记废弃，将在2027年11月10日之后的版本删除，替换为 `Init(const Params&)`。
 
 ### operator函数
-公共Matmul Kernel使用三参入口：
+普通 Matmul 路径接收 UB Tensor、Block 形状和全局坐标，根据全局坐标计算 `(batch * M + coordM) * N + coordN`，并使用初始化时保存的配置：
 
 ```cpp
 template <typename TensorC>
-__aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShape,
-                                const BlockCoord& blockCoord)
+__aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShape, const BlockCoord& blockCoord)
 ```
 
-根据全局坐标计算`(batch * M + coordM) * N + coordN`，再使用初始化时保存的配置转调下方原接口。splitM行偏移、N分块、UB分段和同步均复用原实现。
-
-原多参接口继续保留，SYRK等已有调用方无需调整：
+SYRK 等需要显式目标偏移或覆盖 tile 配置的路径使用散参重载：
 
 ```cpp
 template <typename TensorC>
-__aicore__ inline void operator()(
-    TensorC& ubTensor,
-    const BlockShape& blockShape,
-    int64_t dstOffset,
-    bool splitM,
-    int64_t baseM,
-    int64_t baseN,
-    int64_t stagingBaseOffset = -1,
-    int64_t stagingBytes = -1)
+__aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShape, int64_t dstOffset, bool splitM,
+                                  int64_t baseM, int64_t baseN, int64_t stagingBaseOffset = -1,
+                                  int64_t stagingBytes = -1, bool isDiagonal = false)
 ```
-说明：`stagingBaseOffset`/`stagingBytes` 指定 x3 与输出复用的 staging 窗口（UB 偏移与字节数）；默认 `-1` 时窗口紧随 fp32 累加器之后并占用剩余 UB 空间，UB 中存放多个累加器镜像时由调用方显式传入。
+
+两个入口复用同一计算实现，不再通过 `useBlockCoord` 切换参数解释方式。`stagingBaseOffset`/`stagingBytes` 指定 x3 与输出复用的 staging 窗口（UB 偏移与字节数）；默认 `-1` 时窗口紧随 fp32 累加器之后并占用剩余 UB 空间，UB 中存放多个累加器镜像时由调用方显式传入。
 
 执行流程：
 1. 根据`splitM`和`subBlockIdx`计算当前AIV负责的行数及行偏移。

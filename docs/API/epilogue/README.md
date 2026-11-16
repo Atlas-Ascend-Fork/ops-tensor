@@ -30,9 +30,12 @@
 
 BlockEpilogue 组件遵循公共分层约定，通常包含：
 - 类型别名
-- 数据结构（Params）
-- 与具体计算阶段匹配的核心方法。通用 GEMM 后处理通常提供 `Init`、`Run` 或 `operator()`；
-  BlockAttnResPrepare 后处理提供 `ReduceV`、`FinalizeSoftmax` 和 `ProcessEmptyInput`。
+- 初始化参数 `Params`
+- `Init` 和与具体后处理场景匹配的 `operator()` 接口
+- 接收 L0C 输出时提供 `GetAccumulatorTensor`
+- BlockAttnResPrepare 等专用多阶段后处理提供 `ReduceV`、`FinalizeSoftmax` 和 `ProcessEmptyInput`
+
+新增后处理文件必须遵守[统一对外接口和类组织规范](./epilogue_developer_guide.md#2-统一对外接口新增文件必须遵守)。
 
 详见：[block_epilogue.md](./block/block_epilogue.md)
 
@@ -40,13 +43,11 @@ BlockEpilogue 组件遵循公共分层约定，通常包含：
 
 ```
 BlockEpilogue
-    ├── BlockShape (Block 形状)
-    ├── BlockCoord (Block 坐标)
-    ├── Params (参数结构)
-    └── 核心方法
-            ├── Init (初始化)
-            ├── Run (执行后处理)
-            └── operator() (调用接口)
+    ├── BlockShape / BlockCoord
+    ├── Params
+    ├── Init (初始化)
+    ├── GetAccumulatorTensor (接收 L0C 输出时提供)
+    └── operator() (统一执行入口)
 ```
 
 ## 实现差异对比
@@ -70,10 +71,10 @@ BlockEpilogue
 ## 使用流程
 
 1. **查看公共框架**：了解类型别名和核心接口 → [block_epilogue.md](./block/block_epilogue.md)
-2. **选择具体实现**：根据 Kernel 类型选择 Empty 或 StreamK
+2. **选择具体实现**：根据 Kernel 数据流选择对应的 Epilogue
 3. **组装组件**：在 Kernel 模板参数中定义 BlockEpilogue 类型
-4. **初始化**：调用 Init 设置参数（StreamK 需要额外参数）
-5. **执行后处理**：调用 Run 或 operator 执行（Empty 无实际效果）
+4. **初始化**：通过 `Init` 设置初始化参数（两个 StreamK 实现暂保留原有散参形式）
+5. **执行后处理**：通过具体组件的 `operator()` 执行（Empty 无实际效果）
 
 ## 设计说明
 

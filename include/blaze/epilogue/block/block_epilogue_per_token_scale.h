@@ -47,8 +47,8 @@ public:
         bool withOffset{false};
     };
 
-    __aicore__ inline BlockEpiloguePerTokenScale() {}
-    __aicore__ inline ~BlockEpiloguePerTokenScale() {}
+    __aicore__ inline BlockEpiloguePerTokenScale();
+    __aicore__ inline ~BlockEpiloguePerTokenScale();
     __aicore__ inline void Init(const Params& params);
     __aicore__ inline void operator()(int64_t singleM, int64_t singleN, int64_t perTokenOffset, int64_t offsetOffset,
                                       int64_t rowSumOffset, int64_t outOffset, uint64_t workspaceOffset);
@@ -69,16 +69,10 @@ private:
 #endif // __NPU_ARCH__
 
     template <class T>
-    __aicore__ inline static uint64_t AlignBytes(uint64_t elements)
-    {
-        return Blaze::Gemm::CeilAlign(elements * sizeof(T), DATA_BLOCK);
-    }
+    __aicore__ inline static uint64_t AlignBytes(uint64_t elements);
 
     template <class T>
-    __aicore__ inline static int64_t AlignElements(int64_t elements)
-    {
-        return static_cast<int64_t>(AlignBytes<T>(elements) / sizeof(T));
-    }
+    __aicore__ inline static int64_t AlignElements(int64_t elements);
 
     __aicore__ inline static auto MakeLayout(int64_t rows, int64_t cols, int64_t rowPitch);
     __aicore__ inline void CopyInputs(int64_t m, int64_t n, int64_t perTokenOffset, int64_t offsetOffset,
@@ -102,6 +96,28 @@ private:
     uint64_t offsetOffset_{0};
     bool withOffset_{false};
 };
+
+template <class OutType, class FixpipeType>
+__aicore__ inline BlockEpiloguePerTokenScale<OutType, FixpipeType>::BlockEpiloguePerTokenScale()
+{}
+
+template <class OutType, class FixpipeType>
+__aicore__ inline BlockEpiloguePerTokenScale<OutType, FixpipeType>::~BlockEpiloguePerTokenScale()
+{}
+
+template <class OutType, class FixpipeType>
+template <class T>
+__aicore__ inline uint64_t BlockEpiloguePerTokenScale<OutType, FixpipeType>::AlignBytes(uint64_t elements)
+{
+    return Blaze::Gemm::CeilAlign(elements * sizeof(T), DATA_BLOCK);
+}
+
+template <class OutType, class FixpipeType>
+template <class T>
+__aicore__ inline int64_t BlockEpiloguePerTokenScale<OutType, FixpipeType>::AlignElements(int64_t elements)
+{
+    return static_cast<int64_t>(AlignBytes<T>(elements) / sizeof(T));
+}
 
 template <class OutType, class FixpipeType>
 __aicore__ inline auto BlockEpiloguePerTokenScale<OutType, FixpipeType>::MakeLayout(int64_t rows, int64_t cols,

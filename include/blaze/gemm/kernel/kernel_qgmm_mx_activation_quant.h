@@ -16,6 +16,7 @@
 
 #pragma once
 #include "kernel_basic_intf.h"
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
@@ -372,7 +373,6 @@ private:
                 epilogueOp_.UpdateGlobalAddr({groupInfo.outputOffset, groupInfo.outputScaleOffset});
             }
         }
-
         const int64_t problemM = asc::te::get<MNK_M>(problemShape_);
         const int64_t problemN = asc::te::get<MNK_N>(problemShape_);
         const int64_t problemK = asc::te::get<MNK_K>(problemShape_);
@@ -434,10 +434,16 @@ private:
                     if (isVecSetSyncCom_) {
                         Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
                     }
-                    auto ubC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0),
-                                                       asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
-                                                           (blockM + 1) & ~static_cast<int64_t>(1), Align32(blockN)));
-                    blockMmad_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, ubC, blockShape);
+                    if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue_>::value) {
+                        auto ubC = epilogueOp_.GetAccumulatorTensor({blockM, blockN});
+                        blockMmad_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, ubC, blockShape);
+                    } else {
+                        auto ubC = asc::te::make_tensor(
+                            asc::te::make_mem_ptr<asc::te::location::ub, float>(0),
+                            asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
+                                (blockM + 1) & ~static_cast<int64_t>(1), Align32(blockN)));
+                        blockMmad_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, ubC, blockShape);
+                    }
                     Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
                 }
                 isVecSetSyncCom_ = true;

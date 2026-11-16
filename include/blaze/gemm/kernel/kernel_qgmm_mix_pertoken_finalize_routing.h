@@ -405,7 +405,7 @@ private:
                                       asc::te::make_shape(blockM, k_));
             auto gmBlockB = gmB.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos),
                                       asc::te::make_shape(k_, blockN));
-            auto ubC = epilogueOp_.GetL0c2UbTensor(blockM, blockN);
+            auto ubC = epilogueOp_.GetAccumulatorTensor({blockM, blockN});
             mmadOp_(gmBlockA, gmBlockB, ubC, blockShape);
             Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
         }

@@ -18,6 +18,7 @@
 #include <cstdint>
 
 #include "kernel_basic_intf.h"
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/epilogue/tile/compute.h"
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
@@ -446,10 +447,15 @@ private:
                                       asc::te::make_shape(k_, blockN));
             auto gmBlockScaleB = gmScaleB.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos),
                                                 asc::te::make_shape(GetScaleK(k_), blockN));
-            auto ubC = epilogueOp_.GetL0c2UbTensor(blockM, blockN);
             auto gmBlockBias = gmBias.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos),
                                             asc::te::make_shape(static_cast<int64_t>(1), blockN));
-            blockMmad_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, ubC, blockShape);
+            if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
+                auto ubC = epilogueOp_.GetAccumulatorTensor({blockM, blockN});
+                blockMmad_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, ubC, blockShape);
+            } else {
+                auto ubC = epilogueOp_.GetL0c2UbTensor(blockM, blockN);
+                blockMmad_(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, gmBlockBias, ubC, blockShape);
+            }
             Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
         }
         isVecSetSyncCom_ = true;

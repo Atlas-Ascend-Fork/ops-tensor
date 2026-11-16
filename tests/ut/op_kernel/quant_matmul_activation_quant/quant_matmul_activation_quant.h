@@ -120,6 +120,32 @@ struct QuantMatmulSwishQuantTypes {
     using Kernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 };
 
+template <typename OutputType_>
+class LegacyGeluMxQuantEpilogue {
+public:
+    using Params = typename Blaze::Epilogue::Block::BlockEpilogueGeluMxQuant<OutputType_, float>::Params;
+    using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
+    using BlockCoord = asc::te::coord<int64_t, int64_t, int64_t, int64_t, int64_t>;
+    using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
+
+    __aicore__ inline void Init(const Params& params) {}
+    __aicore__ inline void UpdateNextProblem(const ProblemShape& problemShape) {}
+    __aicore__ inline void UpdateGlobalAddr(const BlockCoord& baseOffset) {}
+    __aicore__ inline void operator()(const BlockShape& blockShape, const BlockCoord& blockCoord) {}
+};
+
+template <typename OutputType_>
+__global__ __aicore__ void quant_matmul_activation_quant_legacy_epilogue_entry()
+{
+    using Types = QuantMatmulActivationQuantTypes<fp8_e4m3fn_t, fp8_e4m3fn_t, OutputType_>;
+    using Epilogue = LegacyGeluMxQuantEpilogue<OutputType_>;
+    using Kernel = Blaze::Gemm::Kernel::GemmUniversal<typename Types::ProblemShape, typename Types::BlockMmad, Epilogue,
+                                                      typename Types::BlockScheduler>;
+    typename Kernel::Params params{};
+    Kernel kernel;
+    kernel(params);
+}
+
 template <typename OutputType_, uint32_t ScaleAlg_>
 __global__ __aicore__ void quant_matmul_swish_quant_epilogue_setup_entry(GM_ADDR y, GM_ADDR yScale, float beta)
 {

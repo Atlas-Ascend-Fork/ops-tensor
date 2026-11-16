@@ -16,6 +16,7 @@
 #pragma once
 #include "kernel_basic_intf.h"
 #include "reg_compute/kernel_reg_compute_intf.h"
+#include "blaze/epilogue/block/block_epilogue_types.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/sync.h"
@@ -53,20 +54,6 @@ constexpr uint32_t MAX_SINGLE_SCALE_NUM = MAX_SINGLE_MN / BLOCK_SIZE;
 template <typename DataTypeOut_, typename DataTypeIn_>
 class BlockEpilogueGeluMxQuant {
 public:
-    __aicore__ inline BlockEpilogueGeluMxQuant()
-    {
-        if ASCEND_IS_AIV {
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
-        }
-    }
-
-    __aicore__ inline ~BlockEpilogueGeluMxQuant()
-    {
-        if ASCEND_IS_AIV {
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
-        }
-    }
-
     struct Params {
         GM_ADDR yGmAddr{nullptr};
         GM_ADDR yScaleGmAddr{nullptr};
@@ -87,8 +74,12 @@ public:
     using BlockCoord = asc::te::coord<int64_t, int64_t>;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
 
-    __aicore__ inline void Init(Params const& params);
+    using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
 
+    __aicore__ inline BlockEpilogueGeluMxQuant();
+    __aicore__ inline ~BlockEpilogueGeluMxQuant();
+    __aicore__ inline void Init(Params const& params);
+    __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
     __aicore__ inline void operator()(const BlockShape& blockShape, const BlockCoord& blockCoord);
     __aicore__ inline void UpdateGlobalAddr(const BlockCoord& baseOffset);
     __aicore__ inline void UpdateNextProblem(const ProblemShape& problemShape);
@@ -138,7 +129,7 @@ private:
     __gm__ int8_t* quantOutputGmAddr_{nullptr};
     __gm__ int8_t* quantScaleGmAddr_{nullptr};
 
-    int64_t n_;
+    int64_t n_{0};
     int64_t scaleRowStride_;
     uint32_t scalePaddingCols_;
     uint32_t scaleCols_;
@@ -153,6 +144,32 @@ private:
     uint8_t fp4RoundMode_;
     bool useErf_;
 };
+
+template <typename DataTypeOut_, typename DataTypeIn_>
+__aicore__ inline BlockEpilogueGeluMxQuant<DataTypeOut_, DataTypeIn_>::BlockEpilogueGeluMxQuant()
+{
+    if ASCEND_IS_AIV {
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
+    }
+}
+
+template <typename DataTypeOut_, typename DataTypeIn_>
+__aicore__ inline BlockEpilogueGeluMxQuant<DataTypeOut_, DataTypeIn_>::~BlockEpilogueGeluMxQuant()
+{
+    if ASCEND_IS_AIV {
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
+    }
+}
+
+template <typename DataTypeOut_, typename DataTypeIn_>
+__aicore__ inline auto BlockEpilogueGeluMxQuant<DataTypeOut_, DataTypeIn_>::GetAccumulatorTensor(
+    const AccumulatorTensorParams& params) const
+{
+    const int64_t rows = (params.rows + 1) & ~static_cast<int64_t>(1);
+    return asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(0),
+        asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(rows, Gemm::Align32(params.cols)));
+}
 
 template <typename DataTypeOut_, typename DataTypeIn_>
 __aicore__ inline void BlockEpilogueGeluMxQuant<DataTypeOut_, DataTypeIn_>::Init(Params const& params)

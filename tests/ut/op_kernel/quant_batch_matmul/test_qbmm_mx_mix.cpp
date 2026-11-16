@@ -128,11 +128,36 @@ public:
         ++trace_->initCount;
     }
 
-    __aicore__ inline void operator()(int64_t mPos, int64_t nPos, const Shape& block)
+    __aicore__ inline void operator()(int64_t mPos, int64_t nPos, const Shape& blockShape)
     {
         const uint32_t index = trace_->callCount++;
         if (index < MAX_CALLS) {
-            trace_->calls[index] = {mPos, nPos, asc::te::get<0>(block), asc::te::get<1>(block)};
+            trace_->calls[index] = {mPos, nPos, asc::te::get<0>(blockShape), asc::te::get<1>(blockShape)};
+        }
+    }
+
+private:
+    VectorTrace* trace_{nullptr};
+};
+
+class LegacyRecordingEpilogue {
+public:
+    struct Params {
+        GM_ADDR trace;
+    };
+
+    __aicore__ inline void Init(const Params& params)
+    {
+        const uint32_t core = AscendC::GetBlockIdx() / AscendC::GetTaskRation();
+        trace_ = &reinterpret_cast<Trace*>(params.trace)[core].vec[AscendC::GetSubBlockIdx()];
+        ++trace_->initCount;
+    }
+
+    __aicore__ inline void operator()(int64_t mPos, int64_t nPos, const Shape& blockShape)
+    {
+        const uint32_t index = trace_->callCount++;
+        if (index < MAX_CALLS) {
+            trace_->calls[index] = {mPos, nPos, asc::te::get<0>(blockShape), asc::te::get<1>(blockShape)};
         }
     }
 
@@ -141,7 +166,7 @@ private:
 };
 
 template <class A = fp8_e4m3fn_t, class B = fp8_e5m2_t, class C = float, bool TransA = false, bool TransB = false,
-          bool WeightNz = false, bool TransC = false, bool Atomic = false>
+          bool WeightNz = false, bool TransC = false, bool Atomic = false, bool LegacyEpilogue = false>
 struct Types {
     static constexpr bool FP4 = Blaze::Gemm::IsFp4<A>();
     static constexpr bool TRANS_A = TransA, TRANS_B = TransB, WEIGHT_NZ = WeightNz, TRANS_C = TransC;
@@ -157,7 +182,8 @@ struct Types {
     using Mmad = RecordingMmad<A, B, C, LayoutA, LayoutB, LayoutC, Atomic>;
     using Scheduler = Blaze::Gemm::Block::BlockSchedulerQuantBatchMatmulV3<Shape, Blaze::Gemm::NONE_FULL_LOAD_MODE,
                                                                            LayoutA, LayoutB, A>;
-    using Kernel = Blaze::Gemm::Kernel::GemmUniversal<Shape, Mmad, RecordingEpilogue, Scheduler>;
+    using Epilogue = AscendC::Std::conditional_t<LegacyEpilogue, LegacyRecordingEpilogue, RecordingEpilogue>;
+    using Kernel = Blaze::Gemm::Kernel::GemmUniversal<Shape, Mmad, Epilogue, Scheduler>;
 };
 
 struct Case {
@@ -370,6 +396,14 @@ TEST(QbmmMxMix, SingleBatchPairsEachCubeTileWithBothAivSubcores)
     cfg.isBias = 1;
     cfg.dbL0C = 2;
     RunAndCheck<Types<>>(cfg, 4);
+}
+
+TEST(QbmmMxMix, LegacyEpilogueKeepsScalarCallInterface)
+{
+    Case cfg;
+    cfg.isBias = 1;
+    using LegacyTypes = Types<fp8_e4m3fn_t, fp8_e5m2_t, float, false, false, false, false, false, true>;
+    RunAndCheck<LegacyTypes>(cfg, 4);
 }
 
 TEST(QbmmMxMix, FourDimensionalBroadcastAdvancesInputsScalesAndBatchedBias)

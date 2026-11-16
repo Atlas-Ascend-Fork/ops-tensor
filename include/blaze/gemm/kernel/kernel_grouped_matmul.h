@@ -19,6 +19,7 @@
 #include "kernel_operator_list_tensor_intf.h"
 #include "tensor_api/tensor.h"
 
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_mmad_matmul_basic.h"
@@ -623,9 +624,15 @@ private:
             auto gmBlockBias = gmBias.slice(asc::te::make_coord(static_cast<int64_t>(0), blockNOffset),
                                             asc::te::make_shape(static_cast<int64_t>(1), blockN));
             if constexpr (ENABLE_GELU) {
-                auto ubBlockC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, EpilogueInputType>(0),
-                                                     MakeLayoutEpilogueInput{}(blockM, blockN));
-                blockMmad_(gmBlockA, gmBlockB, gmBlockBias, ubBlockC, blockShape);
+                if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
+                    auto ubBlockC = blockEpilogue_.GetAccumulatorTensor({blockM, blockN, 0});
+                    blockMmad_(gmBlockA, gmBlockB, gmBlockBias, ubBlockC, blockShape);
+                } else {
+                    auto ubBlockC = asc::te::make_tensor(
+                        asc::te::make_mem_ptr<asc::te::location::ub, EpilogueInputType>(0),
+                        MakeLayoutEpilogueInput{}(blockM, blockN));
+                    blockMmad_(gmBlockA, gmBlockB, gmBlockBias, ubBlockC, blockShape);
+                }
             } else {
                 blockMmad_(gmBlockA, gmBlockB, gmBlockBias, gmBlockC, blockShape);
             }

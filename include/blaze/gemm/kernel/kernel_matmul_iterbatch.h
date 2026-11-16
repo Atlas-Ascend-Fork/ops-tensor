@@ -104,7 +104,10 @@ public:
                                       static_cast<uint64_t>(params.schedulerParams.iterBatchL0)) *
                               mnL0Cnt;
             }
-            epilogueOp.Init(params.epilogueParams, m_, n_, totalTiles);
+            auto epilogueParams = params.epilogueParams;
+            epilogueParams.problemShape = {static_cast<int64_t>(m_), static_cast<int64_t>(n_)};
+            epilogueParams.totalTiles = totalTiles;
+            epilogueOp.Init(epilogueParams);
         }
         BlockMmadParams mmadParams = params.mmadParams;
         blockMmadOp.Init(mmadParams);

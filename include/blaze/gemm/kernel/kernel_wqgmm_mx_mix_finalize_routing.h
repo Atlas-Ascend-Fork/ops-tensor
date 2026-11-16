@@ -673,7 +673,7 @@ private:
     __aicore__ inline auto MakeFixpipeUbTensor(uint64_t mRows, uint64_t nCols)
     {
         constexpr uint64_t FIXPIPE_BASE = 80 * GMM_FR_WQ_UB_KB;
-        // Mirror the MX finalize-routing GetL0c2UbTensor contract: an NDExt frame layout
+        // Mirror the MX finalize-routing GetAccumulatorTensor contract: an NDExt frame layout
         // whose row pitch is 32-element aligned, consumed by copy_l0c_to_ub with split-M.
         const uint64_t copyRows = CeilAlign(mRows, static_cast<uint64_t>(2));
         const uint64_t copyCols = Blaze::Gemm::Align32(nCols);

@@ -200,10 +200,10 @@ __aicore__ inline void Init(const Params& params)
 
 ### operator函数
 ```
-__aicore__ inline void operator()(
-    const BlockShape& blockShape,   // 当前 tile 的实际 shape
-    const BlockCoord& blockCoord);  // 输出偏移 {yOffset, yScaleOffset}
+__aicore__ inline void operator()(const BlockShape& blockShape, const BlockCoord& blockCoord)
 ```
+`blockCoord` 描述当前 tile 的 y 和 yScale 偏移。
+
 执行流程：
 
 1. 两个 AIV 沿 M 分工；零行 AIV 通知输入区可复用后返回。
@@ -213,7 +213,7 @@ __aicore__ inline void operator()(
 
 ### UpdateGlobalAddr函数
 ```
-__aicore__ inline void UpdateGlobalAddr(const BlockCoord &baseOffset)
+__aicore__ inline void UpdateGlobalAddr(const BlockCoord& baseOffset)
 ```
 按 `{yOffset, yScaleOffset}` 更新当前 batch 的 GM 输出基址。
 

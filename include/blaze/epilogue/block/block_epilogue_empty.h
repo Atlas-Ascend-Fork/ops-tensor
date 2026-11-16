@@ -29,18 +29,27 @@ public:
         Params() = default;
     };
 
-    __aicore__ inline BlockEpilogueEmpty() {}
-
-    __aicore__ inline void Run() { return; }
-
-    __aicore__ inline void operator()(Params const& params) { Run(); }
-
+    __aicore__ inline BlockEpilogueEmpty();
+    __aicore__ inline void Init(const Params& params);
+    __aicore__ inline void Run();
+    __aicore__ inline void operator()(Params const& params);
     __aicore__ inline void operator()(BlockShape const& blockShape, BlockCoord const& blockCoord,
-                                      int64_t dstStartOffset = 0, int64_t srcStartOffset = 0)
-    {
-        return;
-    }
+                                      int64_t dstStartOffset = 0, int64_t srcStartOffset = 0);
 };
+
+__aicore__ inline BlockEpilogueEmpty::BlockEpilogueEmpty() {}
+
+__aicore__ inline void BlockEpilogueEmpty::Init(const Params& params) { return; }
+
+__aicore__ inline void BlockEpilogueEmpty::Run() { return; }
+
+__aicore__ inline void BlockEpilogueEmpty::operator()(Params const& params) { Run(); }
+
+__aicore__ inline void BlockEpilogueEmpty::operator()(BlockShape const& blockShape, BlockCoord const& blockCoord,
+                                                      int64_t dstStartOffset, int64_t srcStartOffset)
+{
+    return;
+}
 } // namespace Block
 } // namespace Epilogue
 

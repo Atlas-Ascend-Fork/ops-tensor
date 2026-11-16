@@ -79,6 +79,8 @@ void CheckPublicAssembly()
     static_assert(
         std::is_same_v<decltype(std::declval<Epilogue&>().Init(std::declval<const typename Epilogue::Params&>())),
                        void>);
+    static_assert(!std::is_void_v<decltype(std::declval<const Epilogue&>().GetAccumulatorTensor(
+                      std::declval<const typename Epilogue::AccumulatorTensorParams&>()))>);
     static_assert(std::is_same_v<decltype(std::declval<Epilogue&>().UpdateNextProblem(
                                      std::declval<const typename Epilogue::ProblemShape&>())),
                                  void>);
@@ -345,6 +347,14 @@ TEST(QuantMatmulActivationQuantTest, EpilogueSetupCoversAlgorithmsAndRoundModes)
     RunEpilogueSetup<fp8_e5m2_t, GeluAlg::ERF, QuantAlg::BLAS, ROUND_MODE_FP4::RINT>(0.0F);
     RunEpilogueSetup<fp4x2_e2m1_t, GeluAlg::ERF, QuantAlg::DYN_DTYPE_RANGE, ROUND_MODE_FP4::FLOOR>(7.0F);
     RunEpilogueSetup<fp4x2_e2m1_t, GeluAlg::TANH, QuantAlg::OCP, ROUND_MODE_FP4::ROUND>(0.0F);
+}
+
+TEST(QuantMatmulActivationQuantTest, LegacyGeluEpilogueKeepsKernelCompatibility)
+{
+    using Epilogue = LegacyGeluMxQuantEpilogue<fp8_e4m3fn_t>;
+    static_assert(!Blaze::Epilogue::Block::HasGetAccumulatorTensor<Epilogue>::value);
+    auto kernel = quant_matmul_activation_quant_legacy_epilogue_entry<fp8_e4m3fn_t>;
+    EXPECT_NE(kernel, nullptr);
 }
 
 TEST(QuantMatmulActivationQuantTest, SwishAssemblyCoversNdDtypesTransposesAndLoadModes)

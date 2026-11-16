@@ -17,6 +17,7 @@
 
 #include "kernel_basic_intf.h"
 #include "reg_compute/kernel_reg_compute_intf.h"
+#include "blaze/epilogue/block/block_epilogue_types.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "tensor_api/tensor.h"
@@ -91,18 +92,16 @@ public:
     enum class L0c2UbTensorType : uint8_t {
         SWISH_INPUT = 0,
         GATE_INPUT = 1,
+        CONCATENATED_INPUT = 2,
     };
+    using UbTensorKind = L0c2UbTensorType;
 
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t>;
 
-    /*! \brief Element offsets of the current block in Y and YScale. */
-    struct OutputOffsets {
-        int64_t yOffset{0};
-        int64_t yScaleOffset{0};
-    };
+    using OutputOffsets = Blaze::Epilogue::Block::OutputOffsets;
 
-    /*! \brief Runtime output addresses, tile sizes, and fused-operation attributes. */
+    /*! \brief Runtime output addresses and fused-operation attributes. */
     struct Params {
         GM_ADDR yGmAddr{nullptr};      //!< Required Y address; validated by the upper layer.
         GM_ADDR yScaleGmAddr{nullptr}; //!< Required for MX-quantized Y; unused for direct BF16 Y.
@@ -119,45 +118,21 @@ public:
         Params() = default;
     };
 
-    __aicore__ inline BlockEpilogueSwigluMxQuant()
-    {
-        if ASCEND_IS_AIC {
-            return;
-        }
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
-    }
+    using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
 
-    __aicore__ inline ~BlockEpilogueSwigluMxQuant()
-    {
-        if ASCEND_IS_AIC {
-            return;
-        }
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
-    }
-
-    __aicore__ inline auto GetL0c2UbTensor(int64_t rows, int64_t cols, L0c2UbTensorType tensorType)
-    {
-        // The Split-M Fixpipe instruction requires an even mSize. The epilogue still receives the original
-        // logical row count and ignores the padding row on sub-block 1.
-        const uint64_t copyRows = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(rows), SPLIT_M_ALIGN);
-        const auto
-            layoutOutUb = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn, AscendC::Std::Int<OUTPUT_C0_SIZE>>(
-                copyRows, static_cast<uint64_t>(cols));
-        const uint64_t ubOffset = static_cast<uint64_t>(tensorType) * INPUT_UB_BUFFER_BYTES;
-        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(ubOffset), layoutOutUb);
-    }
-
-    __aicore__ inline auto GetConcatL0c2UbTensor(int64_t rows, int64_t cols)
-    {
-        const uint64_t copyRows = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(rows), SPLIT_M_ALIGN);
-        const auto
-            layoutOutUb = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn, AscendC::Std::Int<OUTPUT_C0_SIZE>>(
-                copyRows, static_cast<uint64_t>(cols) * Constant::SWIGLU_HALF_COUNT);
-        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(0), layoutOutUb);
-    }
-
+    __aicore__ inline BlockEpilogueSwigluMxQuant();
+    __aicore__ inline ~BlockEpilogueSwigluMxQuant();
     /*! \brief Binds output addresses, attributes, and UB layout. */
     __aicore__ inline void Init(Params const& params);
+    __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
+
+    // Compatibility interfaces retained for existing callers.
+    [[deprecated("GetL0c2UbTensor接口在CANN 9.2.0版本标记废弃，将在2027年11月10日之后的版本删除，"
+                 "替换为GetAccumulatorTensor(const AccumulatorTensorParams&)")]]
+    __aicore__ inline auto GetL0c2UbTensor(int64_t rows, int64_t cols, L0c2UbTensorType tensorType);
+    [[deprecated("GetConcatL0c2UbTensor接口在CANN 9.2.0版本标记废弃，将在2027年11月10日之后的版本删除，"
+                 "替换为GetAccumulatorTensor(const AccumulatorTensorParams&)")]]
+    __aicore__ inline auto GetConcatL0c2UbTensor(int64_t rows, int64_t cols);
     /*! \brief Processes one logical half-width block and writes its Y/YScale results. */
     __aicore__ inline void operator()(const BlockShape& blockShape, const OutputOffsets& outputOffsets);
     /*! \brief Updates the current post-SwiGLU problem shape. */
@@ -166,11 +141,10 @@ public:
     __aicore__ inline void UpdateGlobalAddr(const OutputOffsets& baseOffsets);
 
 private:
+    __aicore__ inline auto MakeUbTensor(const AccumulatorTensorParams& params, UbTensorKind kind) const;
+
     template <class T>
-    __aicore__ inline static __ubuf__ T* GetUbAddr(uint64_t byteOffset)
-    {
-        return reinterpret_cast<__ubuf__ T*>(asc_get_phy_buf_addr(0) + byteOffset);
-    }
+    __aicore__ inline static __ubuf__ T* GetUbAddr(uint64_t byteOffset);
 
     __aicore__ inline void CopyOutputFromUb2Gm(uint64_t blockCount, int64_t gmOffset);
     __aicore__ inline void CopyScaleFromUb2Gm(uint64_t blockCount, int64_t gmOffset);
@@ -209,14 +183,84 @@ private:
 };
 
 template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_,
+                                             DirectBf16Output_>::BlockEpilogueSwigluMxQuant()
+{
+    if ASCEND_IS_AIC {
+        return;
+    }
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
+}
+
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_,
+                                             DirectBf16Output_>::~BlockEpilogueSwigluMxQuant()
+{
+    if ASCEND_IS_AIC {
+        return;
+    }
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
+}
+
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline auto
+BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16Output_>::GetAccumulatorTensor(
+    const AccumulatorTensorParams& params) const
+{
+    return MakeUbTensor(params, UbTensorKind::CONCATENATED_INPUT);
+}
+
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline auto BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_,
+                                                  DirectBf16Output_>::GetL0c2UbTensor(int64_t rows, int64_t cols,
+                                                                                      L0c2UbTensorType tensorType)
+{
+    return MakeUbTensor({rows, cols}, tensorType);
+}
+
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline auto BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_,
+                                                  DirectBf16Output_>::GetConcatL0c2UbTensor(int64_t rows, int64_t cols)
+{
+    return MakeUbTensor({rows, cols}, UbTensorKind::CONCATENATED_INPUT);
+}
+
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+__aicore__ inline auto
+BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16Output_>::MakeUbTensor(
+    const AccumulatorTensorParams& params, UbTensorKind kind) const
+{
+    // The Split-M Fixpipe instruction requires an even mSize. The epilogue still receives the original
+    // logical row count and ignores the padding row on sub-block 1.
+    const uint64_t copyRows = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(params.rows), SPLIT_M_ALIGN);
+    const uint64_t copyCols = static_cast<uint64_t>(params.cols) *
+                              (kind == UbTensorKind::CONCATENATED_INPUT ? Constant::SWIGLU_HALF_COUNT : 1);
+    const auto layoutOutUb = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn, AscendC::Std::Int<OUTPUT_C0_SIZE>>(
+        copyRows, copyCols);
+    const uint64_t ubOffset = kind == UbTensorKind::CONCATENATED_INPUT ?
+                                  0 :
+                                  static_cast<uint64_t>(kind) * INPUT_UB_BUFFER_BYTES;
+    return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(ubOffset), layoutOutUb);
+}
+
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
+template <class T>
+__aicore__ inline __ubuf__ T*
+BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16Output_>::GetUbAddr(uint64_t byteOffset)
+{
+    return reinterpret_cast<__ubuf__ T*>(asc_get_phy_buf_addr(0) + byteOffset);
+}
+
+template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>
 __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, DataTypeScale_, DirectBf16Output_>::Init(
     Params const& params)
 {
     if ASCEND_IS_AIC {
         return;
     }
-    AscendC::SetCtrlSpr<Constant::FLOAT_OVERFLOW_MODE_CTRL, Constant::FLOAT_OVERFLOW_MODE_CTRL>(0);
     params_ = &params;
+    SetupUbLayout();
+    AscendC::SetCtrlSpr<Constant::FLOAT_OVERFLOW_MODE_CTRL, Constant::FLOAT_OVERFLOW_MODE_CTRL>(0);
     subBlockIdx_ = static_cast<uint32_t>(AscendC::GetSubBlockIdx());
 
     if constexpr (AscendC::IsSameType<DataTypeOut, fp8_e4m3fn_t>::value) {
@@ -230,7 +274,6 @@ __aicore__ inline void BlockEpilogueSwigluMxQuant<DataTypeOut_, DataTypeIn_, Dat
         fpEmax_ = Constant::FP8_E4M3_MAX_EXP;
         invDstTypeMax_ = Constant::RECIPROCAL_NUMERATOR / Constant::FP8_E4M3_MAX_VALUE;
     }
-    SetupUbLayout();
 }
 
 template <typename DataTypeOut_, typename DataTypeIn_, typename DataTypeScale_, bool DirectBf16Output_>

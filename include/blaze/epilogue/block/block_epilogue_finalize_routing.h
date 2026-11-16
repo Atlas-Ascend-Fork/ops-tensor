@@ -21,6 +21,7 @@
 #if defined(__NPU_ARCH__)
 #include "kernel_basic_intf.h"
 #include "reg_compute/kernel_reg_compute_intf.h"
+#include "blaze/epilogue/block/block_epilogue_types.h"
 #include "blaze/epilogue/tile/compute.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "tensor_api/tensor.h"
@@ -151,6 +152,8 @@ public:
     using BlockCoord = AscendC::Coord<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>;
     using ProblemShape = AscendC::Shape<int64_t, int64_t, int64_t>; // m, n, k
 
+    using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
+
     __aicore__ inline BlockEpilogueFinalizeRouting() {}
 
     __aicore__ inline ~BlockEpilogueFinalizeRouting()
@@ -194,11 +197,6 @@ public:
         InitBufferLayout();
     }
 
-    __aicore__ inline auto GetL0c2UbTensor()
-    {
-        return AscendC::LocalTensor<DataTypeIn>(AscendC::TPosition::VECIN, 0, GMMFR_DQ_MAX_SINGLE_MN);
-    }
-
     __aicore__ inline void UpdateNextProblem(const ProblemShape& problemShape)
     {
         n_ = asc::te::get<Blaze::Gemm::MNK_N>(problemShape);
@@ -214,10 +212,10 @@ public:
     }
 
     // AIC and AIV must use the same row pitch and physical UB base.
-    __aicore__ inline auto GetL0c2UbTensor(int64_t rows, int64_t cols)
+    __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const
     {
-        const uint64_t copyRows = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(rows), FIXPIPE_ROW_ALIGN);
-        const uint64_t copyCols = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(cols), ACC_ROW_ALIGN);
+        const uint64_t copyRows = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(params.rows), FIXPIPE_ROW_ALIGN);
+        const uint64_t copyCols = Blaze::Gemm::CeilAlign(static_cast<uint64_t>(params.cols), ACC_ROW_ALIGN);
         if constexpr (IS_PERTOKEN) {
             const auto layout = asc::te::make_frame_layout<asc::te::nd_layout_ptn>(static_cast<int64_t>(copyRows),
                                                                                    static_cast<int64_t>(copyCols));

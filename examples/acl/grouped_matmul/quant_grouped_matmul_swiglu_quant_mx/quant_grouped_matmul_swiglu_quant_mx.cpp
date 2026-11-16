@@ -122,13 +122,12 @@ __global__ __aicore__ void GmmsqMxKernel(GM_ADDR x, GM_ADDR weight, GM_ADDR weig
         kAL1,         kBL1, scaleKAL1, scaleKBL1, dbL0C, GROUP_TYPE_M, GROUP_LIST_TYPE_OFFSET,
         SINGLE_WEIGHT};
     typename Mmad::Params mmAddressParams{x, weight, nullptr, nullptr, xScale, weightScale};
-    typename Epilogue::Params epilogueParams{y, yScale, baseM, baseN};
+    typename Epilogue::Params epilogueParams{y, yScale};
     epilogueParams.swigluMode = SWIGLU_MODE;
     epilogueParams.clampLimit = clampLimit;
     epilogueParams.gluAlpha = gluAlpha;
     epilogueParams.gluBias = gluBias;
     epilogueParams.scaleAlg = scaleAlg;
-    epilogueParams.dstTypeMax = dstTypeMax;
 
     typename Kernel::Params params{{m, n, k, SINGLE_BATCH}, mmAddressParams, epilogueParams, groupList, gmmTiling};
     Kernel kernel;

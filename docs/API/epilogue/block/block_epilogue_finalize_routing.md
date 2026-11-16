@@ -43,10 +43,11 @@ class BlockEpilogueFinalizeRouting;
 
 ## 调用接口
 
-所有模式通过 `Init(params)` 初始化组件，通过 `GetL0c2UbTensor(rows, cols)` 获取 Fixpipe 的 UB 目标。AIC 与 AIV 须使用相同的 UB 基址和行跨度。MX 也提供无参 `GetL0c2UbTensor()`，返回累加区的 LocalTensor。
+所有模式通过 `Init(params)` 初始化组件，通过 `GetAccumulatorTensor({rows, cols})` 获取 Fixpipe 的 UB 目标。AIC 与 AIV 须使用相同的 UB 基址和行跨度。
 
-- **MX**。每组调用 `UpdateNextProblem(problemShape)` 设置输出列数，并调用 `UpdateGlobalAddr(baseOffset)` 更新元数据地址。分组偏移使用 `baseOffset` 的 logit 坐标，同时推进 logit 和 rowIndex 的 GM 基址。随后调用 `operator()(blockShape, blockCoord)` 消费 tile，返回前等待该 tile 写回完成。
-- **Pertoken 和 A8W4**。调用 `operator()(problemShape, blockShape, blockCoord, baseOffset, groupAccumM = 0)` 消费 tile。`problemShape` 的 N 为完整输出列数。`BlockCoord` 的坐标依次为输出列、bias、ScaleB、ScaleA、logit 和 rowIndex 的元素偏移。`baseOffset` 表示分组或分段的基址偏移，`blockCoord` 表示 tile 内寻址所用的偏移。A8W4 延后消费时传入待消费 tile 所属分组的偏移。
+MX 路径调用 `operator()(blockShape, blockCoord)` 消费 tile。Pertoken 和 A8W4 路径调用 `operator()(problemShape, blockShape, blockCoord, baseOffset, groupAccumM)`；`problemShape` 的 N 为完整输出列数，`blockCoord` 表示 tile 内寻址偏移，`baseOffset` 表示分组或分段的基址偏移。
+
+`BlockCoord` 的字段依次对应输出列、bias、ScaleB、ScaleA、logit 和 rowIndex 的元素偏移。每次调用都会设置输出列数并更新分组输入地址，MX 返回前等待该 tile 写回完成，A8W4 延后消费时须传入待消费 tile 所属分组的偏移。
 
 ### A8W4 路由参数预取
 

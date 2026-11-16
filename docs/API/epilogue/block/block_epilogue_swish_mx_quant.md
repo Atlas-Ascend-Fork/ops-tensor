@@ -31,7 +31,7 @@ struct Params {
 `Mode` 当前仅支持 `Scalar`；`PerChannel` 保留枚举值，实例化时编译报错。`beta` 为所有元素共用的有限 FP32 标量，默认 1（SiLU）。
 
 `DataTypeIn_` 为 `float`，`DataTypeOut_` 为 `fp8_e4m3fn_t` 或 `fp8_e5m2_t`，scale 以 E8M0 字节存储。
-`baseM/baseN` 与上层 tiling 一致，当前 tile 的实际尺寸由 `blockShape` 传入。
+`baseM/baseN` 与上层 tiling 一致，当前 tile 的实际尺寸由 `operator()` 的 `blockShape` 入参传入。
 `Init` 保存 Params 引用，其生命周期须覆盖所有 tile。
 
 ## Shape 与尾块
@@ -55,7 +55,7 @@ N 可以是任意正数。非末尾 N tile 的起点和宽度须按 32 个元素
 | `Init(const Params&)` | 保存 Params 引用并缓存 scale 算法和 β，初始化输出地址；AIC 侧直接返回 |
 | `UpdateNextProblem(const ProblemShape&)` | 读取完整 N，计算 `yScale` 每行跨度 |
 | `UpdateGlobalAddr(const BlockCoord&)` | 按 `{yOffset, yScaleOffset}` 更新 batch 输出基址 |
-| `operator()(const BlockShape&, const BlockCoord&)` | 读取当前 M/N，计算激活与 MX 量化并写回；二维坐标为 `{yOffset, yScaleOffset}` |
+| `operator()(const BlockShape&, const BlockCoord&)` | 读取当前 M/N 和 tile 偏移，计算激活与 MX 量化并写回 |
 
 ## Kernel 集成与资源边界
 

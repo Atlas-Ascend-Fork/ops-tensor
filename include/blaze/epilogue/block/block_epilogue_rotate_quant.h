@@ -19,6 +19,7 @@
 #else
 #include "kernel_operator.h"
 #endif
+#include "blaze/epilogue/block/block_epilogue_types.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/tile/compute.h"
@@ -66,10 +67,11 @@ public:
         float invDstTypeMax{0.0f};
     };
 
-    __aicore__ inline BlockEpilogueRotateQuant() {}
+    using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
 
+    __aicore__ inline BlockEpilogueRotateQuant();
     __aicore__ inline void Init(Params const& params);
-
+    __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
     __aicore__ inline void operator()(const BlockShape& blockShape, const BlockCoord& blockCoord);
 
 private:
@@ -149,6 +151,21 @@ private:
     uint16_t fpEmax_ = 0;
     uint16_t addValueBits_ = 0;
 };
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_,
+                                           FusionOp_>::BlockEpilogueRotateQuant()
+{}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline auto
+BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::GetAccumulatorTensor(
+    const AccumulatorTensorParams& params) const
+{
+    const int64_t alignN = Gemm::CeilAlign(params.cols, static_cast<int64_t>(Gemm::BLOCK_CUBE));
+    return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(X_UB_OFFSET),
+                                asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(params.rows, alignN));
+}
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
 __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::Init(

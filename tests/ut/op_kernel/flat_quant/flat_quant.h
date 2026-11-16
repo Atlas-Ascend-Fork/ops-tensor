@@ -92,6 +92,27 @@ public:
     __aicore__ inline void operator()(uint64_t, uint64_t) {}
 };
 
+template <typename DataTypeOut_, typename DataTypeIn_ = float, typename DataTypeScale_ = float>
+class KernelLegacySmokeEpilogue {
+public:
+    using DataTypeOut = DataTypeOut_;
+    using DataTypeIn = DataTypeIn_;
+    using DataTypeScale = DataTypeScale_;
+    using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>;
+    using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
+
+    struct Params {
+        GM_ADDR outGmAddr{nullptr};
+        GM_ADDR scaleGmAddr{nullptr};
+        ProblemShape problemShape{};
+        float dstTypeMax{0.0f};
+        float invDstTypeMax{0.0f};
+    };
+
+    __aicore__ inline void Init(const Params&) {}
+    __aicore__ inline void operator()(uint64_t, uint64_t) {}
+};
+
 template <typename X_TYPE, typename Y_TYPE, typename SCALE_TYPE, typename C_LAYOUT>
 struct FlatQuantBlazeTypes {
     using AType = X_TYPE;
@@ -121,20 +142,22 @@ struct FlatQuantBlazeTypes {
                                                                       BlockScheduler>;
 };
 
-template <typename X_TYPE, typename Y_TYPE, typename SCALE_TYPE, typename C_LAYOUT>
+template <typename X_TYPE, typename Y_TYPE, typename SCALE_TYPE, typename C_LAYOUT, bool USE_LEGACY_EPILOGUE = false>
 struct KernelSmokeTypes {
     using PublicTypes = FlatQuantBlazeTypes<X_TYPE, Y_TYPE, SCALE_TYPE, C_LAYOUT>;
-    using BlockEpilogue = KernelSmokeEpilogue<Y_TYPE, X_TYPE, SCALE_TYPE>;
+    using BlockEpilogue = AscendC::Std::conditional_t<USE_LEGACY_EPILOGUE,
+                                                      KernelLegacySmokeEpilogue<Y_TYPE, X_TYPE, SCALE_TYPE>,
+                                                      KernelSmokeEpilogue<Y_TYPE, X_TYPE, SCALE_TYPE>>;
     using Kernel = Blaze::Attention::Kernel::AttentionUniversal<typename PublicTypes::ProblemShape,
                                                                 typename PublicTypes::BlockMmad, BlockEpilogue,
                                                                 typename PublicTypes::BlockScheduler>;
 };
 
-template <typename X_TYPE, typename Y_TYPE, typename SCALE_TYPE, typename C_LAYOUT>
+template <typename X_TYPE, typename Y_TYPE, typename SCALE_TYPE, typename C_LAYOUT, bool USE_LEGACY_EPILOGUE = false>
 __aicore__ inline void RunFlatQuantBlaze(GM_ADDR aGM, GM_ADDR p1GM, GM_ADDR p2GM, GM_ADDR cGM, GM_ADDR scaleGM,
                                          GM_ADDR workspaceGM, const FlatQuantTilingData& tilingData)
 {
-    using Types = KernelSmokeTypes<X_TYPE, Y_TYPE, SCALE_TYPE, C_LAYOUT>;
+    using Types = KernelSmokeTypes<X_TYPE, Y_TYPE, SCALE_TYPE, C_LAYOUT, USE_LEGACY_EPILOGUE>;
     using Kernel = typename Types::Kernel;
     using Params = typename Kernel::Params;
 
@@ -165,10 +188,11 @@ __aicore__ inline void RunFlatQuantBlaze(GM_ADDR aGM, GM_ADDR p1GM, GM_ADDR p2GM
 }
 } // namespace FlatQuantUT
 
-template <typename X_TYPE, typename Y_TYPE, typename SCALE_TYPE, typename C_LAYOUT = asc::te::nd_ext_layout_ptn>
+template <typename X_TYPE, typename Y_TYPE, typename SCALE_TYPE, typename C_LAYOUT = asc::te::nd_ext_layout_ptn,
+          bool USE_LEGACY_EPILOGUE = false>
 __global__ __aicore__ void FlatQuantKernelEntry(GM_ADDR x, GM_ADDR p1, GM_ADDR p2, GM_ADDR out, GM_ADDR quant_scale,
                                                 GM_ADDR workspace, GM_ADDR tiling)
 {
-    FlatQuantUT::RunFlatQuantBlaze<X_TYPE, Y_TYPE, SCALE_TYPE, C_LAYOUT>(
+    FlatQuantUT::RunFlatQuantBlaze<X_TYPE, Y_TYPE, SCALE_TYPE, C_LAYOUT, USE_LEGACY_EPILOGUE>(
         x, p1, p2, out, quant_scale, workspace, *reinterpret_cast<const FlatQuantTilingData*>(tiling));
 }

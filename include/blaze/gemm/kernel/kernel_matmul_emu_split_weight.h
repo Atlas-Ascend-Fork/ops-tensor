@@ -17,6 +17,7 @@
 
 #include "kernel_basic_intf.h"
 
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/epilogue/block/block_epilogue_muls_add.h"
 #include "blaze/gemm/block/block_mmad_matmul_emu_split_weight.h"
 #include "blaze/gemm/utils/common_utils.h"
@@ -76,6 +77,7 @@ public:
 private:
     BlockMmad blockMmadOp_;
     BlockEpilogue epilogueOp_;
+    BlockEpilogueParams epilogueParams_;
 
     int64_t m_{1};
     int64_t n_{1};
@@ -103,9 +105,15 @@ private:
             blockMmadOp_.Init(params.mmadParams);
         }
         if ASCEND_IS_AIV {
-            ProblemShape problemShape4 = {m_, n_, k_, 1};
-            epilogueOp_.Init(params.epilogueParams, static_cast<int64_t>(params.mmadParams.baseM),
-                             static_cast<int64_t>(params.mmadParams.baseN), problemShape4);
+            if constexpr (Blaze::Epilogue::Block::HasParamsOnlyInit<BlockEpilogue, BlockEpilogueParams>::value) {
+                epilogueParams_ = params.epilogueParams;
+                epilogueParams_.problemShape = {m_, n_, k_, 1};
+                epilogueOp_.Init(epilogueParams_);
+            } else {
+                ProblemShape problemShape = {m_, n_, k_, 1};
+                epilogueOp_.Init(params.epilogueParams, static_cast<int64_t>(params.mmadParams.baseM),
+                                 static_cast<int64_t>(params.mmadParams.baseN), problemShape);
+            }
         }
     }
 
@@ -154,26 +162,27 @@ private:
                 auto gmBLow = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(wLowGmAddr_),
                                                    layoutBLow);
 
-                auto curNUbAlign = CeilAlign(curN, static_cast<int64_t>(C0_SIZE_fp32));
-
-                constexpr uint64_t UB_HALF_BYTES = AscendC::TOTAL_UB_SIZE / DOUBLE_BUFFER_COUNT;
-
-                auto layoutUBLow = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn,
-                                                              AscendC::Std::Int<C0_SIZE_L0C>>(curM, curNUbAlign);
-                auto ubBlockCLow = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(0),
-                                                        layoutUBLow);
-
-                auto layoutUBHigh = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn,
-                                                               AscendC::Std::Int<C0_SIZE_L0C>>(curM, curNUbAlign);
-                auto ubBlockCHigh = asc::te::make_tensor(
-                    asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(UB_HALF_BYTES), layoutUBHigh);
-
                 auto gmBlockA = gmA.slice(asc::te::make_coord(mPos, kPos), asc::te::make_shape(curM, k_));
                 auto gmBlockBHigh = gmBHigh.slice(asc::te::make_coord(kPos, nPos), asc::te::make_shape(k_, curN));
                 auto gmBlockBLow = gmBLow.slice(asc::te::make_coord(kPos, nPos), asc::te::make_shape(k_, curN));
 
-                blockMmadOp_(gmBlockA, gmBlockBHigh, gmBlockBLow, ubBlockCHigh, ubBlockCLow, singleShape,
-                             useSubBlockOne);
+                if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
+                    auto ubBlockCLow = epilogueOp_.GetAccumulatorTensor({curM, curN, 0});
+                    auto ubBlockCHigh = epilogueOp_.GetAccumulatorTensor({curM, curN, 1});
+                    blockMmadOp_(gmBlockA, gmBlockBHigh, gmBlockBLow, ubBlockCHigh, ubBlockCLow, singleShape,
+                                 useSubBlockOne);
+                } else {
+                    auto curNUbAlign = CeilAlign(curN, static_cast<int64_t>(C0_SIZE_fp32));
+                    constexpr uint64_t UB_HALF_BYTES = AscendC::TOTAL_UB_SIZE / DOUBLE_BUFFER_COUNT;
+                    auto layoutUB = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn,
+                                                               AscendC::Std::Int<C0_SIZE_L0C>>(curM, curNUbAlign);
+                    auto ubBlockCLow = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(0),
+                                                            layoutUB);
+                    auto ubBlockCHigh = asc::te::make_tensor(
+                        asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(UB_HALF_BYTES), layoutUB);
+                    blockMmadOp_(gmBlockA, gmBlockBHigh, gmBlockBLow, ubBlockCHigh, ubBlockCLow, singleShape,
+                                 useSubBlockOne);
+                }
 
                 enableCVSync[targetSubBlockId] = true;
                 Sync::NotifyVector<AIC_SYNC_AIV_MODE_4, PIPE_FIX>(AIC_SYNC_AIV_FLAG + flagOffset);

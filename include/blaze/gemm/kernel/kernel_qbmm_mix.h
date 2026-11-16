@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
@@ -17,6 +17,7 @@
 #pragma once
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "kernel_basic_intf.h"
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/sync.h"
 #include "tensor_api/tensor.h"
@@ -186,14 +187,19 @@ private:
             auto gmBlockA = gmA.slice(asc::te::make_coord(mPos, kPos), asc::te::make_shape(curM, k));
             auto gmBlockB = gmB.slice(asc::te::make_coord(kPos, nPos), asc::te::make_shape(k, curN));
 
-            // DATA_BLOCK=32 matches BlockEpilogueDequant::DATA_BLOCK.
-            constexpr int64_t l0cAlign = BLOCK_BYTE_SIZE / sizeof(L0CType);
-            const int64_t curNAligned = Blaze::Gemm::CeilAlign(curN, l0cAlign);
-            const int64_t curMAligned = Blaze::Gemm::CeilAlign(curM, static_cast<int64_t>(2));
-            auto layoutUbC = asc::te::make_frame_layout<asc::te::nd_layout_ptn>(curMAligned, curNAligned);
-            auto ubC = asc::te::make_tensor(
-                asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(l0cUbBaseOffset * sizeof(L0CType)), layoutUbC);
-            mmadOp_(gmBlockA, gmBlockB, ubC, singleShape, gmBlockBias);
+            if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
+                auto ubC = epilogueOp_.GetAccumulatorTensor({curM, curN});
+                mmadOp_(gmBlockA, gmBlockB, ubC, singleShape, gmBlockBias);
+            } else {
+                constexpr int64_t l0cAlign = BLOCK_BYTE_SIZE / sizeof(L0CType);
+                const int64_t curNAligned = Blaze::Gemm::CeilAlign(curN, l0cAlign);
+                const int64_t curMAligned = Blaze::Gemm::CeilAlign(curM, static_cast<int64_t>(2));
+                auto layoutUbC = asc::te::make_frame_layout<asc::te::nd_layout_ptn>(curMAligned, curNAligned);
+                auto ubC = asc::te::make_tensor(
+                    asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(l0cUbBaseOffset * sizeof(L0CType)),
+                    layoutUbC);
+                mmadOp_(gmBlockA, gmBlockB, ubC, singleShape, gmBlockBias);
+            }
             Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
             isFirstBlock_ = false;
         }

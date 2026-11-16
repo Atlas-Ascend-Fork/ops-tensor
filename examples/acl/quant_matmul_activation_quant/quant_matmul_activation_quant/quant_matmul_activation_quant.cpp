@@ -354,8 +354,6 @@ __global__ __aicore__ void quant_matmul_activation_quant_kernel(
     if constexpr (IsSwiGlu) {
         params.epilogueParams.yGmAddr = yGm;
         params.epilogueParams.yScaleGmAddr = yScaleGm;
-        params.epilogueParams.baseM = static_cast<uint32_t>(baseM);
-        params.epilogueParams.baseN = static_cast<uint32_t>(baseN >> 1);
         params.epilogueParams.scaleAlg = static_cast<uint8_t>(scaleAlg);
     } else if constexpr (Activation == ActivationKind::SWISH) {
         params.epilogueParams = {yGm,      yScaleGm, static_cast<uint32_t>(baseM), static_cast<uint32_t>(baseN),

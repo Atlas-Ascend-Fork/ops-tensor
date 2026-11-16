@@ -70,12 +70,13 @@ params.epilogueParams.baseN = params.schParams.baseN;
 
 ```cpp
 epilogueOp.Init(params.epilogueParams);
+auto ubTensor = epilogueOp.GetAccumulatorTensor({shapeM, tileN});
 epilogueOp(ubTensor, tileShape, tileCoord);
 ```
 
 原 `KernelMmadFmmWithScaleAdd` 保留既有分块方式。
 
-公共 Kernel 统一使用三参后处理接口：`tileShape` 提供当前 tile 的真实 M/N/K，`tileCoord` 提供全局 M/N/K 与 batch 坐标，由 Epilogue 计算输出地址。
+公共 Kernel 统一使用三参后处理接口：`ubTensor` 是由 Epilogue 提供的累加结果 UB Tensor，`tileShape` 提供当前 tile 的真实 M/N/K，`tileCoord` 提供全局 M/N/K 与 batch 坐标，由 Epilogue 计算输出地址。
 
 scale_add新增的三参入口计算偏移后转调原多参接口，原有M裁剪、N分块、UB分段和同步实现保持不变。SYRK继续使用原多参接口及显式staging窗口。
 

@@ -65,6 +65,7 @@ struct Params {
     uint32_t x2QuantMode{0};         // x2 量化模式（per-channel / per-tensor）
     bool isBias{false};              // 是否启用 bias
     uint32_t biasDtype{0};           // 真实 bias dtype（DT_FLOAT/DT_FLOAT16/DT_BF16）
+    int64_t batch{1};
 };
 ```
 
@@ -84,13 +85,9 @@ __aicore__ inline void Init(const Params& params)
 
 ### operator函数
 ```
-__aicore__ inline void operator()(
-    int64_t singleCoreM,    // 当前 tile 的 M
-    int64_t singleCoreN,    // 当前 tile 的 N
-    int64_t offsetScale,    // x2Scale 偏移（= nPos）
-    int64_t offsetPtScale,  // x1Scale 偏移（= mPos）
-    int64_t offsetBias,     // bias 偏移（= nPos，三维 bias 叠加 batch 偏移）
-    int64_t offsetC)        // 输出 C 偏移
+__aicore__ inline void operator()(int64_t singleCoreM, int64_t singleCoreN, int64_t offsetScale,
+                                  int64_t offsetPtScale, int64_t offsetBias, int64_t offsetC,
+                                  int64_t l0cBaseOffset = 0)
 ```
 执行流程：
 1. 双 AIV 子块按 `CV_RATIO` 切分 M（`subBlockIdx_`），`singleMInVec <= 0` 直接返回。

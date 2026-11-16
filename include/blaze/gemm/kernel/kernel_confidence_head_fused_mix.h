@@ -125,9 +125,7 @@ private:
                                    asc::te::get<Blaze::Gemm::MNK_B>(schedulerCoord) * nPerBatch_;
             const BlockCoord coord{0L, coordN, 0L, 0L};
             int64_t count = asc::te::get<Blaze::Gemm::MNK_N>(shape);
-            auto input = asc::te::make_tensor(
-                asc::te::make_mem_ptr<asc::te::location::ub, AccType>(epilogue.GetUbAddr(loop++)),
-                MakeNDExtLayout<AccType>(1L, count, count));
+            auto input = epilogue.GetAccumulatorTensor({1, count, static_cast<uint32_t>(loop++ & 1U)});
             EpilogueShape epilogueShape{1L, count, 0L, 1L};
             epilogue.template operator()<true>(input, epilogueShape, coord);
         }
@@ -192,11 +190,8 @@ private:
                 continue;
             }
 
-            auto layoutUb = MakeNDExtLayout<AccType>(1L, shapeN, shapeN);
             uint64_t dbIdx = loopIdx & 1;
-            uint64_t ubAddr = blockEpilogue.GetUbAddr(dbIdx);
-            auto ubBlockC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, AccType>(ubAddr),
-                                                 layoutUb);
+            auto ubBlockC = blockEpilogue.GetAccumulatorTensor({1, shapeN, static_cast<uint32_t>(dbIdx)});
 
             if ASCEND_IS_AIC {
                 WaitVecDone(dbIdx);

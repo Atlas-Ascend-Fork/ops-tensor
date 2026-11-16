@@ -16,6 +16,7 @@
 #pragma once
 
 #include "kernel_basic_intf.h"
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/epilogue/block/block_epilogue_swiglu_mx_quant.h"
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
@@ -329,7 +330,7 @@ private:
         }
         const typename BlockScheduler::SwigluGroupInfo& groupInfo = bs.GetSwigluGroupInfo();
 
-        EpilogueOutputOffsets baseOutputOffsets{groupInfo.outputOffset, groupInfo.outputScaleOffset};
+        const EpilogueOutputOffsets baseOutputOffsets{groupInfo.outputOffset, groupInfo.outputScaleOffset};
         blockEpilogue.UpdateGlobalAddr(baseOutputOffsets);
 
         auto layoutA = MakeLayoutA{}(problemM, problemK);
@@ -402,13 +403,22 @@ private:
                 if (isVecSetSyncCom_) {
                     WaitForAiv();
                 }
-                auto ubOut = blockEpilogue.GetConcatL0c2UbTensor(blockM, blockN);
-                if constexpr (IsWeightNz<LayoutB>::value) {
-                    // Mode 2 stores activation and gate in separate N halves.
-                    blockMmad(gmBlockA, gmBlockBLeft, gmBlockBRight, gmBlockScaleA, gmBlockScaleBLeft,
-                              gmBlockScaleBRight, ubOut, singleShape);
+                if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
+                    auto ubOut = blockEpilogue.GetAccumulatorTensor({blockM, blockN});
+                    if constexpr (IsWeightNz<LayoutB>::value) {
+                        blockMmad(gmBlockA, gmBlockBLeft, gmBlockBRight, gmBlockScaleA, gmBlockScaleBLeft,
+                                  gmBlockScaleBRight, ubOut, singleShape);
+                    } else {
+                        blockMmad(gmBlockA, gmBlockBLeft, gmBlockScaleA, gmBlockScaleBLeft, ubOut, singleShape);
+                    }
                 } else {
-                    blockMmad(gmBlockA, gmBlockBLeft, gmBlockScaleA, gmBlockScaleBLeft, ubOut, singleShape);
+                    auto ubOut = blockEpilogue.GetConcatL0c2UbTensor(blockM, blockN);
+                    if constexpr (IsWeightNz<LayoutB>::value) {
+                        blockMmad(gmBlockA, gmBlockBLeft, gmBlockBRight, gmBlockScaleA, gmBlockScaleBLeft,
+                                  gmBlockScaleBRight, ubOut, singleShape);
+                    } else {
+                        blockMmad(gmBlockA, gmBlockBLeft, gmBlockScaleA, gmBlockScaleBLeft, ubOut, singleShape);
+                    }
                 }
                 SyncAicToAiv();
             }

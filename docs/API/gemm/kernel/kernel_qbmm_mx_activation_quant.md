@@ -232,8 +232,6 @@ WeightNZ 的 epilogue 参数按字段赋值：
 typename BlockEpilogue::Params epilogueParams{};
 epilogueParams.yGmAddr = y;
 epilogueParams.yScaleGmAddr = yScale;
-epilogueParams.baseM = baseM;
-epilogueParams.baseN = baseN / 2;
 epilogueParams.scaleAlg = scaleAlg;
 ```
 

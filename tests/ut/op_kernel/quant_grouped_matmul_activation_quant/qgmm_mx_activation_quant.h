@@ -60,11 +60,7 @@ public:
     using DataTypeIn = DataTypeIn_;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
-
-    struct OutputOffsets {
-        int64_t yOffset{0};
-        int64_t yScaleOffset{0};
-    };
+    using OutputOffsets = Blaze::Epilogue::Block::OutputOffsets;
 
     struct Params {
         GM_ADDR yGmAddr{nullptr};
@@ -75,7 +71,16 @@ public:
         float dstTypeMax{0.0f};
     };
 
+    using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
+
     __aicore__ inline void Init(const Params&) {}
+    __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const
+    {
+        const int64_t rows = (params.rows + 1) & ~static_cast<int64_t>(1);
+        return asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(0),
+            asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(rows, Blaze::Gemm::Align32(params.cols)));
+    }
     __aicore__ inline void UpdateGlobalAddr(const OutputOffsets&) {}
     __aicore__ inline void UpdateNextProblem(const ProblemShape&) {}
     __aicore__ inline void operator()(const BlockShape&, const OutputOffsets&) {}

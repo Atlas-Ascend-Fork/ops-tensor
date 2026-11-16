@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "blaze/epilogue/block/block_epilogue_types.h"
 #include "blaze/epilogue/tile/compute.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
@@ -48,120 +49,14 @@ public:
         uint32_t baseN{128};
     };
 
+    using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
+
     __aicore__ inline BlockEpilogueConfidenceHeadFused() = default;
-
-    __aicore__ inline ~BlockEpilogueConfidenceHeadFused()
-    {
-        if ASCEND_IS_AIV {
-            if (initialized_) {
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(PING_EVENT);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(PONG_EVENT);
-                if (hasZeroReductionBias_) {
-                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(PING_EVENT);
-                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(PONG_EVENT);
-                }
-            }
-        }
-    }
-
-    __aicore__ inline void Init(const Params& params)
-    {
-        baseN_ = params.baseN;
-        // Fixpipe pads M=1 to two physical rows in UB.
-        const uint64_t baseInSize = FIXPIPE_ROWS * baseN_ * sizeof(InType);
-        const uint64_t baseOutSize = baseN_ * sizeof(OutType);
-        ubInputPing_ = 0;
-        ubInputPong_ = baseInSize;
-        ubOutputPing_ = ubInputPong_ + baseInSize;
-        ubOutputPong_ = ubOutputPing_ + baseOutSize;
-        outputGmAddr_ = params.outputGmAddr;
-        n_ = asc::te::get<Blaze::Gemm::MNK_N>(params.problemShape);
-        biasGmAddr_ = params.biasGmAddr;
-        biasN_ = params.biasN;
-        hasZeroReductionBias_ = params.hasBias && biasGmAddr_ != nullptr &&
-                                asc::te::get<Gemm::CONFIDENCE_HEAD_K_EMBED>(params.problemShape) == 0 &&
-                                asc::te::get<Gemm::CONFIDENCE_HEAD_K_MARKOV>(params.problemShape) == 0;
-        if ASCEND_IS_AIV {
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(PING_EVENT);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(PONG_EVENT);
-            if (hasZeroReductionBias_) {
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(PING_EVENT);
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(PONG_EVENT);
-            }
-            initialized_ = true;
-            InitTileParams(params);
-            AscendC::ICachePreLoad(NUM_TWO);
-        }
-    }
-
-    __aicore__ inline uint64_t GetUbAddr() const { return GetUbAddr(loopCnt_); }
-
-    __aicore__ inline uint64_t GetUbAddr(uint64_t dbIdx) const
-    {
-        return (dbIdx & 1) == 0 ? ubInputPing_ : ubInputPong_;
-    }
-
+    __aicore__ inline ~BlockEpilogueConfidenceHeadFused();
+    __aicore__ inline void Init(const Params& params);
+    __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
     template <bool ZeroInput = false, typename TensorC>
-    __aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShape, const BlockCoord& blockCoord)
-    {
-        const uint16_t slot = static_cast<uint16_t>(loopCnt_ & 1);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(slot);
-        const int64_t curN = asc::te::get<Blaze::Gemm::MNK_N>(blockShape);
-        // The scheduler flattens [batch, N] into this N coordinate and keeps bias tiles within one batch.
-        const int64_t dstOffset = asc::te::get<Blaze::Gemm::MNK_N>(blockCoord);
-        const auto origin = asc::te::make_coord(0L, 0L);
-        const auto validShape = asc::te::make_shape(1L, curN);
-        const uint64_t outUbOffset = slot == 0 ? ubOutputPing_ : ubOutputPong_;
-        auto tensorOut = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, OutType>(outUbOffset),
-                                              Gemm::MakeNDExtLayout<OutType>(1L, curN, baseN_));
-        const Tile::ConfidenceHeadFused::Params tileParams{negInvTemperature_, lowLimit_, highLimit_, hasLowLimit_,
-                                                           hasHighLimit_};
-        if constexpr (ZeroInput) {
-            if (hasZeroReductionBias_) {
-                // K=0 bypasses Cube. Bias itself is the logit; reuse the input buffer without a vector add.
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(slot);
-                auto biasGm = asc::te::make_tensor(
-                    asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ InType*>(biasGmAddr_) +
-                                                                 dstOffset % biasN_),
-                    asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1L, curN));
-                asc::te::copy(ubTensor, biasGm);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(slot);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(slot);
-                Tile::ConfidenceHeadFused::Run(ubTensor, tensorOut, tileParams);
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(slot);
-            } else {
-                Tile::ConfidenceHeadFused::Run<true>(ubTensor, tensorOut, tileParams);
-            }
-        } else {
-            // The Cube accumulator already contains bias on every nonzero-K path.
-            Tile::ConfidenceHeadFused::Run(ubTensor, tensorOut, tileParams);
-        }
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(OUTPUT_EVENT);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(OUTPUT_EVENT);
-        auto outputGmStorage = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ OutType*>(outputGmAddr_) + dstOffset),
-            asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1L, n_));
-        auto outputGm = outputGmStorage.slice(origin, validShape);
-        asc::te::copy(outputGm, tensorOut);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(slot);
-        ++loopCnt_;
-    }
-
-private:
-    __aicore__ inline void InitTileParams(const Params& params)
-    {
-        negInvTemperature_ = -1.0F;
-        if (params.temperatureGmAddr != nullptr) {
-            AscendC::GlobalTensor<float> temperatureGlobal;
-            temperatureGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(params.temperatureGmAddr));
-            const float temperature = temperatureGlobal.GetValue(0);
-            negInvTemperature_ = temperature == 0.0F ? -1.0F : (-1.0F / temperature);
-        }
-        lowLimit_ = params.lowLimit;
-        highLimit_ = params.highLimit;
-        hasLowLimit_ = params.hasLowLimit;
-        hasHighLimit_ = params.hasHighLimit;
-    }
+    __aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShape, const BlockCoord& blockCoord);
 
 private:
     static constexpr uint16_t NUM_TWO = 2;
@@ -171,12 +66,13 @@ private:
     static constexpr uint32_t DEFAULT_BASE_N = 128;
     static constexpr uint32_t FIXPIPE_ROWS = 2;
 
+    __aicore__ inline void InitTileParams(const Params& params);
+
     uint64_t ubInputPing_{0};
     uint64_t ubInputPong_{0};
     uint64_t ubOutputPing_{0};
     uint64_t ubOutputPong_{0};
     uint64_t baseN_{DEFAULT_BASE_N};
-    uint64_t loopCnt_{0};
     GM_ADDR outputGmAddr_{nullptr};
     GM_ADDR biasGmAddr_{nullptr};
     int64_t n_{0};
@@ -188,6 +84,126 @@ private:
     bool hasHighLimit_{false};
     bool hasZeroReductionBias_{false};
     bool initialized_{false};
+    uint64_t loopCnt_{0};
 };
+
+template <class InType_, class OutType_>
+__aicore__ inline BlockEpilogueConfidenceHeadFused<InType_, OutType_>::~BlockEpilogueConfidenceHeadFused()
+{
+    if ASCEND_IS_AIV {
+        if (initialized_) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(PING_EVENT);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(PONG_EVENT);
+            if (hasZeroReductionBias_) {
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(PING_EVENT);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(PONG_EVENT);
+            }
+        }
+    }
+}
+
+template <class InType_, class OutType_>
+__aicore__ inline void BlockEpilogueConfidenceHeadFused<InType_, OutType_>::Init(const Params& params)
+{
+    baseN_ = params.baseN;
+    // Fixpipe pads M=1 to two physical rows in UB.
+    const uint64_t baseInSize = FIXPIPE_ROWS * baseN_ * sizeof(InType);
+    const uint64_t baseOutSize = baseN_ * sizeof(OutType);
+    ubInputPing_ = 0;
+    ubInputPong_ = baseInSize;
+    ubOutputPing_ = ubInputPong_ + baseInSize;
+    ubOutputPong_ = ubOutputPing_ + baseOutSize;
+    outputGmAddr_ = params.outputGmAddr;
+    n_ = asc::te::get<Blaze::Gemm::MNK_N>(params.problemShape);
+    biasGmAddr_ = params.biasGmAddr;
+    biasN_ = params.biasN;
+    hasZeroReductionBias_ = params.hasBias && biasGmAddr_ != nullptr &&
+                            asc::te::get<Gemm::CONFIDENCE_HEAD_K_EMBED>(params.problemShape) == 0 &&
+                            asc::te::get<Gemm::CONFIDENCE_HEAD_K_MARKOV>(params.problemShape) == 0;
+    if ASCEND_IS_AIV {
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(PING_EVENT);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(PONG_EVENT);
+        if (hasZeroReductionBias_) {
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(PING_EVENT);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(PONG_EVENT);
+        }
+        initialized_ = true;
+        InitTileParams(params);
+        AscendC::ICachePreLoad(NUM_TWO);
+    }
+}
+
+template <class InType_, class OutType_>
+__aicore__ inline auto BlockEpilogueConfidenceHeadFused<InType_, OutType_>::GetAccumulatorTensor(
+    const AccumulatorTensorParams& params) const
+{
+    const uint64_t ubOffset = (params.slot & 1U) == 0 ? ubInputPing_ : ubInputPong_;
+    return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, InType>(ubOffset),
+                                Gemm::MakeNDExtLayout<InType>(1L, params.cols, params.cols));
+}
+
+template <class InType_, class OutType_>
+__aicore__ inline void BlockEpilogueConfidenceHeadFused<InType_, OutType_>::InitTileParams(const Params& params)
+{
+    negInvTemperature_ = -1.0F;
+    if (params.temperatureGmAddr != nullptr) {
+        AscendC::GlobalTensor<float> temperatureGlobal;
+        temperatureGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(params.temperatureGmAddr));
+        const float temperature = temperatureGlobal.GetValue(0);
+        negInvTemperature_ = temperature == 0.0F ? -1.0F : (-1.0F / temperature);
+    }
+    lowLimit_ = params.lowLimit;
+    highLimit_ = params.highLimit;
+    hasLowLimit_ = params.hasLowLimit;
+    hasHighLimit_ = params.hasHighLimit;
+}
+
+template <class InType_, class OutType_>
+template <bool ZeroInput, typename TensorC>
+__aicore__ inline void BlockEpilogueConfidenceHeadFused<InType_, OutType_>::operator()(TensorC& ubTensor,
+                                                                                       const BlockShape& blockShape,
+                                                                                       const BlockCoord& blockCoord)
+{
+    const uint16_t slot = static_cast<uint16_t>(loopCnt_ & 1U);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(slot);
+    const int64_t curN = asc::te::get<Blaze::Gemm::MNK_N>(blockShape);
+    // The scheduler flattens [batch, N] into this N coordinate and keeps bias tiles within one batch.
+    const int64_t dstOffset = asc::te::get<Blaze::Gemm::MNK_N>(blockCoord);
+    const auto origin = asc::te::make_coord(0L, 0L);
+    const auto validShape = asc::te::make_shape(1L, curN);
+    const uint64_t outUbOffset = slot == 0 ? ubOutputPing_ : ubOutputPong_;
+    auto tensorOut = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, OutType>(outUbOffset),
+                                          Gemm::MakeNDExtLayout<OutType>(1L, curN, baseN_));
+    const Tile::ConfidenceHeadFused::Params tileParams{negInvTemperature_, lowLimit_, highLimit_, hasLowLimit_,
+                                                       hasHighLimit_};
+    if constexpr (ZeroInput) {
+        if (hasZeroReductionBias_) {
+            // K=0 bypasses Cube. Bias itself is the logit; reuse the input buffer without a vector add.
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(slot);
+            auto biasGm = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(
+                                                   reinterpret_cast<__gm__ InType*>(biasGmAddr_) + dstOffset % biasN_),
+                                               asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1L, curN));
+            asc::te::copy(ubTensor, biasGm);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(slot);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(slot);
+            Tile::ConfidenceHeadFused::Run(ubTensor, tensorOut, tileParams);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(slot);
+        } else {
+            Tile::ConfidenceHeadFused::Run<true>(ubTensor, tensorOut, tileParams);
+        }
+    } else {
+        // The Cube accumulator already contains bias on every nonzero-K path.
+        Tile::ConfidenceHeadFused::Run(ubTensor, tensorOut, tileParams);
+    }
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(OUTPUT_EVENT);
+    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(OUTPUT_EVENT);
+    auto outputGmStorage = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ OutType*>(outputGmAddr_) + dstOffset),
+        asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1L, n_));
+    auto outputGm = outputGmStorage.slice(origin, validShape);
+    asc::te::copy(outputGm, tensorOut);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(slot);
+    ++loopCnt_;
+}
 
 } // namespace Blaze::Epilogue::Block

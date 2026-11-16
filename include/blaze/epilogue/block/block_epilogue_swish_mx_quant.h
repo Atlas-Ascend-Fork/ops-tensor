@@ -20,6 +20,7 @@
 #include "kernel_operator.h"
 #endif
 
+#include "blaze/epilogue/block/block_epilogue_types.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/utils/sync.h"
@@ -64,21 +65,12 @@ public:
                       AscendC::IsSameType<DataTypeOut, fp8_e5m2_t>::value,
                   "BlockEpilogueSwishMxQuant only supports FP8 output.");
 
-    __aicore__ inline BlockEpilogueSwishMxQuant()
-    {
-        if ASCEND_IS_AIV {
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
-        }
-    }
+    using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
 
-    __aicore__ inline ~BlockEpilogueSwishMxQuant()
-    {
-        if ASCEND_IS_AIV {
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
-        }
-    }
-
+    __aicore__ inline BlockEpilogueSwishMxQuant();
+    __aicore__ inline ~BlockEpilogueSwishMxQuant();
     __aicore__ inline void Init(const Params& params);
+    __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
     __aicore__ inline void operator()(const BlockShape& blockShape, const BlockCoord& blockCoord);
     __aicore__ inline void UpdateGlobalAddr(const BlockCoord& baseOffset);
     __aicore__ inline void UpdateNextProblem(const ProblemShape& problemShape);
@@ -142,6 +134,32 @@ private:
     float beta_{1.0F};
     bool useCublas_{false};
 };
+
+SWISH_MX_QUANT_CLASS_TEMPLATE_PARAMS
+__aicore__ inline BlockEpilogueSwishMxQuant<SWISH_MX_QUANT_TEMPLATE_ARGS>::BlockEpilogueSwishMxQuant()
+{
+    if ASCEND_IS_AIV {
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
+    }
+}
+
+SWISH_MX_QUANT_CLASS_TEMPLATE_PARAMS
+__aicore__ inline BlockEpilogueSwishMxQuant<SWISH_MX_QUANT_TEMPLATE_ARGS>::~BlockEpilogueSwishMxQuant()
+{
+    if ASCEND_IS_AIV {
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
+    }
+}
+
+SWISH_MX_QUANT_CLASS_TEMPLATE_PARAMS
+__aicore__ inline auto BlockEpilogueSwishMxQuant<SWISH_MX_QUANT_TEMPLATE_ARGS>::GetAccumulatorTensor(
+    const AccumulatorTensorParams& params) const
+{
+    const int64_t rows = (params.rows + 1) & ~static_cast<int64_t>(1);
+    return asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(0),
+        asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(rows, Gemm::Align32(params.cols)));
+}
 
 SWISH_MX_QUANT_CLASS_TEMPLATE_PARAMS
 __aicore__ inline void BlockEpilogueSwishMxQuant<SWISH_MX_QUANT_TEMPLATE_ARGS>::Init(const Params& params)

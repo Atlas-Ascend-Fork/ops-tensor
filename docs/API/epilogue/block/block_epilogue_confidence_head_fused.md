@@ -41,6 +41,6 @@ epilogue(ubTensor, blockShape, blockCoord);
 epilogue.template operator()<true>(ubTensor, blockShape, blockCoord); // K1+K2=0
 ```
 
-`blockShape` 为 `(1,curN,0,1)`，`blockCoord` 的 N 分量为展平输出坐标。`GetUbAddr(dbIdx)` 返回 Cube 写入 UB 双缓冲的地址，dbIdx 取 0 或 1。
+`blockShape` 为 `(1,curN,0,1)`，`blockCoord` 的 N 分量为展平输出坐标。`GetAccumulatorTensor({rows, cols, slot})` 返回 Cube 写入 UB 双缓冲的 Tensor，`slot` 取 0 或 1。
 
 零 K 且带 bias 时，将 `bias[coordN % biasN : coordN % biasN + curN]` 搬入输入槽作为 logits；无 bias 时由 Tile 使用零输入。MTE2/V 事件保护输入搬运，V/MTE3 事件保护输出写回。Cube 与 Vector 的跨核握手由 Kernel 管理。

@@ -151,8 +151,8 @@ __global__ __aicore__ void tqbmm_mix_example_kernel(GM_ADDR aGm, GM_ADDR bGm, GM
     epilogueParams.outGmAddr = cGm;
     epilogueParams.m = m;
     epilogueParams.n = n;
-    epilogueParams.baseM = static_cast<int64_t>(baseM);
-    epilogueParams.baseN = static_cast<int64_t>(baseN);
+    epilogueParams.baseM = baseM;
+    epilogueParams.baseN = baseN;
     epilogueParams.x1QuantMode = x1QuantMode;
     epilogueParams.x2QuantMode = x2QuantMode;
     epilogueParams.isBias = false;

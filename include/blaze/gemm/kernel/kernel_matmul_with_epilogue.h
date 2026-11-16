@@ -153,9 +153,7 @@ private:
                 auto gmBlockBias = gmBias.slice(AscendC::MakeCoord(0L, coordN + nOffset),
                                                 AscendC::MakeShape(1L, tileN));
 
-                // The kernel owns the single UB accumulator buffer.
-                auto layoutUb = MakeLayoutC{}(shapeM, tileN);
-                auto ubTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0), layoutUb);
+                auto ubTensor = epilogueOp.GetAccumulatorTensor({shapeM, tileN});
                 if ASCEND_IS_AIC {
                     blockMmad(gmBlockA, gmBlockB, gmBlockBias, ubTensor, tileShape);
                 }

@@ -25,69 +25,51 @@ struct Params {
 ```
 说明：Kernel 运行时参数结构体。
 
-## 核心成员方法
+#### AccumulatorTensorParams
+```
+using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
+```
+公共定义位于 `block_epilogue_types.h`，包含 `rows`、`cols`、`slot`、`batch`。仅接收 L0C 输出的 Epilogue 需要提供该别名及对应 Tensor 接口。
 
-### 构造函数
-```
-__aicore__ inline BlockEpilogue()
-```
-功能：构造 BlockEpilogue 对象。
+## 统一对外接口
 
-### 析构函数
-```
-__aicore__ inline ~BlockEpilogue()
-```
-功能：析构 BlockEpilogue 对象。
+新增后处理文件必须遵守 [Epilogue 层开发指导](../epilogue_developer_guide.md#2-统一对外接口新增文件必须遵守)。通用 tile 后处理提供以下接口：
 
-### Init函数
 ```
-__aicore__ inline void Init(Params const& params, ...)
+__aicore__ inline BlockEpilogue();
+__aicore__ inline void Init(const Params& params);
+__aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
+// operator() 的 Tensor、形状、坐标和偏移入参由具体 Epilogue 场景决定。
 ```
-功能：初始化 BlockEpilogue 组件，设置 GM 地址、Block 形状等参数。
-说明：仅部分实现提供（如 StreamK）；Empty 无 Init 方法。参数数量和类型根据实现不同。
 
-### Run函数
-```
-__aicore__ inline void Run()
-```
-功能：执行后处理操作。
-说明：Empty 实现为空（直接返回），StreamK 实现包含实际计算。
+| 接口 | 说明 |
+|------|------|
+| 构造函数 | 构造 BlockEpilogue 对象；需要同步或资源清理时提供对应析构函数 |
+| `Init` | 一次性初始化，绑定 GM 地址、保存问题规模并配置 UB 布局 |
+| `GetAccumulatorTensor` | 返回接收 L0C 输出的 UB Tensor，由 Epilogue 决定地址和 Layout；不接收 L0C 输出的实现无需提供 |
+| `operator()` | 每个 tile 的执行入口，Tensor、形状、坐标和偏移入参由具体场景决定 |
 
-### operator函数（参数版本）
-```
-__aicore__ inline void operator()(Params const& params)
-```
-功能：执行后处理操作（参数版本）。
-说明：调用 `Init` 和 `Run`，提供统一调用接口。
+多 batch/group 场景可按需提供 `UpdateGlobalAddr()`、`UpdateNextProblem()`。专用多阶段后处理可以提供 `ReduceV`、`FinalizeSoftmax` 等业务方法，但仍须遵循统一的参数聚合和类组织规则。
 
-### operator函数（Block版本）
-```
-__aicore__ inline void operator()(
-    BlockShape const& blockShape, BlockCoord const& blockCoord,
-    int64_t dstStartOffset = 0, int64_t srcStartOffset = 0)
-```
-功能：执行后处理操作（Block 坐标版本）。
-参数说明：
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| blockShape | BlockShape const& | Block 形状 |
-| blockCoord | BlockCoord const& | Block 坐标 |
-| dstStartOffset | int64_t | 目标起始偏移（默认 0） |
-| srcStartOffset | int64_t | 源起始偏移（默认 0） |
+## 接口废弃说明
+
+以下接口在CANN 9.2.0版本标记废弃，将在2027年11月10日之后的版本删除：
+
+- `BlockEpilogueFixpipe::Init(const Params&, const ProblemShape&)`，替换为 `Init(const Params&)`。
+- `BlockEpilogueFmmWithScaleAdd::Init(const Params&, const ProblemShape&)`，替换为 `Init(const Params&)`。
+- `BlockEpilogueMulsAdd::Init(const Params&, int64_t, int64_t, const ProblemShape&)`，替换为 `Init(const Params&)`。
+- `BlockEpilogueSwigluMxQuant::GetL0c2UbTensor` 和 `GetConcatL0c2UbTensor`，替换为 `GetAccumulatorTensor(const AccumulatorTensorParams&)`。
+
+9.2.0 分支没有的文件可直接调整接口，不增加兼容重载或废弃标签；两个 StreamK 文件的七参数 `Init` 暂保持不变。
 
 ## 公共约束
 
-1. **模板参数要求**：
-   - Empty 无模板参数要求
-   - StreamK 需要 WorkspaceType、OutType、DispatchPolicy 参数
-
-2. **计算位置**：
-   - Empty：无计算（空实现）
-   - StreamK：在 AIV 核执行
-
-3. **接口一致性**：
-   - 所有实现必须提供 `Run`、`operator` 方法并保持统一的类型别名
-   - `Init` 仅部分实现提供：Empty 无 Init，StreamK 含 Init
+1. **参数组织**：初始化配置使用 `Params`，执行入参沿用具体场景的既有形式，公共偏移可使用 `OutputOffsets` 等聚合类型。
+2. **计算位置**：通用 Epilogue 在 AIV 核执行；Empty 不执行计算。
+3. **类组织**：成员函数先声明、后在类外实现；`public` 在前，`private` 在后；新增状态放入 `private`，`9.2.0` 已公开的成员保持原有可见性。
+4. **接口顺序**：新接口集中放在 `public` 前部；既有兼容接口和数据成员放在其后，并添加 `Compatibility interfaces` 前缀的注释。
+5. **源码兼容**：`9.2.0` 已有文件保留旧接口并转发到统一执行入口，默认实参只写在函数声明中；其余文件不增加旧式散参接口。
+6. **独立包含**：头文件自行包含所需依赖，不能依赖其他文件的包含顺序。
 
 ## 公共调用示例
 
@@ -110,17 +92,17 @@ BlockMmad 的 DispatchPolicy 调度策略（如 `KernelMmadMultiBlockBasic`、`K
 
 ### 执行模板
 ```
-// Empty（无实际效果）
 BlockEpilogue epilogue;
-epilogue.Run();
-epilogue({});
-epilogue(blockShape, blockCoord, 0, 0);
+epilogue.Init(params.epilogueParams);
 
-// StreamK（实际后处理）
-BlockEpilogue epilogue;
-epilogue.Init(params, blockShape, tileL1, coord, usedCoreNum, isSkScene);
-epilogue.Run();
+// 仅从 L0C 接收输入的 Epilogue 需要获取累加结果 Tensor。
+auto ubC = epilogue.GetAccumulatorTensor({baseM, baseN});
+blockMmad(gmA, gmB, ubC, blockShape);
+
+// 以接收 BlockShape 和 BlockCoord 的 Epilogue 为例。
+epilogue(blockShape, blockCoord);
 ```
+说明：`operator()` 的入参以具体 Epilogue 的定义为准；不从 L0C 接收输入时跳过 Tensor 获取步骤。
 
 ## 设计说明
 

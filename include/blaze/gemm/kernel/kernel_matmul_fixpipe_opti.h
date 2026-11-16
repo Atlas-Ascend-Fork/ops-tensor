@@ -17,6 +17,7 @@
 
 #include "kernel_basic_intf.h"
 
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/epilogue/block/block_epilogue_fixpipe.h"
 #include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_mmad_matmul_bl1_full_load.h"
@@ -73,8 +74,6 @@ public:
     using MakeLayoutC = asc::te::frame_layout_format<LayoutC, AscendC::Std::Int<asc::te::c0_element<CType>>>;
     using MakeLayoutBias = asc::te::frame_layout_format<LayoutBias, AscendC::Std::Int<asc::te::c0_element<BiasType>>>;
     static constexpr bool TRANS_B = BlockMmad::TRANS_B;
-    // Elementwise ADD/MUL epilogue (BlockEpilogueMatmulElemwise) provides the params-only Init;
-    // other fused epilogues (fixpipe family) keep the mainline two-param contract.
     static constexpr bool HAS_ELEMWISE = BlockMmad::DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_ADD ||
                                          BlockMmad::DispatchPolicy::FUSED_OP_TYPE == Blaze::Gemm::OP_TYPE_MUL;
     using MakeLayoutBL1 = AscendC::Std::conditional_t<
@@ -123,10 +122,19 @@ public:
             return;
         }
         Blaze::Gemm::SetHF32(params.schParams.isHf32);
+        auto epilogueParams = params.epilogueParams;
         if constexpr (HAS_ELEMWISE) {
-            epilogueOp.Init(params.epilogueParams); // elemwise: params-only Init
+            if constexpr (Blaze::Epilogue::Block::HasParamsOnlyInit<BlockEpilogue, decltype(epilogueParams)>::value) {
+                epilogueParams.problemShape = params.problemShape;
+            }
+            epilogueOp.Init(epilogueParams);
         } else {
-            epilogueOp.Init(params.epilogueParams, problemShape_); // fixpipe: mainline two-param
+            if constexpr (Blaze::Epilogue::Block::HasParamsOnlyInit<BlockEpilogue, decltype(epilogueParams)>::value) {
+                epilogueParams.problemShape = problemShape_;
+                epilogueOp.Init(epilogueParams);
+            } else {
+                epilogueOp.Init(epilogueParams, problemShape_);
+            }
         }
         if ASCEND_IS_AIC {
             blockMmad.Init(params.mmadParams);
@@ -207,20 +215,27 @@ private:
             auto gmBlockA = MakeBlockA(gmA, params, coordM, shapeM, shapeK);
             auto gmBlockB = gmB.slice(AscendC::MakeCoord(0L, coordN), AscendC::MakeShape(shapeK, shapeN));
 
-            int64_t ubOffsetElems = 0;
-            auto layoutUB = MakeLayoutC{}(shapeM, shapeN);
-            auto ubLocal = asc::te::make_tensor(
-                asc::te::make_mem_ptr<asc::te::location::ub, CType>(ubOffsetElems * sizeof(CType)), layoutUB);
             auto gmBlockBias = gmBias.slice(AscendC::MakeCoord(0L, coordN), AscendC::MakeShape(1L, shapeN));
             if ASCEND_IS_AIC {
-                if constexpr (BlockMmad::DispatchPolicy::FULL_LOAD_MODE == B_FULL_LOAD_MODE) {
-                    blockMmad(gmBlockA, gmB, gmBias, ubLocal, validBlockShape);
+                if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
+                    auto ubLocal = epilogueOp.GetAccumulatorTensor({shapeM, shapeN});
+                    if constexpr (BlockMmad::DispatchPolicy::FULL_LOAD_MODE == B_FULL_LOAD_MODE) {
+                        blockMmad(gmBlockA, gmB, gmBias, ubLocal, validBlockShape);
+                    } else {
+                        blockMmad(gmBlockA, gmBlockB, gmBlockBias, ubLocal, validBlockShape);
+                    }
                 } else {
-                    blockMmad(gmBlockA, gmBlockB, gmBlockBias, ubLocal, validBlockShape);
+                    auto layoutUB = MakeLayoutC{}(shapeM, shapeN);
+                    auto ubLocal = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0),
+                                                        layoutUB);
+                    if constexpr (BlockMmad::DispatchPolicy::FULL_LOAD_MODE == B_FULL_LOAD_MODE) {
+                        blockMmad(gmBlockA, gmB, gmBias, ubLocal, validBlockShape);
+                    } else {
+                        blockMmad(gmBlockA, gmBlockB, gmBlockBias, ubLocal, validBlockShape);
+                    }
                 }
             }
             if ASCEND_IS_AIV {
-                // Calculate epilogue (internally loops N with per-chunk cv sync)
                 epilogueOp(validBlockShape, offsetC, params.mmadParams.splitM, params.schParams.baseM,
                            params.schParams.baseN, params.mmadParams.ubDB);
             }

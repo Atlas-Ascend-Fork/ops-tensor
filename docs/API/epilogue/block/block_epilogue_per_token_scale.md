@@ -34,7 +34,7 @@ offset 非空： y[m,n] =
 | `xRowSumGmAddr` | 激活行归约结果地址 |
 | `outGmAddr` | 最终输出地址 |
 | `n` | 完整输出 N |
-| `baseM/baseN` | 基本块大小 |
+| `baseM`、`baseN` | 基本块大小；当前执行块由 `operator()` 的 `singleM`、`singleN` 入参表示 |
 | `withOffset` | 是否执行 row-sum 与 offset 修正 |
 
 ## 执行流程

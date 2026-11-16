@@ -49,19 +49,6 @@ public:
         uint64_t windowLen = 4; // ASW滑窗长度，0视为未下发回退默认4
     };
 
-    __aicore__ inline BlockEpilogueQbmmPertensorStreamK()
-    {
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(1);
-    }
-    __aicore__ inline ~BlockEpilogueQbmmPertensorStreamK()
-    {
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(1);
-    }
-
     using WorkspaceType = WorkspaceType_;
     using OutType = OutType_;
     using DispatchPolicy = DispatchPolicy_;
@@ -73,17 +60,21 @@ public:
     static constexpr uint32_t DEQ_SCALE_MUL_MASK = 0xFFFFE000U;
     static constexpr uint16_t BIAS_EVENT_ID = 2U;
 
-    __aicore__ inline static float DecodeMaskedDequantScale(uint32_t scaleBits)
-    {
-        scaleBits &= DEQ_SCALE_MUL_MASK;
-        return *reinterpret_cast<float*>(&scaleBits);
-    }
+    __aicore__ inline BlockEpilogueQbmmPertensorStreamK();
+    __aicore__ inline ~BlockEpilogueQbmmPertensorStreamK();
+    __aicore__ inline static float DecodeMaskedDequantScale(uint32_t scaleBits);
+    __aicore__ inline static float MergeAndMaskDequantScale(float x2Scale, float x1Scale);
+    __aicore__ inline void Init(Params const& params, BlockShape blockShapeInAiv, BlockShape tileL1ShapeInAiv,
+                                BlockCoord coordInAiv, uint64_t usedCoreNum, bool checkIsSkScene,
+                                BlockShape tileL0Shape);
 
-    __aicore__ inline static float MergeAndMaskDequantScale(float x2Scale, float x1Scale)
-    {
-        const float dequantScale = x2Scale * x1Scale;
-        return DecodeMaskedDequantScale(*reinterpret_cast<const uint32_t*>(&dequantScale));
-    }
+    // Compatibility interfaces retained for existing callers.
+    __aicore__ inline void Run();
+    __aicore__ inline void operator()();
+    __aicore__ inline void UpdateAivBasicIndex();
+    __aicore__ inline void UpdateAivBasicBlock();
+    __aicore__ inline void UpdateAivParams();
+    __aicore__ inline void DequantAndStore();
 
 private:
     // basic args
@@ -123,381 +114,24 @@ private:
         uint64_t packedElements = 0;
     };
     ReductionTileParams reductionTileParams_;
-
-public:
-    __aicore__ inline void Init(Params const& params, BlockShape blockShapeInAiv, BlockShape tileL1ShapeInAiv,
-                                BlockCoord coordInAiv, uint64_t usedCoreNum, bool checkIsSkScene,
-                                BlockShape tileL0Shape)
-    {
-        m_ = asc::te::get<Blaze::Gemm::MNK_M>(blockShapeInAiv);
-        n_ = asc::te::get<Blaze::Gemm::MNK_N>(blockShapeInAiv);
-        mL1_ = asc::te::get<Blaze::Gemm::MNK_M>(tileL1ShapeInAiv);
-        nL1_ = asc::te::get<Blaze::Gemm::MNK_N>(tileL1ShapeInAiv);
-        mCnt_ = asc::te::get<Blaze::Gemm::MNK_M>(coordInAiv);
-        nCnt_ = asc::te::get<Blaze::Gemm::MNK_N>(coordInAiv);
-        kCnt_ = asc::te::get<Blaze::Gemm::MNK_K>(coordInAiv);
-        baseM_ = asc::te::get<Blaze::Gemm::MNK_M>(tileL0Shape);
-        baseN_ = asc::te::get<Blaze::Gemm::MNK_N>(tileL0Shape);
-        alignBaseN_ = Blaze::Gemm::CeilAlign(baseN_,
-                                             static_cast<uint64_t>(AscendC::GetVecLen() / sizeof(WorkspaceType)));
-        windowLen_ = params.windowLen == 0 ? 4 : params.windowLen; // 0视为未下发，回退默认4，与scheduler约定一致
-        usedCoreNum_ = usedCoreNum;
-        cGmAddr_ = params.cGmAddr;
-        scaleGmAddr_ = params.scaleGmAddr;
-        perTokenScaleGmAddr_ = params.perTokenScaleGmAddr;
-        biasGmAddr_ = params.biasGmAddr;
-        hasX1Scale_ = perTokenScaleGmAddr_ != nullptr;
-        isBias_ = params.isBias;
-        biasDtype_ = params.biasDtype;
-        workspaceGmAddr_ = params.workspaceGmAddr;
-        AscendC::ICachePreLoad(NUM_TWO);
-        // Ensure cube to pair with vector, add sync flag in dp+sk scene
-        if (!checkIsSkScene) {
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(Blaze::Gemm::ZERO_FLAG);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(Blaze::Gemm::ZERO_FLAG);
-        }
-    }
-
-    __aicore__ inline void Run()
-    {
-        taskGroupSize_ = AscendC::GetTaskRation() * kCnt_;
-        if (taskGroupSize_ == 0UL || usedCoreNum_ == 0UL || mCnt_ == 0UL || nCnt_ == 0UL) {
-            return;
-        }
-        UpdateAivBasicIndex();
-        UpdateAivBasicBlock();
-        UpdateAivParams();
-        AscendC::LocalTensor<WorkspaceType> ubAddTensor{AscendC::TPosition::VECIN, 0,
-                                                        AscendC::TOTAL_UB_SIZE / sizeof(WorkspaceType)};
-        if (reductionTileParams_.validRows == 0) {
-            return;
-        }
-        AcquireAuxUbForWorkspace();
-        CopyWorkspaceToUb();
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(Blaze::Gemm::ZERO_FLAG);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(Blaze::Gemm::ZERO_FLAG);
-
-        for (uint64_t i = 1; i < kCnt_; ++i) {
-            AscendC::Add(ubAddTensor, ubAddTensor, ubAddTensor[i * reductionTileParams_.packedElements],
-                         reductionTileParams_.packedElements);
-        }
-        AscendC::PipeBarrier<PIPE_V>();
-        ReleaseAuxCopyAfterReduce();
-
-        DequantAndStore();
-    }
-
-    __aicore__ inline void UpdateAivBasicIndex()
-    {
-        uint64_t newBlockIdx = AscendC::GetBlockIdx() / taskGroupSize_;
-        aivParams_.kCntIndex = AscendC::GetBlockIdx() % taskGroupSize_;
-
-        aivParams_.indexParams = newBlockIdx;
-        uint64_t cGmIndex = aivParams_.indexParams + (mCnt_ * nCnt_ - mCnt_ * nCnt_ % usedCoreNum_);
-        uint64_t mainWindow = AscendC::Std::min(windowLen_, mCnt_);
-        uint64_t mainRow = mCnt_ / mainWindow - 1UL;
-        uint64_t tailWindow = mCnt_ - mainRow * mainWindow;
-        uint64_t rowIdx = cGmIndex / nCnt_ / mainWindow;
-        if (rowIdx < mainRow) {
-            aivParams_.mCntIndex = rowIdx * mainWindow + cGmIndex % mainWindow;
-            aivParams_.nCntIndex = (cGmIndex / mainWindow) % nCnt_;
-        } else {
-            rowIdx = mainRow;
-            uint64_t tailIndex = cGmIndex - mainRow * mainWindow * nCnt_;
-            aivParams_.mCntIndex = mainRow * mainWindow + tailIndex % tailWindow;
-            aivParams_.nCntIndex = (tailIndex / tailWindow) % nCnt_;
-        }
-        // mod 2 means even row, need reverse scan
-        if (rowIdx % NUM_TWO != 0UL) {
-            aivParams_.nCntIndex = nCnt_ - 1UL - aivParams_.nCntIndex;
-        }
-    }
-
-    __aicore__ inline void UpdateAivBasicBlock()
-    {
-        aivParams_.curML1InAiv = aivParams_.mCntIndex != (mCnt_ - 1) ? mL1_ : (m_ - (mCnt_ - 1) * mL1_);
-        aivParams_.curNL1InAiv = aivParams_.nCntIndex != (nCnt_ - 1) ? nL1_ : (n_ - (nCnt_ - 1) * nL1_);
-        aivParams_.curAlignedNInAiv = Blaze::Gemm::CeilAlign(
-            aivParams_.curNL1InAiv, static_cast<uint64_t>(AscendC::GetVecLen() / sizeof(WorkspaceType)));
-    }
-
-    __aicore__ inline void UpdateAivParams()
-    {
-        const uint64_t rowsPerTaskGroup = Blaze::Gemm::CeilAlign(
-            Blaze::Gemm::CeilDiv(aivParams_.curML1InAiv, taskGroupSize_),
-            Blaze::Gemm::CeilDiv(UB2GM_SRCGAP_UNIT, aivParams_.curAlignedNInAiv));
-        uint64_t rowGroupCount = Blaze::Gemm::CeilDiv(aivParams_.curML1InAiv, rowsPerTaskGroup);
-        uint64_t tailRows = aivParams_.curML1InAiv - (rowGroupCount - 1) * rowsPerTaskGroup;
-        const uint64_t assignedRows = aivParams_.kCntIndex >= rowGroupCount ?
-                                          0UL :
-                                          (aivParams_.kCntIndex == rowGroupCount - 1 ? tailRows : rowsPerTaskGroup);
-
-        reductionTileParams_.validRows = assignedRows;
-        // Calculate the workspace tile origin used by the split-K reduction.
-        reductionTileParams_.workspaceOffset = (aivParams_.indexParams) * kCnt_ * baseM_ * alignBaseN_ +
-                                               aivParams_.kCntIndex * rowsPerTaskGroup * aivParams_.curAlignedNInAiv;
-        // Calculate the corresponding output tile origin in C GM.
-        cGmOffset_ = aivParams_.nCntIndex * nL1_ + aivParams_.mCntIndex * mL1_ * n_ +
-                     aivParams_.kCntIndex * rowsPerTaskGroup * n_;
-        reductionTileParams_.packedElements = Blaze::Gemm::CeilAlign(
-            reductionTileParams_.validRows * aivParams_.curAlignedNInAiv, Blaze::Gemm::BLOCK_BYTE_SIZE);
-    }
-
-    __aicore__ inline void operator()() { Run(); }
-
-    __aicore__ inline void DequantAndStore()
-    {
-        int64_t localM = static_cast<int64_t>(reductionTileParams_.validRows);
-        int64_t localN = static_cast<int64_t>(aivParams_.curNL1InAiv);
-        int64_t rowStride = static_cast<int64_t>(aivParams_.curAlignedNInAiv);
-        int64_t offsetBias = static_cast<int64_t>(aivParams_.nCntIndex * nL1_);
-
-        InitDequant(localM, localN, rowStride);
-        CopyBiasToUb(localN, offsetBias);
-
-        int64_t splitNum = AscendC::Std::min(localM, static_cast<int64_t>(DEQUANT_SPLIT_COUNT));
-        int64_t mSizeForOnce = CeilDiv(localM, splitNum);
-        for (int64_t i = 0; i < splitNum; ++i) {
-            if (i * mSizeForOnce >= localM) {
-                break;
-            }
-            int64_t mSize = AscendC::Std::min(mSizeForOnce, localM - i * mSizeForOnce);
-            int64_t l0cOffset = i * mSizeForOnce * rowStride;
-
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(pingPongId_);
-            DequantCompute(mSize, localN, rowStride, l0cOffset);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(pingPongId_);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(pingPongId_);
-
-            int64_t gmOffset = static_cast<int64_t>(cGmOffset_) + i * mSizeForOnce * n_;
-            CopyResultToGm(mSize, localN, gmOffset);
-
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(pingPongId_);
-            pingPongId_ ^= 1U;
-        }
-        ResetAuxCopyFlags();
-    }
-
-private:
-    __aicore__ inline void InitDequant(int64_t localM, int64_t localN, int64_t rowStride)
-    {
-        x2ScaleScalar_ = ReadRawX2ScaleScalar();
-        if (hasX1Scale_) {
-            AscendC::GlobalTensor<X1ScaleType> x1Scale;
-            x1Scale.SetGlobalBuffer(reinterpret_cast<__gm__ X1ScaleType*>(perTokenScaleGmAddr_));
-            x1ScaleScalar_ = x1Scale.GetValue(0);
-        }
-
-        // Match the existing non-StreamK paths exactly. Fixpipe combines both per-tensor scales and masks the
-        // combined value when bias is not handled by the AIV. A post-dequant bias selects the MIX semantics:
-        // keep both FP32 scales unmasked, multiply them in X2/X1 order, and add bias last.
-        if (!isBias_) {
-            x2ScaleScalar_ = hasX1Scale_ ?
-                                 MergeAndMaskDequantScale(x2ScaleScalar_, x1ScaleScalar_) :
-                                 DecodeMaskedDequantScale(*reinterpret_cast<const uint32_t*>(&x2ScaleScalar_));
-        }
-        SetupUbLayout(localM, localN, rowStride);
-    }
-
-    __aicore__ inline float ReadRawX2ScaleScalar()
-    {
-        if constexpr (IsSameType<X2ScaleType, float>::value) {
-            AscendC::GlobalTensor<float> x2Scale;
-            x2Scale.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(scaleGmAddr_));
-            return x2Scale.GetValue(0);
-        } else if constexpr (IsSameType<X2ScaleType, bfloat16_t>::value) {
-            AscendC::GlobalTensor<uint16_t> x2Scale;
-            x2Scale.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t*>(scaleGmAddr_));
-            uint16_t raw = x2Scale.GetValue(0);
-            uint32_t bits = static_cast<uint32_t>(raw) << 16;
-            return *reinterpret_cast<float*>(&bits);
-        } else if constexpr (IsSameType<X2ScaleType, uint64_t>::value || IsSameType<X2ScaleType, int64_t>::value) {
-            AscendC::GlobalTensor<X2ScaleType> x2Scale;
-            x2Scale.SetGlobalBuffer(reinterpret_cast<__gm__ X2ScaleType*>(scaleGmAddr_));
-            X2ScaleType rawScale = x2Scale.GetValue(0);
-            uint32_t bits = static_cast<uint32_t>(static_cast<uint64_t>(rawScale));
-            return *reinterpret_cast<float*>(&bits);
-        }
-        return 1.0F;
-    }
-
-    __aicore__ inline void SetupUbLayout(int64_t localM, int64_t localN, int64_t rowStride)
-    {
-        // Auxiliary buffers reuse the K-partial staging area after the in-place reduction. Run()
-        // establishes the V->MTE2 dependency before scale/bias can overwrite this region.
-        uint64_t offset = static_cast<uint64_t>(localM) * static_cast<uint64_t>(rowStride) * sizeof(WorkspaceType);
-        if (isBias_) {
-            biasUbOffset_ = offset;
-            offset += CeilAlign(static_cast<uint64_t>(localN) * sizeof(float), static_cast<uint64_t>(DATA_BLOCK));
-        }
-
-        // The ping-pong buffer holds exactly the maximum rows processed by one dequant split.
-        uint64_t outOnceSize = CeilDiv(static_cast<uint64_t>(localM), DEQUANT_SPLIT_COUNT) *
-                               CeilAlign(static_cast<uint64_t>(localN), static_cast<uint64_t>(OUT_ALIGN)) *
-                               sizeof(OutType);
-        dequantPingOffset_ = CeilAlign(offset, static_cast<uint64_t>(AscendC::GetVecLen()));
-        offset = dequantPingOffset_ + CeilAlign(outOnceSize, static_cast<uint64_t>(DATA_BLOCK));
-        dequantPongOffset_ = CeilAlign(offset, static_cast<uint64_t>(AscendC::GetVecLen()));
-    }
-
-    __aicore__ inline void CopyWorkspaceToUb()
-    {
-        const int64_t rows = static_cast<int64_t>(kCnt_);
-        const int64_t cols = static_cast<int64_t>(reductionTileParams_.packedElements);
-        // Each split-K partial occupies one fixed-size GM tile; pack its valid prefix contiguously in UB.
-        auto ubLayout = Gemm::MakeNDExtLayout(rows, cols, cols);
-        auto gmLayout = Gemm::MakeNDExtLayout(rows, cols, static_cast<int64_t>(baseM_ * alignBaseN_));
-        auto workspaceUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, WorkspaceType>(0),
-                                                ubLayout);
-        auto workspaceGm = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ WorkspaceType*>(workspaceGmAddr_) +
-                                                         reductionTileParams_.workspaceOffset),
-            gmLayout);
-        auto copyGM2UB = asc::te::make_copy(asc::te::copy_gm_to_ub{});
-        asc::te::copy(copyGM2UB, workspaceUb, workspaceGm);
-    }
-
+    __aicore__ inline void InitDequant(int64_t localM, int64_t localN, int64_t rowStride);
+    __aicore__ inline float ReadRawX2ScaleScalar();
+    __aicore__ inline void SetupUbLayout(int64_t localM, int64_t localN, int64_t rowStride);
+    __aicore__ inline void CopyWorkspaceToUb();
     template <class T>
-    __aicore__ inline static int64_t AlignedUbPitch(int64_t cols)
-    {
-        return static_cast<int64_t>(
-            CeilAlign(static_cast<uint64_t>(cols) * sizeof(T), static_cast<uint64_t>(DATA_BLOCK)) / sizeof(T));
-    }
-
-    __aicore__ inline void CopyBiasToUb(int64_t localN, int64_t offsetBias)
-    {
-        if (isBias_) {
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
-            if (biasDtype_ == DT_FLOAT) {
-                CopyBiasToUbTyped<float>(localN, offsetBias);
-            } else if (biasDtype_ == DT_FLOAT16) {
-                CopyBiasToUbTyped<half>(localN, offsetBias);
-            } else {
-                CopyBiasToUbTyped<bfloat16_t>(localN, offsetBias);
-            }
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(BIAS_EVENT_ID);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(BIAS_EVENT_ID);
-        }
-    }
-
-    __aicore__ inline void AcquireAuxUbForWorkspace()
-    {
-        // The workspace reduction and auxiliary inputs reuse the same UB region. Wait until the
-        // previous dequant iteration has finished consuming bias before MTE2 overwrites it.
-        if (isBias_) {
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
-        }
-    }
-
-    __aicore__ inline void ReleaseAuxCopyAfterReduce()
-    {
-        // Do not let bias GM2UB overwrite K partials before the vector reduction completes.
-        if (isBias_) {
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
-        }
-    }
-
+    __aicore__ inline static int64_t AlignedUbPitch(int64_t cols);
+    __aicore__ inline void CopyBiasToUb(int64_t localN, int64_t offsetBias);
+    __aicore__ inline void AcquireAuxUbForWorkspace();
+    __aicore__ inline void ReleaseAuxCopyAfterReduce();
     template <class ActualBiasType>
-    __aicore__ inline void CopyBiasToUbTyped(int64_t localN, int64_t offsetBias)
-    {
-        auto copyGM2UB = asc::te::make_copy(asc::te::copy_gm_to_ub{});
-        auto ubLayout = Gemm::MakeNDExtLayout(1, localN, AlignedUbPitch<ActualBiasType>(localN));
-        auto gmLayout = Gemm::MakeNDExtLayout(1, localN, localN);
-        auto biasUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, ActualBiasType>(biasUbOffset_),
-                                           ubLayout);
-        auto biasGm = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(
-                                               reinterpret_cast<__gm__ ActualBiasType*>(biasGmAddr_) + offsetBias),
-                                           gmLayout);
-        asc::te::copy(copyGM2UB, biasUb, biasGm);
-    }
-
-    __aicore__ inline void DequantCompute(int64_t mSize, int64_t localN, int64_t rowStride, int64_t l0cOffset)
-    {
-        if (!isBias_ || biasDtype_ == DT_FLOAT) {
-            DequantComputeTyped<float>(mSize, localN, rowStride, l0cOffset);
-        } else if (biasDtype_ == DT_FLOAT16) {
-            DequantComputeTyped<half>(mSize, localN, rowStride, l0cOffset);
-        } else {
-            DequantComputeTyped<bfloat16_t>(mSize, localN, rowStride, l0cOffset);
-        }
-    }
-
+    __aicore__ inline void CopyBiasToUbTyped(int64_t localN, int64_t offsetBias);
+    __aicore__ inline void DequantCompute(int64_t mSize, int64_t localN, int64_t rowStride, int64_t l0cOffset);
     template <class BiasDtype>
-    __aicore__ inline void DequantComputeTyped(int64_t mSize, int64_t localN, int64_t rowStride, int64_t l0cOffset)
-    {
-        uint32_t nDstAligned = static_cast<uint32_t>(
-            CeilAlign(static_cast<uint64_t>(localN), static_cast<uint64_t>(OUT_ALIGN)));
-        uint64_t dequantOffset = pingPongId_ == 0U ? dequantPingOffset_ : dequantPongOffset_;
-        uint16_t mSize16 = static_cast<uint16_t>(mSize);
-        uint16_t nSize16 = static_cast<uint16_t>(localN);
-        uint32_t nSrcAligned = static_cast<uint32_t>(rowStride);
-
-        // Tensors for the Tile::Dequant chain. x2 is always PER_TENSOR here (the raw scale
-        // dtype is resolved by ReadRawX2ScaleScalar into x2ScaleScalar_ before the tile runs), so
-        // the x2/x1 vector slots receive fp32 placeholder tensors (never dereferenced).
-        auto accTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, WorkspaceType>(
-                                                  static_cast<uint64_t>(l0cOffset) * sizeof(WorkspaceType)),
-                                              Gemm::MakeNDExtLayout(mSize, localN, rowStride));
-        auto dstTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, OutType>(dequantOffset),
-                                              Gemm::MakeNDExtLayout(mSize, localN, static_cast<int64_t>(nDstAligned)));
-        auto x2DummyTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0),
-                                                  Gemm::MakeNDExtLayout(1, 1, 1));
-        auto x1DummyTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0),
-                                                  Gemm::MakeNDExtLayout(1, 1, 1));
-        auto biasTensor = MakeBiasTensor<BiasDtype>(localN);
-
-        // Dispatch matrix (design doc §5.2): x2/x1 scalars are kept separate when bias runs
-        // on the AIV; without bias InitDequant pre-merges (and 0xFFFFE000-masks) x1 into
-        // x2ScaleScalar_ so a single Muls reproduces the fixpipe behavior.
-        using B32ToFpDequant = Tile::Dequant<Tile::B32ToFpTag>;
-        using DequantMode = Tile::DequantMode;
-        if (hasX1Scale_ && isBias_) {
-            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, true>(
-                accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_, mSize16,
-                nSize16, nSrcAligned, nDstAligned);
-        } else if (isBias_) {
-            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, true>(
-                accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16, nSize16,
-                nSrcAligned, nDstAligned);
-        } else {
-            B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, false>(
-                accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16, nSize16,
-                nSrcAligned, nDstAligned);
-        }
-    }
-
-    // Bias single-row vector (runtime dtype) at biasUbOffset_; placeholder when no bias.
+    __aicore__ inline void DequantComputeTyped(int64_t mSize, int64_t localN, int64_t rowStride, int64_t l0cOffset);
     template <class BiasDtype>
-    __aicore__ inline auto MakeBiasTensor(int64_t localN)
-    {
-        if (isBias_) {
-            return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, BiasDtype>(biasUbOffset_),
-                                        Gemm::MakeNDExtLayout(1, localN, AlignedUbPitch<BiasDtype>(localN)));
-        }
-        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, BiasDtype>(0),
-                                    Gemm::MakeNDExtLayout(1, 1, 1));
-    }
-
-    __aicore__ inline void CopyResultToGm(int64_t mSize, int64_t localN, int64_t gmOffset)
-    {
-        uint64_t dequantOffset = pingPongId_ == 0U ? dequantPingOffset_ : dequantPongOffset_;
-        uint64_t nDstAligned = CeilAlign(static_cast<uint64_t>(localN), static_cast<uint64_t>(OUT_ALIGN));
-        auto ubLayout = Gemm::MakeNDExtLayout(mSize, localN, static_cast<int64_t>(nDstAligned));
-        auto gmLayout = Gemm::MakeNDExtLayout(mSize, localN, static_cast<int64_t>(n_));
-        auto outUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, OutType>(dequantOffset),
-                                          ubLayout);
-        auto outGm = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ OutType*>(cGmAddr_) + gmOffset),
-            gmLayout);
-        asc::te::copy(asc::te::make_copy(asc::te::copy_ub_to_gm{}), outGm, outUb);
-    }
-
-    __aicore__ inline void ResetAuxCopyFlags()
-    {
-        if (isBias_) {
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
-        }
-    }
+    __aicore__ inline auto MakeBiasTensor(int64_t localN);
+    __aicore__ inline void CopyResultToGm(int64_t mSize, int64_t localN, int64_t gmOffset);
+    __aicore__ inline void ResetAuxCopyFlags();
 
     uint64_t baseM_ = 0;
     uint64_t baseN_ = 0;
@@ -515,6 +149,400 @@ private:
     uint64_t dequantPingOffset_{0UL};
     uint64_t dequantPongOffset_{0UL};
 };
+
+#define BLAZE_QBMM_CLASS_TEMPLATE \
+    template <class WorkspaceType_, class OutType_, class DispatchPolicy_, class X2ScaleType_, class X1ScaleType_>
+#define BLAZE_QBMM_CLASS \
+    BlockEpilogueQbmmPertensorStreamK<WorkspaceType_, OutType_, DispatchPolicy_, X2ScaleType_, X1ScaleType_>
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline BLAZE_QBMM_CLASS::BlockEpilogueQbmmPertensorStreamK()
+{
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(1);
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline BLAZE_QBMM_CLASS::~BlockEpilogueQbmmPertensorStreamK()
+{
+    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(1);
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline float BLAZE_QBMM_CLASS::DecodeMaskedDequantScale(uint32_t scaleBits)
+{
+    scaleBits &= DEQ_SCALE_MUL_MASK;
+    return *reinterpret_cast<float*>(&scaleBits);
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline float BLAZE_QBMM_CLASS::MergeAndMaskDequantScale(float x2Scale, float x1Scale)
+{
+    const float dequantScale = x2Scale * x1Scale;
+    return DecodeMaskedDequantScale(*reinterpret_cast<const uint32_t*>(&dequantScale));
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::Init(Params const& params, BlockShape blockShapeInAiv,
+                                              BlockShape tileL1ShapeInAiv, BlockCoord coordInAiv, uint64_t usedCoreNum,
+                                              bool checkIsSkScene, BlockShape tileL0Shape)
+{
+    m_ = asc::te::get<Blaze::Gemm::MNK_M>(blockShapeInAiv);
+    n_ = asc::te::get<Blaze::Gemm::MNK_N>(blockShapeInAiv);
+    mL1_ = asc::te::get<Blaze::Gemm::MNK_M>(tileL1ShapeInAiv);
+    nL1_ = asc::te::get<Blaze::Gemm::MNK_N>(tileL1ShapeInAiv);
+    mCnt_ = asc::te::get<Blaze::Gemm::MNK_M>(coordInAiv);
+    nCnt_ = asc::te::get<Blaze::Gemm::MNK_N>(coordInAiv);
+    kCnt_ = asc::te::get<Blaze::Gemm::MNK_K>(coordInAiv);
+    baseM_ = asc::te::get<Blaze::Gemm::MNK_M>(tileL0Shape);
+    baseN_ = asc::te::get<Blaze::Gemm::MNK_N>(tileL0Shape);
+    alignBaseN_ = Blaze::Gemm::CeilAlign(baseN_, static_cast<uint64_t>(AscendC::GetVecLen() / sizeof(WorkspaceType)));
+    windowLen_ = params.windowLen == 0 ? 4 : params.windowLen;
+    usedCoreNum_ = usedCoreNum;
+    cGmAddr_ = params.cGmAddr;
+    scaleGmAddr_ = params.scaleGmAddr;
+    perTokenScaleGmAddr_ = params.perTokenScaleGmAddr;
+    biasGmAddr_ = params.biasGmAddr;
+    hasX1Scale_ = perTokenScaleGmAddr_ != nullptr;
+    isBias_ = params.isBias;
+    biasDtype_ = params.biasDtype;
+    workspaceGmAddr_ = params.workspaceGmAddr;
+    AscendC::ICachePreLoad(NUM_TWO);
+    if (!checkIsSkScene) {
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(Blaze::Gemm::ZERO_FLAG);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(Blaze::Gemm::ZERO_FLAG);
+    }
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::Run()
+{
+    taskGroupSize_ = AscendC::GetTaskRation() * kCnt_;
+    if (taskGroupSize_ == 0UL || usedCoreNum_ == 0UL || mCnt_ == 0UL || nCnt_ == 0UL) {
+        return;
+    }
+    UpdateAivBasicIndex();
+    UpdateAivBasicBlock();
+    UpdateAivParams();
+    AscendC::LocalTensor<WorkspaceType> ubAddTensor{AscendC::TPosition::VECIN, 0,
+                                                    AscendC::TOTAL_UB_SIZE / sizeof(WorkspaceType)};
+    if (reductionTileParams_.validRows == 0) {
+        return;
+    }
+    AcquireAuxUbForWorkspace();
+    CopyWorkspaceToUb();
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(Blaze::Gemm::ZERO_FLAG);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(Blaze::Gemm::ZERO_FLAG);
+    for (uint64_t i = 1; i < kCnt_; ++i) {
+        AscendC::Add(ubAddTensor, ubAddTensor, ubAddTensor[i * reductionTileParams_.packedElements],
+                     reductionTileParams_.packedElements);
+    }
+    AscendC::PipeBarrier<PIPE_V>();
+    ReleaseAuxCopyAfterReduce();
+    DequantAndStore();
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::UpdateAivBasicIndex()
+{
+    uint64_t newBlockIdx = AscendC::GetBlockIdx() / taskGroupSize_;
+    aivParams_.kCntIndex = AscendC::GetBlockIdx() % taskGroupSize_;
+    aivParams_.indexParams = newBlockIdx;
+    uint64_t cGmIndex = aivParams_.indexParams + (mCnt_ * nCnt_ - mCnt_ * nCnt_ % usedCoreNum_);
+    uint64_t mainWindow = AscendC::Std::min(windowLen_, mCnt_);
+    uint64_t mainRow = mCnt_ / mainWindow - 1UL;
+    uint64_t tailWindow = mCnt_ - mainRow * mainWindow;
+    uint64_t rowIdx = cGmIndex / nCnt_ / mainWindow;
+    if (rowIdx < mainRow) {
+        aivParams_.mCntIndex = rowIdx * mainWindow + cGmIndex % mainWindow;
+        aivParams_.nCntIndex = (cGmIndex / mainWindow) % nCnt_;
+    } else {
+        rowIdx = mainRow;
+        uint64_t tailIndex = cGmIndex - mainRow * mainWindow * nCnt_;
+        aivParams_.mCntIndex = mainRow * mainWindow + tailIndex % tailWindow;
+        aivParams_.nCntIndex = (tailIndex / tailWindow) % nCnt_;
+    }
+    if (rowIdx % NUM_TWO != 0UL) {
+        aivParams_.nCntIndex = nCnt_ - 1UL - aivParams_.nCntIndex;
+    }
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::UpdateAivBasicBlock()
+{
+    aivParams_.curML1InAiv = aivParams_.mCntIndex != (mCnt_ - 1) ? mL1_ : (m_ - (mCnt_ - 1) * mL1_);
+    aivParams_.curNL1InAiv = aivParams_.nCntIndex != (nCnt_ - 1) ? nL1_ : (n_ - (nCnt_ - 1) * nL1_);
+    aivParams_.curAlignedNInAiv = Blaze::Gemm::CeilAlign(
+        aivParams_.curNL1InAiv, static_cast<uint64_t>(AscendC::GetVecLen() / sizeof(WorkspaceType)));
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::UpdateAivParams()
+{
+    const uint64_t rowsPerTaskGroup = Blaze::Gemm::CeilAlign(
+        Blaze::Gemm::CeilDiv(aivParams_.curML1InAiv, taskGroupSize_),
+        Blaze::Gemm::CeilDiv(UB2GM_SRCGAP_UNIT, aivParams_.curAlignedNInAiv));
+    uint64_t rowGroupCount = Blaze::Gemm::CeilDiv(aivParams_.curML1InAiv, rowsPerTaskGroup);
+    uint64_t tailRows = aivParams_.curML1InAiv - (rowGroupCount - 1) * rowsPerTaskGroup;
+    const uint64_t assignedRows = aivParams_.kCntIndex >= rowGroupCount ?
+                                      0UL :
+                                      (aivParams_.kCntIndex == rowGroupCount - 1 ? tailRows : rowsPerTaskGroup);
+    reductionTileParams_.validRows = assignedRows;
+    reductionTileParams_.workspaceOffset = (aivParams_.indexParams) * kCnt_ * baseM_ * alignBaseN_ +
+                                           aivParams_.kCntIndex * rowsPerTaskGroup * aivParams_.curAlignedNInAiv;
+    cGmOffset_ = aivParams_.nCntIndex * nL1_ + aivParams_.mCntIndex * mL1_ * n_ +
+                 aivParams_.kCntIndex * rowsPerTaskGroup * n_;
+    reductionTileParams_.packedElements = Blaze::Gemm::CeilAlign(
+        reductionTileParams_.validRows * aivParams_.curAlignedNInAiv, Blaze::Gemm::BLOCK_BYTE_SIZE);
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::operator()() { Run(); }
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::DequantAndStore()
+{
+    int64_t localM = static_cast<int64_t>(reductionTileParams_.validRows);
+    int64_t localN = static_cast<int64_t>(aivParams_.curNL1InAiv);
+    int64_t rowStride = static_cast<int64_t>(aivParams_.curAlignedNInAiv);
+    int64_t offsetBias = static_cast<int64_t>(aivParams_.nCntIndex * nL1_);
+    InitDequant(localM, localN, rowStride);
+    CopyBiasToUb(localN, offsetBias);
+    int64_t splitNum = AscendC::Std::min(localM, static_cast<int64_t>(DEQUANT_SPLIT_COUNT));
+    int64_t mSizeForOnce = CeilDiv(localM, splitNum);
+    for (int64_t i = 0; i < splitNum; ++i) {
+        if (i * mSizeForOnce >= localM) {
+            break;
+        }
+        int64_t mSize = AscendC::Std::min(mSizeForOnce, localM - i * mSizeForOnce);
+        int64_t l0cOffset = i * mSizeForOnce * rowStride;
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(pingPongId_);
+        DequantCompute(mSize, localN, rowStride, l0cOffset);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(pingPongId_);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(pingPongId_);
+        int64_t gmOffset = static_cast<int64_t>(cGmOffset_) + i * mSizeForOnce * n_;
+        CopyResultToGm(mSize, localN, gmOffset);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(pingPongId_);
+        pingPongId_ ^= 1U;
+    }
+    ResetAuxCopyFlags();
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::InitDequant(int64_t localM, int64_t localN, int64_t rowStride)
+{
+    x2ScaleScalar_ = ReadRawX2ScaleScalar();
+    if (hasX1Scale_) {
+        AscendC::GlobalTensor<X1ScaleType> x1Scale;
+        x1Scale.SetGlobalBuffer(reinterpret_cast<__gm__ X1ScaleType*>(perTokenScaleGmAddr_));
+        x1ScaleScalar_ = x1Scale.GetValue(0);
+    }
+    if (!isBias_) {
+        x2ScaleScalar_ = hasX1Scale_ ? MergeAndMaskDequantScale(x2ScaleScalar_, x1ScaleScalar_) :
+                                       DecodeMaskedDequantScale(*reinterpret_cast<const uint32_t*>(&x2ScaleScalar_));
+    }
+    SetupUbLayout(localM, localN, rowStride);
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline float BLAZE_QBMM_CLASS::ReadRawX2ScaleScalar()
+{
+    if constexpr (IsSameType<X2ScaleType, float>::value) {
+        AscendC::GlobalTensor<float> x2Scale;
+        x2Scale.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(scaleGmAddr_));
+        return x2Scale.GetValue(0);
+    } else if constexpr (IsSameType<X2ScaleType, bfloat16_t>::value) {
+        AscendC::GlobalTensor<uint16_t> x2Scale;
+        x2Scale.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t*>(scaleGmAddr_));
+        uint16_t raw = x2Scale.GetValue(0);
+        uint32_t bits = static_cast<uint32_t>(raw) << 16;
+        return *reinterpret_cast<float*>(&bits);
+    } else if constexpr (IsSameType<X2ScaleType, uint64_t>::value || IsSameType<X2ScaleType, int64_t>::value) {
+        AscendC::GlobalTensor<X2ScaleType> x2Scale;
+        x2Scale.SetGlobalBuffer(reinterpret_cast<__gm__ X2ScaleType*>(scaleGmAddr_));
+        X2ScaleType rawScale = x2Scale.GetValue(0);
+        uint32_t bits = static_cast<uint32_t>(static_cast<uint64_t>(rawScale));
+        return *reinterpret_cast<float*>(&bits);
+    }
+    return 1.0F;
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::SetupUbLayout(int64_t localM, int64_t localN, int64_t rowStride)
+{
+    uint64_t offset = static_cast<uint64_t>(localM) * static_cast<uint64_t>(rowStride) * sizeof(WorkspaceType);
+    if (isBias_) {
+        biasUbOffset_ = offset;
+        offset += CeilAlign(static_cast<uint64_t>(localN) * sizeof(float), static_cast<uint64_t>(DATA_BLOCK));
+    }
+    uint64_t outOnceSize = CeilDiv(static_cast<uint64_t>(localM), DEQUANT_SPLIT_COUNT) *
+                           CeilAlign(static_cast<uint64_t>(localN), static_cast<uint64_t>(OUT_ALIGN)) * sizeof(OutType);
+    dequantPingOffset_ = CeilAlign(offset, static_cast<uint64_t>(AscendC::GetVecLen()));
+    offset = dequantPingOffset_ + CeilAlign(outOnceSize, static_cast<uint64_t>(DATA_BLOCK));
+    dequantPongOffset_ = CeilAlign(offset, static_cast<uint64_t>(AscendC::GetVecLen()));
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::CopyWorkspaceToUb()
+{
+    const int64_t rows = static_cast<int64_t>(kCnt_);
+    const int64_t cols = static_cast<int64_t>(reductionTileParams_.packedElements);
+    auto ubLayout = Gemm::MakeNDExtLayout(rows, cols, cols);
+    auto gmLayout = Gemm::MakeNDExtLayout(rows, cols, static_cast<int64_t>(baseM_ * alignBaseN_));
+    auto workspaceUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, WorkspaceType>(0), ubLayout);
+    auto workspaceGm = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ WorkspaceType*>(workspaceGmAddr_) +
+                                                     reductionTileParams_.workspaceOffset),
+        gmLayout);
+    auto copyGM2UB = asc::te::make_copy(asc::te::copy_gm_to_ub{});
+    asc::te::copy(copyGM2UB, workspaceUb, workspaceGm);
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+template <class T>
+__aicore__ inline int64_t BLAZE_QBMM_CLASS::AlignedUbPitch(int64_t cols)
+{
+    return static_cast<int64_t>(CeilAlign(static_cast<uint64_t>(cols) * sizeof(T), static_cast<uint64_t>(DATA_BLOCK)) /
+                                sizeof(T));
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::CopyBiasToUb(int64_t localN, int64_t offsetBias)
+{
+    if (isBias_) {
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
+        if (biasDtype_ == DT_FLOAT) {
+            CopyBiasToUbTyped<float>(localN, offsetBias);
+        } else if (biasDtype_ == DT_FLOAT16) {
+            CopyBiasToUbTyped<half>(localN, offsetBias);
+        } else {
+            CopyBiasToUbTyped<bfloat16_t>(localN, offsetBias);
+        }
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(BIAS_EVENT_ID);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(BIAS_EVENT_ID);
+    }
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::AcquireAuxUbForWorkspace()
+{
+    if (isBias_) {
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
+    }
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::ReleaseAuxCopyAfterReduce()
+{
+    if (isBias_) {
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
+    }
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+template <class ActualBiasType>
+__aicore__ inline void BLAZE_QBMM_CLASS::CopyBiasToUbTyped(int64_t localN, int64_t offsetBias)
+{
+    auto copyGM2UB = asc::te::make_copy(asc::te::copy_gm_to_ub{});
+    auto ubLayout = Gemm::MakeNDExtLayout(1, localN, AlignedUbPitch<ActualBiasType>(localN));
+    auto gmLayout = Gemm::MakeNDExtLayout(1, localN, localN);
+    auto biasUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, ActualBiasType>(biasUbOffset_),
+                                       ubLayout);
+    auto biasGm = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(
+                                           reinterpret_cast<__gm__ ActualBiasType*>(biasGmAddr_) + offsetBias),
+                                       gmLayout);
+    asc::te::copy(copyGM2UB, biasUb, biasGm);
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::DequantCompute(int64_t mSize, int64_t localN, int64_t rowStride,
+                                                        int64_t l0cOffset)
+{
+    if (!isBias_ || biasDtype_ == DT_FLOAT) {
+        DequantComputeTyped<float>(mSize, localN, rowStride, l0cOffset);
+    } else if (biasDtype_ == DT_FLOAT16) {
+        DequantComputeTyped<half>(mSize, localN, rowStride, l0cOffset);
+    } else {
+        DequantComputeTyped<bfloat16_t>(mSize, localN, rowStride, l0cOffset);
+    }
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+template <class BiasDtype>
+__aicore__ inline void BLAZE_QBMM_CLASS::DequantComputeTyped(int64_t mSize, int64_t localN, int64_t rowStride,
+                                                             int64_t l0cOffset)
+{
+    uint32_t nDstAligned = static_cast<uint32_t>(
+        CeilAlign(static_cast<uint64_t>(localN), static_cast<uint64_t>(OUT_ALIGN)));
+    uint64_t dequantOffset = pingPongId_ == 0U ? dequantPingOffset_ : dequantPongOffset_;
+    uint16_t mSize16 = static_cast<uint16_t>(mSize);
+    uint16_t nSize16 = static_cast<uint16_t>(localN);
+    uint32_t nSrcAligned = static_cast<uint32_t>(rowStride);
+    auto accTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, WorkspaceType>(
+                                              static_cast<uint64_t>(l0cOffset) * sizeof(WorkspaceType)),
+                                          Gemm::MakeNDExtLayout(mSize, localN, rowStride));
+    auto dstTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, OutType>(dequantOffset),
+                                          Gemm::MakeNDExtLayout(mSize, localN, static_cast<int64_t>(nDstAligned)));
+    auto x2DummyTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0),
+                                              Gemm::MakeNDExtLayout(1, 1, 1));
+    auto x1DummyTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0),
+                                              Gemm::MakeNDExtLayout(1, 1, 1));
+    auto biasTensor = MakeBiasTensor<BiasDtype>(localN);
+    using B32ToFpDequant = Tile::Dequant<Tile::B32ToFpTag>;
+    using DequantMode = Tile::DequantMode;
+    if (hasX1Scale_ && isBias_) {
+        B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::PER_TENSOR, true>(
+            accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, x1ScaleScalar_, mSize16,
+            nSize16, nSrcAligned, nDstAligned);
+    } else if (isBias_) {
+        B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, true>(
+            accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16, nSize16,
+            nSrcAligned, nDstAligned);
+    } else {
+        B32ToFpDequant::template Run<DequantMode::PER_TENSOR, DequantMode::NONE, false>(
+            accTensor, dstTensor, x2DummyTensor, x1DummyTensor, biasTensor, x2ScaleScalar_, 1.0f, mSize16, nSize16,
+            nSrcAligned, nDstAligned);
+    }
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+template <class BiasDtype>
+__aicore__ inline auto BLAZE_QBMM_CLASS::MakeBiasTensor(int64_t localN)
+{
+    if (isBias_) {
+        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, BiasDtype>(biasUbOffset_),
+                                    Gemm::MakeNDExtLayout(1, localN, AlignedUbPitch<BiasDtype>(localN)));
+    }
+    return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, BiasDtype>(0),
+                                Gemm::MakeNDExtLayout(1, 1, 1));
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::CopyResultToGm(int64_t mSize, int64_t localN, int64_t gmOffset)
+{
+    uint64_t dequantOffset = pingPongId_ == 0U ? dequantPingOffset_ : dequantPongOffset_;
+    uint64_t nDstAligned = CeilAlign(static_cast<uint64_t>(localN), static_cast<uint64_t>(OUT_ALIGN));
+    auto ubLayout = Gemm::MakeNDExtLayout(mSize, localN, static_cast<int64_t>(nDstAligned));
+    auto gmLayout = Gemm::MakeNDExtLayout(mSize, localN, static_cast<int64_t>(n_));
+    auto outUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, OutType>(dequantOffset), ubLayout);
+    auto outGm = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ OutType*>(cGmAddr_) + gmOffset), gmLayout);
+    asc::te::copy(asc::te::make_copy(asc::te::copy_ub_to_gm{}), outGm, outUb);
+}
+
+BLAZE_QBMM_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_QBMM_CLASS::ResetAuxCopyFlags()
+{
+    if (isBias_) {
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
+    }
+}
+
+#undef BLAZE_QBMM_CLASS_TEMPLATE
+#undef BLAZE_QBMM_CLASS
 } // namespace Block
 } // namespace Epilogue
 

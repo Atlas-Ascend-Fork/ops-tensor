@@ -16,6 +16,7 @@
 #pragma once
 #include "kernel_basic_intf.h"
 #include "reg_compute/kernel_reg_compute_intf.h"
+#include "blaze/epilogue/block/block_epilogue_types.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/epilogue/fusion/default_fusion_op.h"
@@ -45,9 +46,11 @@ public:
         float invDstTypeMax{0.0f};
     };
 
-    __aicore__ inline BlockEpilogueFlatQuant() {}
+    using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
 
+    __aicore__ inline BlockEpilogueFlatQuant();
     __aicore__ inline void Init(Params const& params);
+    __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
     __aicore__ inline void operator()(uint64_t startBatchIdx, uint64_t iterBatch);
 
 private:
@@ -87,10 +90,7 @@ private:
     static __simd_vf__ inline void RestoreTailVf(__ubuf__ uint16_t* dstPtr, __ubuf__ uint16_t* srcPtr, uint32_t count);
 
     template <typename T>
-    __aicore__ inline static uint32_t GetUbByteOffset(const AscendC::LocalTensor<T>& tensor)
-    {
-        return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(tensor.GetPhyAddr()) - asc_get_phy_buf_addr(0));
-    }
+    __aicore__ inline static uint32_t GetUbByteOffset(const AscendC::LocalTensor<T>& tensor);
 
     // ---- Shape ----
     struct FlatQuantShapeInfo {
@@ -128,6 +128,29 @@ private:
     uint16_t eventIdVToMte3_{2};
     uint16_t eventIdMte3ToV_{3};
 };
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::BlockEpilogueFlatQuant()
+{}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline auto
+BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::GetAccumulatorTensor(
+    const AccumulatorTensorParams& params) const
+{
+    const int64_t alignN = Gemm::CeilAlign(params.cols, static_cast<int64_t>(Gemm::BLOCK_CUBE));
+    return asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(0),
+        asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(params.batch, params.rows, alignN));
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+template <typename T>
+__aicore__ inline uint32_t BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_,
+                                                  FusionOp_>::GetUbByteOffset(const AscendC::LocalTensor<T>& tensor)
+{
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(tensor.GetPhyAddr()) - asc_get_phy_buf_addr(0));
+}
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
 __aicore__ inline void BlockEpilogueFlatQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::Init(

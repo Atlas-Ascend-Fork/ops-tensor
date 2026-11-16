@@ -135,8 +135,7 @@ struct Params {
 |------|------|
 | `yGmAddr` | 量化输出 y 的 GM 地址 |
 | `yScaleGmAddr` | E8M0 yScale 的 GM 地址 |
-| `baseM` | 基础 M tile 大小，用于 UB 临时空间规划 |
-| `baseN` | 基础 N tile 大小，用于 UB 临时空间规划 |
+| `baseM`、`baseN` | 基础 tile 大小，用于 UB 临时空间规划 |
 | `scaleAlg` | MX scale 算法，支持 OCP、cuBLAS 和 FP4 动态范围路径 |
 | `dstTypeMax` | FP4 动态范围路径使用的目标 dtype 最大值 |
 
@@ -172,7 +171,7 @@ scaleN_ = ceil(N / 64) * 2
 ### `UpdateGlobalAddr`
 
 ~~~cpp
-__aicore__ inline void UpdateGlobalAddr(const OutputOffsets& baseOffsets)
+__aicore__ inline void UpdateGlobalAddr(const OutputOffsets& baseOutputOffsets)
 ~~~
 
 根据当前 group 的输出偏移刷新 y/yScale 的 GM 地址。对于 FP4 输出，y 的
@@ -181,10 +180,10 @@ __aicore__ inline void UpdateGlobalAddr(const OutputOffsets& baseOffsets)
 ### `operator()`
 
 ~~~cpp
-__aicore__ inline void operator()(
-    const BlockShape& blockShape,
-    const OutputOffsets& outputOffsets)
+__aicore__ inline void operator()(const BlockShape& blockShape, const OutputOffsets& outputOffsets)
 ~~~
+
+根据当前 `blockShape` 和 `outputOffsets` 处理一个 tile。
 
 处理一个 AIC/AIV tile：
 

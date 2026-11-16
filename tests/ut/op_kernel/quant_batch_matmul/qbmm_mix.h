@@ -63,6 +63,28 @@ struct QBMMMixTypes {
     using Kernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 };
 
+template <typename OutType_, typename BiasType_, typename X2ScaleType_, typename X1ScaleType_, typename L0CType_>
+class LegacyBlockEpilogueDequant {
+public:
+    using OutType = OutType_;
+    using L0CType = L0CType_;
+    using Params = typename Blaze::Epilogue::Block::BlockEpilogueDequant<OutType, BiasType_, X2ScaleType_, X1ScaleType_,
+                                                                         L0CType>::Params;
+
+    __aicore__ inline void Init(const Params&) {}
+    __aicore__ inline void operator()(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}
+};
+
+template <typename AType, typename BType, typename OutType, typename X2ScaleType, typename X1ScaleType,
+          typename BiasType, uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE>
+struct QBMMLegacyMixTypes : QBMMMixTypes<AType, BType, OutType, X2ScaleType, X1ScaleType, BiasType, FullLoadMode> {
+    using Base = QBMMMixTypes<AType, BType, OutType, X2ScaleType, X1ScaleType, BiasType, FullLoadMode>;
+    using BlockEpilogue = LegacyBlockEpilogueDequant<OutType, BiasType, X2ScaleType, X1ScaleType,
+                                                     typename Base::BlockMmad::L0CType>;
+    using Kernel = Blaze::Gemm::Kernel::GemmUniversal<typename Base::ProblemShape, typename Base::BlockMmad,
+                                                      BlockEpilogue, typename Base::BlockScheduler>;
+};
+
 // 用 tilingData 填充 MIX BlockMmad::Params（aGm/bGm + 全套 tile/L1/L0C 配置）。
 template <typename MmadParams>
 __aicore__ inline void FillMixMmadParams(MmadParams& mmadParams, GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR biasGM,
@@ -94,8 +116,8 @@ __aicore__ inline void FillEpilogueParams(EpilogueParams& epilogueParams, GM_ADD
     epilogueParams.outGmAddr = reinterpret_cast<GM_ADDR>(yGM);
     epilogueParams.m = tilingData.m;
     epilogueParams.n = tilingData.n;
-    epilogueParams.baseM = static_cast<int64_t>(tilingData.baseM_qbmm);
-    epilogueParams.baseN = static_cast<int64_t>(tilingData.baseN_qbmm);
+    epilogueParams.baseM = tilingData.baseM_qbmm;
+    epilogueParams.baseN = tilingData.baseN_qbmm;
     epilogueParams.x1QuantMode = tilingData.x1QuantMode;
     epilogueParams.x2QuantMode = tilingData.x2QuantMode;
     epilogueParams.isBias = tilingData.isBias != 0 && tilingData.biasDtype != DT_INT32;
@@ -104,11 +126,15 @@ __aicore__ inline void FillEpilogueParams(EpilogueParams& epilogueParams, GM_ADD
 
 // 多 batch MIX：GemmUniversal（KernelMmadWithScaleMix 特化）。
 template <typename AType, typename BType, typename OutType, typename X2ScaleType = float, typename X1ScaleType = float,
-          typename BiasType = int32_t, uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE>
+          typename BiasType = int32_t, uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE,
+          bool USE_LEGACY_EPILOGUE = false>
 __aicore__ inline void QBMMMixWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM, GM_ADDR scaleGM,
                                       GM_ADDR biasGM, GM_ADDR yGM, const QBMMV3TilingData& tilingData)
 {
-    using Types = QBMMMixTypes<AType, BType, OutType, X2ScaleType, X1ScaleType, BiasType, FullLoadMode>;
+    using Types = AscendC::Std::conditional_t<
+        USE_LEGACY_EPILOGUE,
+        QBMMLegacyMixTypes<AType, BType, OutType, X2ScaleType, X1ScaleType, BiasType, FullLoadMode>,
+        QBMMMixTypes<AType, BType, OutType, X2ScaleType, X1ScaleType, BiasType, FullLoadMode>>;
     using QBMMKernel = typename Types::Kernel;
     using Params = typename QBMMKernel::Params;
 
@@ -154,13 +180,14 @@ __aicore__ inline void QBMMMixWithoutBatchWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM
 } // namespace QBMMUT
 
 template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS, class X2_SCALE_TYPE = float,
-          class X1_SCALE_TYPE = float>
+          class X1_SCALE_TYPE = float, bool USE_LEGACY_EPILOGUE = false>
 __global__ __aicore__ void qbmm_mix_kernel_entry(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM, GM_ADDR scaleGM,
                                                  GM_ADDR biasGM, GM_ADDR yGM, GM_ADDR tilingGM)
 {
     const auto* tilingData = reinterpret_cast<const QBMMV3TilingData*>(tilingGM);
-    QBMMUT::QBMMMixWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, X2_SCALE_TYPE, X1_SCALE_TYPE, DTYPE_BIAS>(
-        x1GM, x2GM, pertokenScaleGM, scaleGM, biasGM, yGM, *tilingData);
+    QBMMUT::QBMMMixWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, X2_SCALE_TYPE, X1_SCALE_TYPE, DTYPE_BIAS,
+                           Blaze::Gemm::NONE_FULL_LOAD_MODE, USE_LEGACY_EPILOGUE>(x1GM, x2GM, pertokenScaleGM, scaleGM,
+                                                                                  biasGM, yGM, *tilingData);
 }
 
 template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS, class X2_SCALE_TYPE = float,

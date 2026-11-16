@@ -72,7 +72,7 @@ void CheckPublicAssembly()
     EXPECT_FLOAT_EQ(epiParams.dstTypeMax, 6.0f);
 }
 
-template <typename X_TYPE, typename Y_TYPE, typename SCALE_TYPE, typename C_LAYOUT>
+template <typename X_TYPE, typename Y_TYPE, typename SCALE_TYPE, typename C_LAYOUT, bool USE_LEGACY_EPILOGUE = false>
 void RunKernelSmoke(int64_t M, int64_t N, int64_t K, int64_t iterBatch, float dstTypeMax, float invDstTypeMax)
 {
     const size_t xSize = static_cast<size_t>(K) * M * N * sizeof(X_TYPE);
@@ -114,7 +114,7 @@ void RunKernelSmoke(int64_t M, int64_t N, int64_t K, int64_t iterBatch, float ds
     tilingData->invDstTypeMax = invDstTypeMax;
 
     AscendC::SetKernelMode(KernelMode::MIX_MODE);
-    auto fn = FlatQuantKernelEntry<X_TYPE, Y_TYPE, SCALE_TYPE, C_LAYOUT>;
+    auto fn = FlatQuantKernelEntry<X_TYPE, Y_TYPE, SCALE_TYPE, C_LAYOUT, USE_LEGACY_EPILOGUE>;
     ASSERT_TRUE(KERNEL_RUN_KF(fn, BLOCK_NUM, x.Get(), p1.Get(), p2.Get(), out.Get(), scale.Get(), workspace.Get(),
                               tiling.Get()))
         << "FlatQuant Blaze kernel execution failed";
@@ -129,6 +129,15 @@ TEST(FlatQuantBlazeTest, AssembleBf16Fp4)
 TEST(FlatQuantBlazeTest, KernelSmokeBasic)
 {
     RunKernelSmoke<bfloat16_t, fp4x2_e2m1_t, float, asc::te::nd_ext_layout_ptn>(16, 16, 1, 1, 6.0f, 1.0f / 6.0f);
+}
+
+TEST(FlatQuantBlazeTest, KernelSmokeLegacyEpilogue)
+{
+    constexpr int64_t M = 16;
+    constexpr int64_t N = 16;
+    constexpr float FP4_E2M1_MAX_VALUE = 6.0f;
+    RunKernelSmoke<bfloat16_t, fp4x2_e2m1_t, float, asc::te::nd_ext_layout_ptn, true>(M, N, 1, 1, FP4_E2M1_MAX_VALUE,
+                                                                                      1.0f / FP4_E2M1_MAX_VALUE);
 }
 
 TEST(FlatQuantBlazeTest, KernelSmokeIterBatch)

@@ -62,6 +62,7 @@ Fixpipe 模式矩阵乘后处理 Block，运行在 AIV（Vector）核。与 AIC�
 ```
 struct Params {
     GM_ADDR outGmAddr{nullptr};   // 输出矩阵 C 的 GM 地址
+    ProblemShape problemShape{};  // 完整问题规模
 };
 ```
 说明：仅包含输出 GM 地址，由 Kernel 框架在组装 `Params` 时填入。
@@ -76,39 +77,39 @@ __aicore__ inline BlockEpilogueFixpipe()
 
 ### Init函数
 ```
-__aicore__ inline void Init(Params const& params, ProblemShape& problemShape)
+__aicore__ inline void Init(Params const& params)
+// 兼容既有调用方：
+__aicore__ inline void Init(Params const& params, const ProblemShape& problemShape)
 ```
-功能：初始化组件，绑定输出 GM buffer 并记录问题规模。
+功能：初始化组件，绑定输出 GM buffer 并记录问题规模。单参数形式从 `params.problemShape` 读取问题规模；双参数形式保持既有调用方式。
+
+旧双参 `Init` 接口在CANN 9.2.0版本标记废弃，将在2027年11月10日之后的版本删除，替换为 `Init(const Params&)`。
+
 参数说明：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| params | Params const& | 包含 `outGmAddr`（输出 GM 地址） |
-| problemShape | ProblemShape& | 问题规模 `(m, n, k, batch)` |
+| params | Params const& | 包含 `outGmAddr`（输出 GM 地址）和 `problemShape` |
+| problemShape | const ProblemShape& | 双参数形式传入的问题规模 `(m, n, k, batch)` |
 
 执行流程：
 1. `outputGlobal_.SetGlobalBuffer(outGmAddr)` 绑定输出 GM
 2. 记录 `problemShape_`
 3. `static_assert(sizeof(DataTypeIn) >= sizeof(DataTypeOut))` 编译期类型校验
 
-### Run函数
+### operator函数
 ```
-__aicore__ inline void Run(
-    BlockShape const& blockShape,   // Block 形状 (mL1, nL1, kL1, ...)
-    int64_t dstOffset,              // GM 输出起始偏移
-    bool splitM,                    // 是否按 subBlock 切分 M
-    int64_t baseM,                  // M 轴基准大小（0 表示用 mL1）
-    int64_t baseN,                  // N 轴 tile 大小（0 表示用 nL1）
-    uint64_t ubDB = 1)              // UB 双缓冲级数（>1 启用 ping-pong）
+__aicore__ inline void operator()(BlockShape const& blockShape, int64_t dstOffset = 0, bool splitM = false,
+                                  int64_t baseM = 0, int64_t baseN = 0, uint64_t ubDB = 1)
 ```
 功能：执行 Fixpipe 后处理，将 UB 中的 L0C 结果搬出到 GM。
 参数说明：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| blockShape | BlockShape const& | 当前 Block 形状，取 M、N 维度 |
+| blockShape | BlockShape | 当前 Block 形状，取 M、N 维度 |
 | dstOffset | int64_t | GM 输出起始偏移（按元素计） |
 | splitM | bool | true 时按 `GetSubBlockIdx()` 将 M 切分给不同 subBlock |
-| baseM | int64_t | M 轴基准大小；非 0 时 `curM = min(mL1, baseM)` |
-| baseN | int64_t | N 轴 tile 大小；非 0 时按 `baseN` 切分 N 轴多次搬出 |
+| baseM | int64_t | 非 0 时限制当前 M |
+| baseN | int64_t | 非 0 时控制 N 轴切分 |
 | ubDB | uint64_t | UB 双缓冲级数；`>1` 时启用 ping-pong |
 
 执行流程：
@@ -127,14 +128,7 @@ __aicore__ inline void Run(
    - **通知 AIC UB 空闲**：`Gemm::Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG + slot)`
    - `cvPingPong_++`
 
-### operator函数
-```
-__aicore__ inline void operator()(
-    BlockShape const& blockShape, int64_t dstOffset = 0, bool splitM = false,
-    int64_t baseM = 0, int64_t baseN = 0, uint64_t ubDB = 1)
-```
-功能：执行后处理，直接调用 `Run(blockShape, dstOffset, splitM, baseM, baseN, ubDB)`。
-说明：由 Kernel 框架（如 `GemmUniversal`）在 AIV 侧以 `epilogue(validBlockShape, offsetC, splitM, baseM, baseN, ubDB)` 形式调用。
+说明：由 Kernel 框架（如 `GemmUniversal`）在 AIV 侧传入 `baseM`、`baseN` 等散参。
 
 ## 事件同步
 

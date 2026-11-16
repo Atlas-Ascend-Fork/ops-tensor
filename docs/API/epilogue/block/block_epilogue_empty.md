@@ -128,34 +128,7 @@ BlockEpilogueMatmulStreamK ← 实际实现（用于 StreamK Kernel）
 
 ## 扩展建议
 
-如需添加后处理功能，可参考以下设计模式：
-```
-// 自定义 Epilogue 示例（伪代码）
-class BlockEpilogueRelu {
-public:
-    struct Params {
-        float threshold;  // ReLU 参数
-    };
-
-    __aicore__ inline void Init(Params const& args) {
-        threshold_ = args.threshold;
-    }
-
-    __aicore__ inline void Run() {
-        AscendC::Relu(outputTensor, inputTensor, threshold_);
-    }
-
-    __aicore__ inline void operator()(Params const& args) {
-        Init(args);
-        Run();
-    }
-
-private:
-    float threshold_;
-    AscendC::GlobalTensor<float> outputTensor_;
-    AscendC::GlobalTensor<float> inputTensor_;
-};
-```
+新增后处理文件必须遵循 [Epilogue 统一对外接口和类组织规范](../epilogue_developer_guide.md#2-统一对外接口新增文件必须遵守)：使用 `Params` 聚合初始化参数，按具体场景提供 `operator()` 执行入参，并采用类内声明、类外实现。本次接口调整不引入 `ExecParams`。
 
 ## 适用场景
 

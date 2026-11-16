@@ -96,10 +96,10 @@ __aicore__ inline void TqbmmMixWrapper(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR scaleGM
     epilogueParams.x1ScaleGmAddr = pertokenScaleGM;
     epilogueParams.biasGmAddr = biasGM;
     epilogueParams.outGmAddr = cGM;
-    epilogueParams.m = static_cast<int64_t>(tilingData.m);
-    epilogueParams.n = static_cast<int64_t>(tilingData.n);
-    epilogueParams.baseM = static_cast<int64_t>(tilingData.baseM);
-    epilogueParams.baseN = static_cast<int64_t>(tilingData.baseN);
+    epilogueParams.m = tilingData.m;
+    epilogueParams.n = tilingData.n;
+    epilogueParams.baseM = tilingData.baseM;
+    epilogueParams.baseN = tilingData.baseN;
     epilogueParams.x1QuantMode = x1QuantMode;
     epilogueParams.x2QuantMode = x2QuantMode;
     epilogueParams.isBias = tilingData.isBias != 0;

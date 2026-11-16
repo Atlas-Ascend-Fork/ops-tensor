@@ -17,6 +17,7 @@
 
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "kernel_basic_intf.h"
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/layout_utils.h"
@@ -103,6 +104,7 @@ private:
     // columns, so the scheduler/epilogue run on an N/2-wide output. The flag comes from
     // the dispatch policy (MatmulWithScaleMx<..., ConcatN=true>).
     static constexpr bool IS_SWIGLU = BlockMmad::CONCAT_N;
+    static constexpr uint64_t EPILOGUE_BLOCK_COORD_2D_SIZE = 2;
     static constexpr int64_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
     static constexpr uint16_t C0_SIZE_SHIFT = IsFp4<AType>() ? MXFP_DIVISOR_SHIFT : ALIGN_32_BYTES_SHIFT;
     static constexpr uint16_t BLOCK_CUBE_SHIFT = 4;
@@ -146,11 +148,15 @@ private:
     template <class UbMemPtr>
     __aicore__ inline auto GetOutputTile(int64_t baseM, int64_t baseN, const UbMemPtr& ubmemPtr)
     {
-        if constexpr (IS_SWIGLU) {
-            return epilogueOp_.GetConcatL0c2UbTensor(baseM, baseN);
+        if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
+            return epilogueOp_.GetAccumulatorTensor({baseM, baseN});
         } else {
-            return asc::te::make_tensor(
-                ubmemPtr, asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>((baseM + 1) & ~1, Align32(baseN)));
+            if constexpr (IS_SWIGLU) {
+                return epilogueOp_.GetConcatL0c2UbTensor(baseM, baseN);
+            } else {
+                return asc::te::make_tensor(
+                    ubmemPtr, asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>((baseM + 1) & ~1, Align32(baseN)));
+            }
         }
     }
 
@@ -417,8 +423,14 @@ __aicore__ inline void GemmUniversal<QUANT_MATMUL_ACTIVATION_QUANT_TEMPLATE_ARGS
         } else {
             const int64_t scaleN = ((n + static_cast<int64_t>(MXFP_DIVISOR_SIZE) - 1) >> MXFP_DIVISOR_SHIFT)
                                    << MXFP_MULTI_BASE_SHIFT;
-            epilogueOp_.UpdateGlobalAddr({static_cast<int64_t>(batchCOffset_ * m * n >> sizeShift),
-                                          static_cast<int64_t>(batchCOffset_ * m * scaleN)});
+            if constexpr (AscendC::Std::tuple_size_v<typename BlockEpilogue::BlockCoord> ==
+                          EPILOGUE_BLOCK_COORD_2D_SIZE) {
+                epilogueOp_.UpdateGlobalAddr({static_cast<int64_t>(batchCOffset_ * m * n >> sizeShift),
+                                              static_cast<int64_t>(batchCOffset_ * m * scaleN)});
+            } else {
+                epilogueOp_.UpdateGlobalAddr({static_cast<int64_t>(batchCOffset_ * m * n >> sizeShift),
+                                              static_cast<int64_t>(batchCOffset_ * m * scaleN), 0, 0, 0});
+            }
         }
     }
 }
@@ -463,7 +475,12 @@ __aicore__ inline void GemmUniversal<QUANT_MATMUL_ACTIVATION_QUANT_TEMPLATE_ARGS
             const int64_t scaleN = ((n + static_cast<int64_t>(MXFP_DIVISOR_SIZE) - 1) >> MXFP_DIVISOR_SHIFT)
                                    << MXFP_MULTI_BASE_SHIFT;
             const int64_t scaleNPos = (nPos + BLOCK_SIZE - 1) >> ALIGN_32_BYTES_SHIFT;
-            epilogueOp_({baseM, baseN, 0, 0}, {mPos * n + nPos, mPos * scaleN + scaleNPos});
+            if constexpr (AscendC::Std::tuple_size_v<typename BlockEpilogue::BlockCoord> ==
+                          EPILOGUE_BLOCK_COORD_2D_SIZE) {
+                epilogueOp_({baseM, baseN, 0, 0}, {mPos * n + nPos, mPos * scaleN + scaleNPos});
+            } else {
+                epilogueOp_({baseM, baseN, 0, 0}, {mPos * n + nPos, mPos * scaleN + scaleNPos, 0, 0, 0});
+            }
         }
         if constexpr (IS_SWIGLU) {
             Sync::NotifyCube();

@@ -1541,6 +1541,18 @@ TEST_F(QBMMV3Test, Test_MIX_BlockScheduler_TailSplit)
     RunMixSmoke(kernelFunc, cfg);
 }
 
+TEST_F(QBMMV3Test, Test_MIX_LegacyEpilogue)
+{
+    constexpr int64_t M = 16;
+    constexpr int64_t N = 16;
+    constexpr int64_t K = 16;
+    MixCaseCfg cfg{M, N, K, 1, QM_PERTOKEN, QM_PERCHANNEL, false, GE_DT_FLOAT, sizeof(float), sizeof(half), ""};
+    cfg.baseM = M;
+    cfg.baseN = N;
+    auto kernelFunc = qbmm_mix_kernel_entry<int8_t, int8_t, half, int32_t, float, float, true>;
+    RunTypedMixSmoke<int8_t, int8_t, float>(kernelFunc, cfg, false);
+}
+
 TEST_F(QBMMV3Test, Test_MIX_BlockScheduler_TailSplit_AFullLoad)
 {
     MixCaseCfg cfg{256,

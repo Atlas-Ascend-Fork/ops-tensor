@@ -168,10 +168,8 @@ private:
             const int64_t staging1Base = accBytes1;
             const int64_t staging1Bytes = static_cast<int64_t>(AscendC::TOTAL_UB_SIZE) - accBytes1 -
                                           UB_TOP_RESERVED_BYTES;
-            auto layoutUbC = MakeLayoutC{}(shapeMA, shapeN);
-            auto ubTensorC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0), layoutUbC);
-            auto layoutUbCT = MakeLayoutC{}(shapeN, shapeMA);
-            auto ubTensorCT = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0), layoutUbCT);
+            auto ubTensorC = epilogueOp.GetAccumulatorTensor({shapeMA, shapeN});
+            auto ubTensorCT = epilogueOp.GetAccumulatorTensor({shapeN, shapeMA});
             if ASCEND_IS_AIC {
                 Sync::WaitForVector<MIX_SYNC_MODE, PIPE_FIX>(AIV_SYNC_AIC_FLAG, true);
                 blockMmad(gmA, ubTensorC, tileShape, tileCoord, isDiagonal);

@@ -701,12 +701,7 @@ private:
             if (!isFirstBlock_) {
                 Sync::WaitForVector(MIX_AIV_SYNC_AIC_FLAG, true);
             }
-            constexpr int64_t l0cAlign = BLOCK_BYTE_SIZE / sizeof(L0CType);
-            const int64_t curNAligned = Blaze::Gemm::CeilAlign(curN, l0cAlign);
-            const int64_t curMAligned = Blaze::Gemm::CeilAlign(curM, static_cast<int64_t>(2));
-            auto layoutUbC = asc::te::make_frame_layout<asc::te::nd_layout_ptn>(curMAligned, curNAligned);
-            auto ubC = asc::te::make_tensor(
-                asc::te::make_mem_ptr<asc::te::location::ub, L0CType>(l0cUbBaseOffset * sizeof(L0CType)), layoutUbC);
+            auto ubC = epilogueOp_.GetAccumulatorTensor({curM, curN});
             mmadOp_(gmA, gmB, ubC, singleShape);
             Sync::NotifyVector(MIX_AIC_SYNC_AIV_FLAG, true);
             isFirstBlock_ = false;

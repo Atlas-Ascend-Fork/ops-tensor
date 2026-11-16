@@ -36,11 +36,11 @@ struct Params {
     GM_ADDR yScaleGmAddr{nullptr};
     uint32_t baseM{0};
     uint32_t baseN{0};
-    int64_t swigluMode{0};
+    uint32_t scaleAlg{0};
+    uint32_t swigluMode{0};
     float clampLimit{7.0F};
     float gluAlpha{1.702F};
     float gluBias{1.0F};
-    uint32_t scaleAlg{0};
     float dstTypeMax{0.0F};
 };
 ```
@@ -49,13 +49,13 @@ struct Params {
 | --- | --- |
 | `yGmAddr` | MXFP8 输出 GM 地址，必须非空 |
 | `yScaleGmAddr` | E8M0 输出 scale GM 地址，必须非空 |
-| `baseM/baseN` | 与 Kernel tiling 保持一致的兼容字段 |
+| `baseM`、`baseN` | 保留的兼容字段，当前实现不读取 |
+| `scaleAlg` | V3 公开 0（OCP）或 1（cuBLAS） |
 | `swigluMode` | 共享组件内部支持 V2 mode 0 与 V3 mode 2；V3 必须为 2 |
 | `clampLimit` | mode 2 裁剪上限；V3 要求有限且大于 0 |
 | `gluAlpha` | mode 2 sigmoid 输入缩放系数；V3 要求为有限 float |
 | `gluBias` | mode 2 gate 偏置；V3 要求为有限 float |
-| `scaleAlg` | V3 公开 0（OCP）或 1（cuBLAS） |
-| `dstTypeMax` | V3 MXFP8 固定为 0；当前 V3 计算不使用其他值 |
+| `dstTypeMax` | 保留的兼容字段；V3 要求为 0 |
 
 `OutputOffsets` 的 `yOffset` 和 `yScaleOffset` 分别是对应输出中的元素偏移，
 用于定位当前 group 和 tile 的写回位置。
@@ -84,13 +84,13 @@ Split-M Fixpipe 要求复制行数为偶数。组件会为奇数 M tile 创建�
 
 ## 公共接口
 
-### `GetConcatL0c2UbTensor`
+### `GetAccumulatorTensor`
 
 ```cpp
-auto GetConcatL0c2UbTensor(int64_t rows, int64_t cols);
+auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
 ```
 
-返回供 AIC 写入的 `[ceil_align(rows,2), 2*cols]` float UB Tensor。
+返回供 AIC 写入的累加结果 UB Tensor。旧 `GetL0c2UbTensor` 和 `GetConcatL0c2UbTensor` 接口在CANN 9.2.0版本标记废弃，将在2027年11月10日之后的版本删除，替换为 `GetAccumulatorTensor(const AccumulatorTensorParams&)`。
 
 ### `Init`
 
@@ -100,21 +100,9 @@ void Init(const Params& params);
 
 AIV 保存输出地址和量化参数并规划 UB；AIC 直接返回。
 
-### `UpdateNextProblem`
+### `UpdateNextProblem` / `UpdateGlobalAddr`
 
-```cpp
-void UpdateNextProblem(const ProblemShape& problemShape);
-```
-
-更新当前输出 `NOut` 和每行 `yScale` stride。
-
-### `UpdateGlobalAddr`
-
-```cpp
-void UpdateGlobalAddr(const OutputOffsets& baseOffsets);
-```
-
-按当前 group 的基础偏移更新 `y/yScale` GM 地址。
+处理 group 前分别通过 `UpdateNextProblem(problemShape)` 更新问题规模，通过 `UpdateGlobalAddr(baseOffsets)` 更新当前 group 的 `y/yScale` GM 基址。
 
 ### `operator()`
 
@@ -122,7 +110,7 @@ void UpdateGlobalAddr(const OutputOffsets& baseOffsets);
 void operator()(const BlockShape& blockShape, const OutputOffsets& outputOffsets);
 ```
 
-执行当前 tile 的 SwiGLU、MX 量化、scale 布局转换和 GM 写回。
+根据当前 `blockShape` 和 `outputOffsets` 完成 tile 的 SwiGLU、MX 量化、scale 布局转换和 GM 写回。
 
 `operator()` 返回后，由 Kernel 执行 `NotifyCube()`，零行 AIV 也遵循此流程。
 输出与 scale 的搬出由本组件的流水事件保护。详见 [QBMM Kernel 同步约定](../../gemm/kernel/kernel_qbmm_mx_activation_quant.md#输入-ub-复用通知的所有权)。

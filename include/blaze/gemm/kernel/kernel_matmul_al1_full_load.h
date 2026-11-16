@@ -19,6 +19,7 @@
 
 #include "kernel_basic_intf.h"
 
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_mmad_matmul_al1_full_load.h"
@@ -115,9 +116,12 @@ public:
             blockMmad.Init(params.mmadParams);
         }
         BlockEpilogue epilogueOp;
+        auto epilogueParams = params.epilogueParams;
         if constexpr (HAS_ELEMWISE) {
-            // params-only Init契约(A全载非融合配Empty不进Init).
-            epilogueOp.Init(params.epilogueParams);
+            if constexpr (Blaze::Epilogue::Block::HasParamsOnlyInit<BlockEpilogue, decltype(epilogueParams)>::value) {
+                epilogueParams.problemShape = params.problemShape;
+            }
+            epilogueOp.Init(epilogueParams);
         }
         MatmulProcess(params, blockMmad, epilogueOp, bs, curBlockIdx, AscendC::GetBlockNum(), bs.GetBlockNums());
         Blaze::Gemm::UnsetHF32(params.schParams.isHf32);
@@ -185,10 +189,16 @@ private:
                 auto gmBlockB = asc::te::squeeze<0>(subTensorB);
                 auto gmBlockBiasValid = gmBias.slice(asc::te::make_coord(0L, coordN),
                                                      asc::te::make_shape(1L, validShapeN));
-                auto layoutUb = MakeLayoutC{}(shapeM, validShapeN);
-                auto ubTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0), layoutUb);
                 if ASCEND_IS_AIC {
-                    blockMmad(gmA, gmBlockB, gmBlockBiasValid, ubTensor, validBlockShape);
+                    if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
+                        auto ubTensor = epilogueOp.GetAccumulatorTensor({shapeM, validShapeN});
+                        blockMmad(gmA, gmBlockB, gmBlockBiasValid, ubTensor, validBlockShape);
+                    } else {
+                        auto layoutUb = MakeLayoutC{}(shapeM, validShapeN);
+                        auto ubTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0),
+                                                             layoutUb);
+                        blockMmad(gmA, gmBlockB, gmBlockBiasValid, ubTensor, validBlockShape);
+                    }
                 }
                 if ASCEND_IS_AIV {
                     epilogueOp(validBlockShape, offsetC, params.mmadParams.splitM, params.schParams.baseM,

@@ -17,6 +17,7 @@
 
 #include "kernel_basic_intf.h"
 
+#include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/epilogue/block/block_epilogue_fixpipe.h"
 #include "blaze/gemm/block/block_mmad.h"
@@ -141,10 +142,21 @@ public:
             blockMmad.Init(params.mmadParams);
             MatmulProcessOnTheFly(params, blockMmad, bs, curBlockIdx, AscendC::GetBlockNum(), bs.GetBlockNums());
         } else {
+            auto epilogueParams = params.epilogueParams;
             if constexpr (HAS_ELEMWISE) {
-                epilogueOp.Init(params.epilogueParams); // elemwise: params-only Init
+                if constexpr (Blaze::Epilogue::Block::HasParamsOnlyInit<BlockEpilogue,
+                                                                        decltype(epilogueParams)>::value) {
+                    epilogueParams.problemShape = params.problemShape;
+                }
+                epilogueOp.Init(epilogueParams);
             } else {
-                epilogueOp.Init(params.epilogueParams, problemShape_); // fixpipe: mainline two-param
+                if constexpr (Blaze::Epilogue::Block::HasParamsOnlyInit<BlockEpilogue,
+                                                                        decltype(epilogueParams)>::value) {
+                    epilogueParams.problemShape = problemShape_;
+                    epilogueOp.Init(epilogueParams);
+                } else {
+                    epilogueOp.Init(epilogueParams, problemShape_);
+                }
             }
             if ASCEND_IS_AIC {
                 blockMmad.Init(params.mmadParams);
@@ -247,11 +259,17 @@ private:
                 continue;
             }
             TupleShape validBlockShape{shapeM, shapeN, shapeK, asc::te::get<MNK_B>(tileShape)};
-            auto layoutUB = MakeLayoutC{}(shapeM, shapeN);
-            auto ubLocal = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0), layoutUB);
             auto gmBlockA = gmA.slice(asc::te::make_coord(coordM, 0L), asc::te::make_shape(shapeM, shapeK));
             if ASCEND_IS_AIC {
-                blockMmad(gmBlockA, gmB, gmBias, ubLocal, validBlockShape);
+                if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
+                    auto ubLocal = epilogueOp.GetAccumulatorTensor({shapeM, shapeN});
+                    blockMmad(gmBlockA, gmB, gmBias, ubLocal, validBlockShape);
+                } else {
+                    auto layoutUB = MakeLayoutC{}(shapeM, shapeN);
+                    auto ubLocal = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, CType>(0),
+                                                        layoutUB);
+                    blockMmad(gmBlockA, gmB, gmBias, ubLocal, validBlockShape);
+                }
             }
             if ASCEND_IS_AIV {
                 epilogueOp(validBlockShape, offsetC, params.mmadParams.splitM, params.schParams.baseM,
