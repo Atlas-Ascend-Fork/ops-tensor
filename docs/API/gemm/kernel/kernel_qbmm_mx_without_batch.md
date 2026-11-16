@@ -5,8 +5,8 @@
 ## 功能说明
 
 该 Kernel 面向 Batch 为 1 的 MX 量化矩阵乘场景，仅在 AIC 上执行，支持 MxFP4/MxFP8
-量化格式。Kernel 由 `BlockMmadMX` 和 `BlockSchedulerQbmm` 组装；由于 Batch 固定为 1，调度过程
-不执行多 Batch 地址换算和广播循环。
+量化格式，并在 Ascend960 上支持 HiF4（`hifloat4x2_t`）量化格式。Kernel 由 `BlockMmadMX` 和
+`BlockSchedulerQbmm` 组装；由于 Batch 固定为 1，调度过程不执行多 Batch 地址换算和广播循环。
 
 **相关实现**：[Kernel Qbmm Mx](./kernel_qbmm_mx.md)
 
@@ -18,9 +18,10 @@
 
 - **MxFP4**：`fp4x2_e2m1_t`、`fp4x2_e1m2_t`
 - **MxFP8**：`fp8_e5m2_t`、`fp8_e4m3fn_t`
+- **HiF4**：`hifloat4x2_t`（仅 Ascend960）
 
 A/B、C dtype 和 A/B/C layout 的编译期 `static_assert` 约束为：A/B 必须为
-同 bit-width 的 MxFP4 或 MxFP8 组合，C 支持 `half` / `bfloat16_t` / `float`；
+同 bit-width 的 MxFP4、MxFP8 或 HiF4 组合（Ascend960 上另支持 `fp8_e4m3fn_t` × `fp4x2_e2m1_t`/`hifloat4x2_t` 的非对称 A8W4 组合），C 支持 `half` / `bfloat16_t` / `float`；
 `LayoutA` 支持 ND/DN，`LayoutB` 支持 ND/DN/NZ/ZN，`LayoutC` 支持 `nd_ext_layout_ptn` / `dn_ext_layout_ptn`。
 Kernel 不额外校验 bias 类型、`LayoutBias` 或 scale。
 
@@ -35,11 +36,14 @@ ScaleNZ 调用使用独立 `nn_layout_ptn`。具体 shape 和转换约定见
 
 ScaleNZ 的动态 N 尾块起点按 `SCALE_N_ALIGN` 对齐，避免从 NZ 的 N0 分组中间搬运。
 
+HiF4 的 scale 位置按布局折叠：ScaleA 的 M 坐标仅在 `scalea_dn_layout_ptn` 下、ScaleB 的 N 坐标仅在
+`scaleb_nd_layout_ptn` 下折半；`scalea_nd_layout_ptn`、`scaleb_dn_layout_ptn` 及独立 ScaleNZ
+（`nn_layout_ptn`）保留逻辑坐标。
 
-必须提供两个 Scale 因子：
+必须提供两个 Scale 因子，元素类型由 `MxScaleType<AType/BType>` 决定：
 
-- `scaleAGmAddr`：A 矩阵的 per-token scale（`fp8_e8m0_t` 类型）
-- `scaleBGmAddr`：B 矩阵的 per-group scale（`fp8_e8m0_t` 类型）
+- `scaleAGmAddr`：A 矩阵的 per-token scale（MxFP4/MxFP8 为 `AscendC::fp8_e8m0_t`，HiF4 为 `AscendC::hif4_scale`）
+- `scaleBGmAddr`：B 矩阵的 per-group scale（MxFP4/MxFP8 为 `AscendC::fp8_e8m0_t`，HiF4 为 `AscendC::hif4_scale`）
 
 ### Batch 限制
 
@@ -181,7 +185,7 @@ kernel(params);
 ```
 
 其中 `problemShape` 的 Batch 必须为 1；`perTokenScaleGM` 和 `scaleGM` 分别指向
-`fp8_e8m0_t` 的 A per-token scale 与 B per-group scale。
+`MxScaleType<AType>` / `MxScaleType<BType>` 的 A per-token scale 与 B per-group scale。
 
 ## 适用场景
 

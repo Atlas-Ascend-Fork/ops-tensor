@@ -64,8 +64,12 @@ struct hifloat4x2_t {};
 #if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
 namespace AscendC {
 
-// AscendC::hif4_scale 占位类型（真实定义见 960 tensor_api），HIF4 关闭时不会被选用
-struct hif4_scale {};
+// AscendC::hif4_scale 占位类型（真实定义为 4 字节，见 960 tensor_api），HIF4 关闭时不会被选用
+struct hif4_scale {
+    uint32_t value;
+};
+
+static_assert(sizeof(hif4_scale) == 4, "hif4_scale placeholder must match the 4-byte device type");
 
 } // namespace AscendC
 #endif

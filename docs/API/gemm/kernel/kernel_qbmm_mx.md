@@ -2,7 +2,7 @@
 > [代码位置](../../../../include/blaze/gemm/kernel/kernel_qbmm_mx.h)
 
 ## 功能说明
-MX 量化 Batch Matmul Kernel，仅支持 AIC 计算，支持 MxFP4/MxFP8 量化格式。集成 Scale 因子（x1Scale、x2Scale）处理、多 Batch 维度支持、L2 Cache 动态配置，适用于量化推理场景。
+MX 量化 Batch Matmul Kernel，仅支持 AIC 计算，支持 MxFP4/MxFP8 量化格式，并在 Ascend960 上支持 HiF4（`hifloat4x2_t`）量化格式。集成 Scale 因子（x1Scale、x2Scale）处理、多 Batch 维度支持、L2 Cache 动态配置，适用于量化推理场景。
 
 **继承自**：[Kernel Matmul 基础框架](./kernel.md)
 
@@ -12,10 +12,12 @@ MX 量化 Batch Matmul Kernel，仅支持 AIC 计算，支持 MxFP4/MxFP8 量化
 支持以下量化数据类型：
 - **MxFP4**：`fp4x2_e2m1_t`、`fp4x2_e1m2_t`（4-bit 浮点）
 - **MxFP8**：`fp8_e5m2_t`、`fp8_e4m3fn_t`（8-bit 浮点）
+- **HiF4**：`hifloat4x2_t`（4-bit 浮点，仅 Ascend960）
 
-Kernel 通过 `static_assert` 要求 A/B 为同 bit-width 的 MxFP4 或 MxFP8 组合，C 为 `half`、
-`bfloat16_t` 或 `float`，并保留原有 `BiasType = float` 约束。`LayoutA` 支持 ND/DN，`LayoutB` 支持 ND/DN/NZ/ZN，
-`LayoutC` 支持 `nd_ext_layout_ptn` / `dn_ext_layout_ptn`；本次不增加 `LayoutBias` 或 scale 校验。
+Kernel 通过 `static_assert` 要求 A/B 为同 bit-width 的 MxFP4、MxFP8 或 HiF4 组合（A/B 同为 MxFP4、
+同为 MxFP8 或同为 HiF4），C 为 `half`、`bfloat16_t` 或 `float`，并保留原有 `BiasType = float` 约束。
+`LayoutA` 支持 ND/DN，`LayoutB` 支持 ND/DN/NZ/ZN，`LayoutC` 支持 `nd_ext_layout_ptn` / `dn_ext_layout_ptn`；
+本次不增加 `LayoutBias` 或 scale 校验。
 
 ND/DN 白名单保留 L0C 搬运路径支持的 C Tensor 布局；自定义 BlockEpilogue 必须与输出布局一致。
 模板校验通过不等同于任意后处理组件均支持 DN 输出。
@@ -30,9 +32,13 @@ ScaleNZ 的 batch stride 包含 N 轴补齐，N 对齐使用 `SCALE_N_ALIGN`；N
 
 ScaleNZ 的动态 N 尾块起点按 `SCALE_N_ALIGN` 对齐，避免从 NZ 的 N0 分组中间搬运。
 
-必须提供两个 Scale 因子：
-- `scaleAGmAddr`：A 矩阵的 缩放因子（`fp8_e8m0_t` 类型）
-- `scaleBGmAddr`：B 矩阵的 缩放因子（`fp8_e8m0_t` 类型）
+HiF4 的 scale 位置按布局折叠：ScaleA 的 M 坐标仅在 `scalea_dn_layout_ptn` 下、ScaleB 的 N 坐标仅在
+`scaleb_nd_layout_ptn` 下折半；`scalea_nd_layout_ptn`、`scaleb_dn_layout_ptn` 及独立 ScaleNZ
+（`nn_layout_ptn`）保留逻辑坐标。
+
+必须提供两个 Scale 因子，元素类型由 `MxScaleType<AType/BType>` 决定：
+- `scaleAGmAddr`：A 矩阵的缩放因子（MxFP4/MxFP8 为 `AscendC::fp8_e8m0_t`，HiF4 为 `AscendC::hif4_scale`）
+- `scaleBGmAddr`：B 矩阵的缩放因子（MxFP4/MxFP8 为 `AscendC::fp8_e8m0_t`，HiF4 为 `AscendC::hif4_scale`）
 
 ### 计算模式
 仅支持 AIC 模式，不支持 AIV 计算（AIV 核直接返回）。
@@ -91,8 +97,8 @@ template <
 | TRANS_A | A 矩阵是否转置（由 LayoutA 判断） |
 | TRANS_B | B 矩阵是否转置（由 LayoutB 判断） |
 | IS_ATOMIC_ADD | 是否启用 Atomic Add 模式（继承自 BlockMmad::DispatchPolicy） |
-| C0_SIZE | C0 对齐大小（FP4: 64，FP8: 32） |
-| SCALE_C0 | Scale C0 对齐大小（固定为 2，定义于 `common_utils.h`） |
+| A_C0_SIZE / B_C0_SIZE | A/B 的 C0 对齐大小，分别由 `asc::te::c0_element<AType/BType>` 推导（FP4/HiF4: 64，FP8: 32） |
+| Scale C0（`GetScaleC0`） | Scale layout 的 C0 对齐大小，由 `GetScaleC0<AType/BType>()` 推导（MxFP4/MxFP8: 2，HiF4: 1） |
 | MakeLayoutScaleA | ScaleA Layout 构建器（根据 TRANS_A 选择） |
 | MakeLayoutScaleB | ScaleB Layout 构建器（根据 TRANS_B 选择） |
 
@@ -216,7 +222,7 @@ using AType = fp4x2_e2m1_t;  // 或 fp8_e5m2_t
 using BType = fp4x2_e2m1_t;  // 或 fp8_e5m2_t
 using CType = float;
 using BiasType = float;
-using ScaleType = fp8_e8m0_t;
+using ScaleType = MxScaleType<AType>; // MxFP4/MxFP8: AscendC::fp8_e8m0_t；HiF4: AscendC::hif4_scale
 
 // 定义 Layout
 using LayoutA = asc::te::nd_ext_layout_ptn;
@@ -313,7 +319,7 @@ Mmad 计算（MX 模式：MmadTraitMX）
 
 ## 适用场景
 
-- **量化推理**：MxFP4/MxFP8 量化矩阵乘
+- **量化推理**：MxFP4/MxFP8/HiF4 量化矩阵乘
 - **Batch Matmul**：多 Batch 维度支持
 - **Scale 因子处理**：per-token 和 per-group scale
 - **广播 Batch**：A/B/C 不同 Batch 维度的广播计算

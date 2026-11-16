@@ -2,8 +2,8 @@
 > [代码位置](../../../../include/blaze/gemm/block/block_mmad_qbmm_mx.h)
 
 ## 功能说明
-MX 量化矩阵乘 Block，基于 Tensor API 实现，仅在 AIC 上计算。支持 MxFP4/MxFP8
-量化、ScaleA/ScaleB、L1/L0 双缓冲以及 GELU/SwiGLU ActivationQuant 的
+MX 量化矩阵乘 Block，基于 Tensor API 实现，仅在 AIC 上计算。支持 MxFP4/MxFP8，
+并在 Ascend960 上支持 HiF4（`hifloat4x2_t`）量化，同时支持 ScaleA/ScaleB、L1/L0 双缓冲以及 GELU/SwiGLU ActivationQuant 的
 L0C→UB DualDst 路径。SwiGLU 路径可在一次 MMAD 中拼接 gate/linear 两个 N 半区，
 并支持 ND 与 WeightNZ 权重。
 
@@ -48,8 +48,8 @@ class BlockMmad;
 | TRANS_A | A 矩阵是否转置 |
 | TRANS_B | B 矩阵是否转置 |
 | CONCAT_N | 是否使用 SwiGLU gate/linear concat-N 路径 |
-| C0_SIZE | C0 对齐大小（FP4: 64，FP8: 32） |
-| SCALE_C0 | Scale C0 对齐大小（固定为 2，定义于 `common_utils.h`） |
+| C0（`c0_element`） | A/B 的 C0 对齐大小（FP4/HiF4: 64，FP8: 32） |
+| SCALE_C0 / HIF4_SCALE_C0 | Scale C0 对齐大小（MX量化: 2，HiF4量化: 1） |
 | DOUBLE_BUFFER_COUNT | Scale 缓冲数量（固定为 2，定义于 `common_utils.h`） |
 
 ## 特殊类型别名
@@ -110,17 +110,19 @@ struct TileL1L0Param {
 不支持 `MatmulMultiBlockBasic` 或 `MatmulMultiBlockWithStreamK`。
 
 ### 量化数据类型支持
-| 数据类型 | 说明 | C0_SIZE |
+| 数据类型 | 说明 | C0 元素数（`c0_element`） |
 |---------|------|---------|
 | fp4x2_e2m1_t | MxFP4 E2M1 格式 | 64 |
 | fp4x2_e1m2_t | MxFP4 E1M2 格式 | 64 |
 | fp8_e5m2_t | MxFP8 E5M2 格式 | 32 |
 | fp8_e4m3fn_t | MxFP8 E4M3FN 格式 | 32 |
+| hifloat4x2_t | HiF4 格式（仅 Ascend960） | 64 |
 
-说明：C0_SIZE 用于 L1/L0 layout 对齐，FP4 需要更大的对齐。
+说明：C0 对齐由 `asc::te::c0_element<AType/BType>` 推导，用于 L1/L0 layout，FP4/HiF4 需要更大的对齐。
 
 ### Scale 因子类型
-Scale 因子固定为 `fp8_e8m0_t`（E8M0 浮点格式），用于量化数据的反量化。
+Scale 因子元素类型分别由 `MxScaleType<AType>` / `MxScaleType<BType>` 决定：MxFP4/MxFP8 为 `AscendC::fp8_e8m0_t`（E8M0 浮点格式），
+HiF4 为 `AscendC::hif4_scale`（4 字节），用于量化数据的反量化。
 
 ### 计算模式
 仅支持 AIC 模式，不支持 AIV 计算。
@@ -132,8 +134,8 @@ Scale 因子固定为 `fp8_e8m0_t`（E8M0 浮点格式），用于量化数据�
 ### MXFP 对齐处理
 - 逻辑 K 支持非 64 倍数的尾块；组件在 L1/L0 内部将当前 K tile 自动补零到
   `MXFP_DIVISOR_SIZE`（64），补零不改变计算结果。
-- `scaleKL1`按原始K元素计数；内部Scale K长度换算为
-  `ceil(scaleKL1/64) * 2`个E8M0元素，对应每64个数据元素存放两个32元素组scale。
+- `scaleKL1` 按原始 K 元素计数；内部 Scale K 长度统一由 `MxScaleKLen<AType>` 换算：
+  MxFP4/MxFP8 为 `ceil(scaleKL1/64) * 2` 个 E8M0 元素，HiF4 为 `ceil(scaleKL1/64)` 个 `AscendC::hif4_scale` 元素。
 - L0C 布局固定使用 nz_layout_ptn
 
 ### SwiGLU concat-N 与 WeightNZ
@@ -270,8 +272,8 @@ __aicore__ inline void operator()(
 |------|------|------|
 | gmA | TensorA | A 矩阵输入 Tensor（量化数据） |
 | gmB | TensorB | B 矩阵输入 Tensor（量化数据） |
-| gmScaleA | TensorScaleA | A 矩阵 Scale Tensor（fp8_e8m0_t） |
-| gmScaleB | TensorScaleB | B 矩阵 Scale Tensor（fp8_e8m0_t） |
+| gmScaleA | TensorScaleA | A 矩阵 Scale Tensor（MxFP4/MxFP8: AscendC::fp8_e8m0_t；HiF4: AscendC::hif4_scale） |
+| gmScaleB | TensorScaleB | B 矩阵 Scale Tensor（MxFP4/MxFP8: AscendC::fp8_e8m0_t；HiF4: AscendC::hif4_scale） |
 | gmBias | TensorBias | Bias 输入 Tensor |
 | gmC | TensorC | C 矩阵输出 Tensor（float） |
 | singleShape | BlockShape | Tile 形状 |
@@ -298,7 +300,7 @@ using AType = fp4x2_e2m1_t;  // 或 fp8_e5m2_t
 using BType = fp4x2_e2m1_t;  // 或 fp8_e5m2_t
 using CType = float;
 using BiasType = float;
-using ScaleType = fp8_e8m0_t;
+using ScaleType = MxScaleType<AType>; // MxFP4/MxFP8: AscendC::fp8_e8m0_t；HiF4: AscendC::hif4_scale
 
 // 定义 Layout
 using LayoutA = asc::te::nd_ext_layout_ptn;
@@ -330,8 +332,8 @@ blockMmad.Init(problemShape, l0TileShape, l1Params, isBias, dbL0C);
 // 准备 GM Tensor（量化数据）
 auto gmA = asc::te::make_tensor(...);      // 量化数据
 auto gmB = asc::te::make_tensor(...);      // 量化数据
-auto gmScaleA = asc::te::make_tensor(...); // fp8_e8m0_t
-auto gmScaleB = asc::te::make_tensor(...); // fp8_e8m0_t
+auto gmScaleA = asc::te::make_tensor(...); // ScaleType
+auto gmScaleB = asc::te::make_tensor(...); // ScaleType
 auto gmBias = asc::te::make_tensor(...);
 auto gmC = asc::te::make_tensor(...);      // float 输出
 
@@ -410,7 +412,7 @@ Mmad 计算（MX 模式：自动反量化）
 - 每 `scaleKL1 / kL1` 次迭代复用同一 Scale 数据
 
 ### 适用场景
-- **量化推理**：MxFP4/MxFP8 量化矩阵乘
+- **量化推理**：MxFP4/MxFP8/HiF4 量化矩阵乘
 - **Batch Matmul**：多 Batch 维度支持（在 Kernel 层处理）
 - **Scale 因子处理**：per-token 和 per-group scale
 - **融合激活量化**：GELU，或 MXFP8 SwiGLU 的 ND/WeightNZ concat-N 路径

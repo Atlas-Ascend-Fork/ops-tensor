@@ -34,7 +34,10 @@ tests/ut/op_kernel/
 │   ├── qbmm_mx.h                # MX / L0C PingPong / MX StreamK Wrapper
 │   ├── qbmm_tiling_data.h       # 公共 Tiling 数据结构
 │   ├── qbmm_ut_fill_helpers.h   # 公共 Params 填充辅助函数
-│   ├── test_quant_batch_matmul.cpp # GTest 测试用例
+│   ├── arch35/
+│   │   └── test_quant_batch_matmul.cpp # Ascend950 GTest 测试用例
+│   ├── arch92/
+│   │   └── test_qbmm_mx_hif4.cpp # Ascend960 HiF4 GTest 测试用例
 │   ├── CMakeLists.txt
 │   └── qbmm_data/
 │       └── gen_data.py          # smoke 用例输入数据生成脚本

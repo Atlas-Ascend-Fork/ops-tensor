@@ -62,6 +62,10 @@ public:
     static constexpr bool WEIGHT_NZ = IsWeightNz<LayoutB>::value;
     static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
+    // The L0C ping-pong scale buffers are sized and typed for fp8_e8m0_t; the 4-byte hif4_scale
+    // contract is only implemented by block_mmad_qbmm_mx.h.
+    static_assert(!IsHif4<AType>() && !IsHif4<BType>(),
+                  "QBMM MX L0C ping-pong does not support HiF4 scale; use block_mmad_qbmm_mx.h.");
 
     struct Params {
         GM_ADDR aGmAddr{nullptr};

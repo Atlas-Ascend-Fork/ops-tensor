@@ -98,16 +98,13 @@ private:
     static constexpr bool IS_ATOMIC_ADD = BlockMmad::DispatchPolicy::IS_ATOMIC_ADD;
     static constexpr bool IS_HIF4_A = IsHif4<AType>();
     static constexpr bool IS_HIF4_B = IsHif4<BType>();
-    static constexpr int64_t C0_SIZE_A = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
-    static constexpr int64_t C0_SIZE_B = IsFp4<BType>() ? C0_SIZE_B4 : C0_SIZE_B8;
     static constexpr int64_t SCALE_N_ALIGN = IsScaleNz<LayoutScaleB>::value ? MATMUL_MNK_ALIGN : 1;
-
-    using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE_A>>;
-    using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE_B>>;
+    using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<asc::te::c0_element<AType>>>;
+    using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<asc::te::c0_element<BType>>>;
     using MakeLayoutC = asc::te::frame_layout_format<LayoutC, AscendC::Std::Int<asc::te::c0_element<CType>>>;
-    using MakeLayoutScaleA = AscendC::Std::conditional_t<
-        TRANS_A, asc::te::frame_layout_format<asc::te::scalea_dn_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>,
-        asc::te::frame_layout_format<asc::te::scalea_nd_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>>;
+    using LayoutScaleA = AscendC::Std::conditional_t<TRANS_A, asc::te::scalea_dn_layout_ptn,
+                                                     asc::te::scalea_nd_layout_ptn>;
+    using MakeLayoutScaleA = asc::te::frame_layout_format<LayoutScaleA, AscendC::Std::Int<GetScaleC0<AType>()>>;
     using MakeLayoutScaleB = asc::te::frame_layout_format<LayoutScaleB, AscendC::Std::Int<GetScaleC0<BType>()>>;
 
     __aicore__ inline void Run(const Params& params);
@@ -192,14 +189,8 @@ __aicore__ inline void GemmUniversal<QBMM_MX_WITHOUT_BATCH_KERNEL_TEM_PARAMS>::P
     int64_t baseM, int64_t baseN, int64_t k, int64_t scaleAKLen, int64_t scaleBKLen)
 {
     constexpr int64_t kPos = 0L; // K is not split, so the K coordinate is 0.
-    int64_t scaleAPos = mPos;
-    if constexpr (IS_HIF4_A && TRANS_A) {
-        scaleAPos = mPos >> 1;
-    }
-    int64_t scaleBPos = nPos;
-    if constexpr (IS_HIF4_B && !TRANS_B) {
-        scaleBPos = nPos >> 1;
-    }
+    int64_t scaleAPos = GetScaleGmPos<IS_HIF4_A, LayoutScaleA>(mPos);
+    int64_t scaleBPos = GetScaleGmPos<IS_HIF4_B, LayoutScaleB>(nPos);
     auto gmBlockA = gmA.slice(asc::te::make_coord(mPos, kPos), asc::te::make_shape(baseM, k));
     auto gmBlockScaleA = gmScaleA.slice(asc::te::make_coord(scaleAPos, kPos), asc::te::make_shape(baseM, scaleAKLen));
     auto gmBlockB = gmB.slice(asc::te::make_coord(kPos, nPos), asc::te::make_shape(k, baseN));

@@ -268,8 +268,9 @@ public:
                                     asc::te::make_shape(1L, asc::te::make_shape(task.baseM, static_cast<int64_t>(k_))));
         auto gmBlockA = asc::te::squeeze<0>(subTensorA);
 
+        const int64_t scaleAPos = GetScaleGmPos<IS_HIF4_TYPE, ScaleALayoutPtn>(task.mPos);
         auto subScaleA = gmScaleA.slice(
-            asc::te::make_coord(task.batchIdx, asc::te::make_coord(task.mPos, kPos)),
+            asc::te::make_coord(task.batchIdx, asc::te::make_coord(scaleAPos, kPos)),
             asc::te::make_shape(1L, asc::te::make_shape(task.baseM, static_cast<int64_t>(scaleKLen_))));
         auto gmBlockScaleA = asc::te::squeeze<0>(subScaleA);
 
@@ -277,10 +278,7 @@ public:
                                     asc::te::make_shape(1L, asc::te::make_shape(static_cast<int64_t>(k_), task.baseN)));
         auto gmBlockB = asc::te::squeeze<0>(subTensorB);
 
-        int64_t scaleBPos = task.nPos;
-        if constexpr (IS_HIF4_TYPE && !TRANS_B) {
-            scaleBPos = scaleBPos >> 1;
-        }
+        const int64_t scaleBPos = GetScaleGmPos<IS_HIF4_TYPE, ScaleBLayoutPtn>(task.nPos);
         auto subScaleB = gmScaleB.slice(
             asc::te::make_coord(task.batchIdx, asc::te::make_coord(kPos, scaleBPos)),
             asc::te::make_shape(1L, asc::te::make_shape(static_cast<int64_t>(scaleKLen_), task.baseN)));
@@ -299,13 +297,13 @@ private:
     static constexpr bool WEIGHT_NZ = IsWeightNz<LayoutB>::value;
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool IS_ATOMIC_ADD = BlockMmad::DispatchPolicy::IS_ATOMIC_ADD;
-    static constexpr int64_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
+    static constexpr int64_t C0_SIZE = asc::te::c0_element<AType>;
     static constexpr uint64_t SCALE_C0 = GetScaleC0<AType>();
 
     using ScaleALayoutPtn = asc::te::scalea_nd_layout_ptn;
-    using MakeLayoutScaleB = AscendC::Std::conditional_t<
-        TRANS_B, asc::te::frame_layout_format<asc::te::scaleb_dn_layout_ptn, AscendC::Std::Int<SCALE_C0>>,
-        asc::te::frame_layout_format<asc::te::scaleb_nd_layout_ptn, AscendC::Std::Int<SCALE_C0>>>;
+    using ScaleBLayoutPtn = AscendC::Std::conditional_t<TRANS_B, asc::te::scaleb_dn_layout_ptn,
+                                                        asc::te::scaleb_nd_layout_ptn>;
+    using MakeLayoutScaleB = asc::te::frame_layout_format<ScaleBLayoutPtn, AscendC::Std::Int<SCALE_C0>>;
     using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE>>;
 
     __aicore__ inline void Init(const Params& params)

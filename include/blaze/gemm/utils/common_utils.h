@@ -87,7 +87,7 @@ constexpr uint16_t MXFP_DIVISOR_SHIFT = 6;
 constexpr uint16_t MXFP_MULTI_BASE_SHIFT = 1;
 constexpr uint64_t SCALE_C0 = 2UL;
 constexpr uint64_t HIF4_SCALE_C0 = 1UL;
-constexpr uint64_t SCALE_DIVISOR = 16UL;
+constexpr uint64_t MX_SCALE_DIVISOR = 16UL;
 constexpr uint64_t HIF4_SCALE_DIVISOR = 8UL;
 constexpr uint64_t SCALE_BUFFER_NUM = 2UL;
 
@@ -253,18 +253,9 @@ template <typename T>
 __aicore__ inline constexpr uint64_t MxScaleKLen(uint64_t k)
 {
     if constexpr (IsHif4<T>()) {
-        return CeilDiv(k, static_cast<uint64_t>(64));
+        return (Align64(k) >> ALIGN_64_BYTES_SHIFT);
     }
     return (Align64(k) >> ALIGN_64_BYTES_SHIFT) * MXFP_MULTI_BASE_SIZE;
-}
-
-template <typename T>
-__aicore__ inline constexpr uint64_t MxScaleKE8m0Len(uint64_t k)
-{
-    if constexpr (IsHif4<T>()) {
-        return MxScaleKLen<T>(k) * 4UL;
-    }
-    return MxScaleKLen<T>(k);
 }
 
 template <typename T>
@@ -273,7 +264,7 @@ __aicore__ inline constexpr uint64_t GetScaleDivisor()
     if constexpr (IsHif4<T>()) {
         return HIF4_SCALE_DIVISOR;
     }
-    return SCALE_DIVISOR;
+    return MX_SCALE_DIVISOR;
 }
 
 __aicore__ inline int64_t GetPerBlockNum(int64_t coreNum, int64_t mTileNum, int64_t nTileNum, int64_t b = 1)

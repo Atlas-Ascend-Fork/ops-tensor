@@ -80,6 +80,10 @@ public:
     static constexpr bool IS_HIF4_A = IsHif4<AType>();
     static constexpr bool IS_HIF4_B = IsHif4<BType>();
     static constexpr bool IS_HIF4 = IS_HIF4_A;
+    using ScaleALayoutC0Trait = AscendC::Std::conditional_t<IS_HIF4_A, asc::te::c0_element_half,
+                                                            AscendC::Std::Int<SCALE_C0>>;
+    using ScaleBLayoutC0Trait = AscendC::Std::conditional_t<IS_HIF4_B, asc::te::c0_element_half,
+                                                            AscendC::Std::Int<SCALE_C0>>;
     struct Params {
         GM_ADDR aGmAddr{nullptr};
         GM_ADDR bGmAddr{nullptr};
@@ -195,14 +199,12 @@ public:
     }
 
 private:
-    static constexpr uint64_t C0_SIZE_A = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
-    static constexpr uint64_t C0_SIZE_B = IsFp4<BType>() ? C0_SIZE_B4 : C0_SIZE_B8;
     using MakeLayoutAL1 = AscendC::Std::conditional_t<
-        TRANS_A, asc::te::frame_layout_format<asc::te::zn_layout_ptn, AscendC::Std::Int<C0_SIZE_A>>,
-        asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<C0_SIZE_A>>>;
+        TRANS_A, asc::te::frame_layout_format<asc::te::zn_layout_ptn, AscendC::Std::Int<asc::te::c0_element<AType>>>,
+        asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<asc::te::c0_element<AType>>>>;
     using MakeLayoutBL1 = AscendC::Std::conditional_t<
-        TRANS_B, asc::te::frame_layout_format<asc::te::zn_layout_ptn, AscendC::Std::Int<C0_SIZE_B>>,
-        asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<C0_SIZE_B>>>;
+        TRANS_B, asc::te::frame_layout_format<asc::te::zn_layout_ptn, AscendC::Std::Int<asc::te::c0_element<BType>>>,
+        asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<asc::te::c0_element<BType>>>>;
 
     struct TileL1L0Param {
         uint64_t curM = 0;
@@ -220,11 +222,7 @@ private:
 
     __aicore__ inline uint64_t AlignC0(uint64_t value)
     {
-        if constexpr (IsFp4<AType>()) {
-            return Align64(value);
-        } else {
-            return Align32(value);
-        }
+        return CeilAlign(value, static_cast<uint64_t>(asc::te::c0_element<AType>));
     }
 
     template <typename OperandType>
@@ -375,10 +373,10 @@ private:
                                           const TileL1L0Param& tileL1L0Param, uint64_t scaleL1BufId, uint64_t kL1Offset,
                                           uint64_t scaleAGmOffset, uint64_t scaleBGmOffset, bool needCopyScale)
     {
-        const uint64_t scaleBKL1Len = MxScaleKE8m0Len<BType>(scaleKL1_);
+        const uint64_t scaleKL1Len = MxScaleKLen<BType>(scaleKL1_);
         const uint64_t scaleBL1Offset = l1BufferScaleBOffset_[scaleL1BufId];
-        auto layoutScaleBL1 = asc::te::make_frame_layout<asc::te::nn_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
-            scaleBKL1Len, tileL1L0Param.curN);
+        auto layoutScaleBL1 = asc::te::make_frame_layout<asc::te::nn_layout_ptn, ScaleBLayoutC0Trait>(
+            scaleKL1Len, tileL1L0Param.curN);
         auto tensorScaleBL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, ScaleBType>(scaleBL1Offset), layoutScaleBL1);
         if constexpr (DispatchPolicy::FULL_LOAD_MODE == NONE_FULL_LOAD_MODE) {
@@ -397,8 +395,8 @@ private:
                                                  uint64_t scaleBGmOffset, bool needCopyScale)
     {
         const uint64_t scaleAL1Offset = l1BufferScaleAOffset_[scaleL1BufId];
-        const uint64_t scaleAKL1Len = MxScaleKE8m0Len<AType>(scaleKL1_);
-        auto layoutScaleAL1 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
+        const uint64_t scaleAKL1Len = MxScaleKLen<AType>(scaleKL1_);
+        auto layoutScaleAL1 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, ScaleALayoutC0Trait>(
             tileL1L0Param.curM, scaleAKL1Len);
         auto tensorScaleAL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, ScaleAType>(scaleAL1Offset), layoutScaleAL1);
@@ -424,8 +422,8 @@ private:
                                                   bool needCopyScale)
     {
         const uint64_t scaleAL1Offset = l1BufferScaleAOffset_[0];
-        const uint64_t scaleKLen = (Align64(k_) >> ALIGN_64_BYTES_SHIFT) << MXFP_MULTI_BASE_SHIFT;
-        auto layoutScaleAL1 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
+        const uint64_t scaleKLen = MxScaleKLen<AType>(k_);
+        auto layoutScaleAL1 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, ScaleALayoutC0Trait>(
             tileL1L0Param.curM, scaleKLen);
         auto tensorScaleAL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, ScaleAType>(scaleAL1Offset), layoutScaleAL1);
@@ -605,8 +603,8 @@ private:
     {
         const uint64_t kL0Offset = iter1 * baseK_;
         const uint64_t curKL0 = Min(baseK_, tileL1L0Param.curPadKL1 - kL0Offset);
-        const uint64_t scaleAKL0Len = MxScaleKE8m0Len<AType>(curKL0);
-        const uint64_t scaleBKL0Len = MxScaleKE8m0Len<BType>(curKL0);
+        const uint64_t scaleAKL0Len = MxScaleKLen<AType>(curKL0);
+        const uint64_t scaleBKL0Len = MxScaleKLen<BType>(curKL0);
         const uint64_t scaleAK0Offset = iter1 * scaleAK0OffsetStride;
         const uint64_t scaleBK0Offset = iter1 * scaleBK0OffsetStride;
         const uint64_t l0PingPongId = l0PingPong_ & 1;
@@ -638,15 +636,16 @@ private:
                                      const TileL1L0Param& tileL1L0Param, uint64_t kL0Offset, uint64_t scaleK0Offset,
                                      uint64_t curKL0, uint64_t scaleKL0Len, uint64_t l0Offset)
     {
-        auto layoutAL0 = asc::te::make_frame_layout<asc::te::nz_layout_ptn, AscendC::Std::Int<C0_SIZE_A>>(
-            tileL1L0Param.curM, curKL0);
+        auto layoutAL0 = asc::te::make_frame_layout<asc::te::nz_layout_ptn,
+                                                    AscendC::Std::Int<asc::te::c0_element<AType>>>(tileL1L0Param.curM,
+                                                                                                   curKL0);
         auto tensorAL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0a, AType>(l0Offset),
                                               layoutAL0);
         auto tensorBlockAL1 = tensorAL1.slice(asc::te::make_coord(0, kL0Offset),
                                               asc::te::make_shape(tileL1L0Param.curM, curKL0));
         auto CopyL12L0A = asc::te::make_copy(asc::te::copy_l1_to_l0a{});
         asc::te::copy(CopyL12L0A, tensorAL0, tensorBlockAL1);
-        auto layoutScaleAL0 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
+        auto layoutScaleAL0 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, ScaleALayoutC0Trait>(
             tileL1L0Param.curM, scaleKL0Len);
         auto tensorScaleAL0 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l0scalea, ScaleAType>(l0Offset / GetScaleDivisor<AType>()),
@@ -663,15 +662,16 @@ private:
                                      const TileL1L0Param& tileL1L0Param, uint64_t kL0Offset, uint64_t scaleK0Offset,
                                      uint64_t curKL0, uint64_t scaleKL0Len, uint64_t l0Offset)
     {
-        auto layoutBL0 = asc::te::make_frame_layout<asc::te::zn_layout_ptn, AscendC::Std::Int<C0_SIZE_B>>(
-            curKL0, tileL1L0Param.curN);
+        auto layoutBL0 = asc::te::make_frame_layout<asc::te::zn_layout_ptn,
+                                                    AscendC::Std::Int<asc::te::c0_element<BType>>>(curKL0,
+                                                                                                   tileL1L0Param.curN);
         auto tensorBL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0b, BType>(l0Offset),
                                               layoutBL0);
         auto tensorBlockBL1 = tensorBL1.slice(asc::te::make_coord(kL0Offset, 0),
                                               asc::te::make_shape(curKL0, tileL1L0Param.curN));
         auto CopyL12L0B = asc::te::make_copy(asc::te::copy_l1_to_l0b{});
         asc::te::copy(CopyL12L0B, tensorBL0, tensorBlockBL1);
-        auto layoutScaleBL0 = asc::te::make_frame_layout<asc::te::nn_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
+        auto layoutScaleBL0 = asc::te::make_frame_layout<asc::te::nn_layout_ptn, ScaleBLayoutC0Trait>(
             scaleKL0Len, tileL1L0Param.curN);
         auto tensorScaleBL0 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l0scaleb, ScaleBType>(l0Offset / GetScaleDivisor<BType>()),

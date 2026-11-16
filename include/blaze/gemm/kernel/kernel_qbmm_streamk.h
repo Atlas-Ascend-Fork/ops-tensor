@@ -114,13 +114,12 @@ private:
     static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool IS_HIF4 = IsHif4<AType>();
-    static constexpr int32_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
-    using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE>>;
-    using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<C0_SIZE>>;
+    using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<asc::te::c0_element<AType>>>;
+    using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<asc::te::c0_element<BType>>>;
     using MakeLayoutC = asc::te::frame_layout_format<LayoutC, AscendC::Std::Int<asc::te::c0_element<CType>>>;
-    using MakeLayoutScaleA = AscendC::Std::conditional_t<
-        TRANS_A, asc::te::frame_layout_format<asc::te::scalea_dn_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>,
-        asc::te::frame_layout_format<asc::te::scalea_nd_layout_ptn, AscendC::Std::Int<GetScaleC0<AType>()>>>;
+    using LayoutScaleA = AscendC::Std::conditional_t<TRANS_A, asc::te::scalea_dn_layout_ptn,
+                                                     asc::te::scalea_nd_layout_ptn>;
+    using MakeLayoutScaleA = asc::te::frame_layout_format<LayoutScaleA, AscendC::Std::Int<GetScaleC0<AType>()>>;
     using MakeLayoutScaleB = asc::te::frame_layout_format<LayoutScaleB, AscendC::Std::Int<GetScaleC0<BType>()>>;
 
     __aicore__ inline void Init(Params const& params)
@@ -225,14 +224,8 @@ private:
                                   params.schParams.baseM * alignedBaseN;
         auto gmWorkSpace = MakeWorkspaceTensor(singleCoreShape, offsetWorkspace);
         auto scaleKL1LenSingleCore = static_cast<int64_t>(MxScaleKLen<AType>(static_cast<uint64_t>(kSingleCore)));
-        int64_t scaleAPos = asc::te::get<MNK_M>(singleCoreCoord) * mL1;
-        if constexpr (IS_HIF4 && TRANS_A) {
-            scaleAPos = scaleAPos >> 1;
-        }
-        int64_t scaleBPos = asc::te::get<MNK_N>(singleCoreCoord) * nL1;
-        if constexpr (IS_HIF4 && !TRANS_B) {
-            scaleBPos = scaleBPos >> 1;
-        }
+        int64_t scaleAPos = GetScaleGmPos<IS_HIF4, LayoutScaleA>(asc::te::get<MNK_M>(singleCoreCoord) * mL1);
+        int64_t scaleBPos = GetScaleGmPos<IS_HIF4, LayoutScaleB>(asc::te::get<MNK_N>(singleCoreCoord) * nL1);
         auto gmBlockA = gmA.slice(
             asc::te::make_coord(asc::te::get<MNK_M>(singleCoreCoord) * mL1,
                                 asc::te::get<MNK_K>(singleCoreCoord) * kSingleCore),

@@ -2,7 +2,7 @@
 
 ## MX Mix 内部行为测试
 
-`test_qbmm_mx_mix.cpp` 检查 `kernel_qbmm_mx_mix.h` 的调度和地址计算，
+`arch35/test_qbmm_mx_mix.cpp` 检查 `kernel_qbmm_mx_mix.h` 的调度和地址计算，
 使用 `BlockSchedulerQuantBatchMatmulV3` 和 Tensor API 布局、切片逻辑。
 
 MMAD 和 Epilogue 使用记录调用参数的测试组件。测试读取各 AIC/AIV 的 GM 记录，检查：
@@ -25,3 +25,13 @@ GTEST_FILTER='QbmmMxMix.*' bash build.sh --opkernel -u --ops=quant_batch_matmul 
 ```
 
 `--cov` 生成本次执行的覆盖率报告。
+
+## HiF4 冒烟测试（Ascend960）
+
+`arch92/test_qbmm_mx_hif4.cpp` 覆盖 batched 与 without_batch 的 HiF4 scale 寻址，
+并静态校验 `MxScaleKLen`、`GetScaleC0`、`GetScaleGmPos` 的 HiF4 语义。
+该用例仅在 `--soc=ascend960` 时编入：
+
+```bash
+bash build.sh --opkernel -u --soc=ascend960 --ops=quant_batch_matmul
+```

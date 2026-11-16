@@ -97,6 +97,19 @@ struct IsScaleNz {
     static constexpr bool value = GetScaleNzValue<LayoutPattern>();
 };
 
+// HiF4 scale packs two adjacent positions per element: ScaleA along M in the DN layout and ScaleB along N
+// in the ND layout. All other scale layouts (including ScaleNZ) keep the logical position.
+template <bool IsHif4Type, typename LayoutScale>
+__aicore__ inline constexpr int64_t GetScaleGmPos(int64_t pos)
+{
+    constexpr bool isPackedLayout = AscendC::Std::is_same_v<LayoutScale, asc::te::scalea_dn_layout_ptn> ||
+                                    AscendC::Std::is_same_v<LayoutScale, asc::te::scaleb_nd_layout_ptn>;
+    if constexpr (IsHif4Type && isPackedLayout) {
+        return pos >> 1;
+    }
+    return pos;
+}
+
 // Build a row-major hierarchical ND (nd_ext_layout_ptn) layout with an explicit row pitch.
 // Shape = ((1, rows), (1, cols)); Stride = ((0, rowPitch), (0, 1)).
 template <typename T = float>
