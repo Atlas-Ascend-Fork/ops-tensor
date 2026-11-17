@@ -60,6 +60,7 @@ struct KernelQgmmMxMixFinalizeRouting {};        // MIX AIC+AIV schedule for Gro
 // full-quantization, L0C -> UB splitM -> vector dequant + logit muls + routing scatter).
 struct KernelQgmmMixPertokenFinalizeRouting {};
 struct KernelGroupedMmadNoQuant {};      // Grouped multi-block without quantization
+struct KernelWqgmmMixAntiquant {};       // Grouped vector antiquant
 struct KernelMmadAPrefetchBAntiquant {}; // AIV weight dequantization and AIC matrix multiplication
 
 struct KernelRotateQuant {}; // Rotate quantization single-matmul with MXFP4/FP8 AIC+AIV
@@ -367,16 +368,18 @@ struct MatmulMultiBlockFixpipeOpti {
 /**
  * @struct MatmulWithWeightAntiquant
  * @brief Blaze dispatch policy for 8-bit weight dequantization followed by AIC matrix multiplication.
- * @param [in] AivNum_: number of AIV sub-blocks per AIC; must be 2
+ * @param [in] AivNum_: number of AIV sub-blocks per AIC: 3510 uses 2, 9201 uses 1
  * @param [in] UbMte2InnerSize_: weight input UB row pitch in bytes
  * @param [in] UbMte2BufNum_: number of prologue input buffers; only 2 or 4 are supported
  * @param [in] AntiquantType_: per-tensor or per-channel antiquantization
  * @param [in] HasAntiquantOffset_: whether antiquantOffset is enabled
+ * @param [in] KernelSchedule_: kernel scheduling policy; defaults to WQMM
  */
 template <uint64_t AivNum_ = 2, uint32_t UbMte2InnerSize_ = 512, uint32_t UbMte2BufNum_ = 2,
-          QuantMode AntiquantType_ = QuantMode::PERCHANNEL_MODE, bool HasAntiquantOffset_ = false>
+          QuantMode AntiquantType_ = QuantMode::PERCHANNEL_MODE, bool HasAntiquantOffset_ = false,
+          class KernelSchedule_ = KernelMmadAPrefetchBAntiquant>
 struct MatmulWithWeightAntiquant {
-    using ScheduleType = KernelMmadAPrefetchBAntiquant;
+    using ScheduleType = KernelSchedule_;
     struct SyncProtocol {
         static constexpr uint16_t MODE = 4;
         static constexpr uint16_t AIV_READY_FLAG = 9;
@@ -390,7 +393,17 @@ struct MatmulWithWeightAntiquant {
     static constexpr QuantMode ANTIQUANT_TYPE = AntiquantType_;
     static constexpr bool HAS_ANTIQUANT_OFFSET = HasAntiquantOffset_;
 
-    static_assert(AivNum_ == 2, "Weight antiquantization requires two AIV sub-blocks");
+    static constexpr uint32_t BL1_BUFFER_NUM = UbMte2BufNum_;
+
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+    static_assert(AivNum_ == 1, "Weight antiquantization on 9201 requires MIX_AIC_1_1");
+#elif defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510
+    static_assert(AivNum_ == 2, "Weight antiquantization on 3510 requires MIX_AIC_1_2");
+#else
+    static_assert(AivNum_ == 1 || AivNum_ == 2, "Weight antiquantization requires one or two AIV sub-blocks");
+#endif
+    static_assert(!AscendC::Std::is_same_v<KernelSchedule_, KernelMmadAPrefetchBAntiquant> || AivNum_ == 2,
+                  "WQMM weight preprocessing requires two AIV sub-blocks");
     static_assert(UbMte2BufNum_ == 2 || UbMte2BufNum_ == 4,
                   "Weight antiquantization supports only 2 or 4 UB input buffers");
     static_assert(AntiquantType_ == QuantMode::PERTENSOR_MODE || AntiquantType_ == QuantMode::PERCHANNEL_MODE,

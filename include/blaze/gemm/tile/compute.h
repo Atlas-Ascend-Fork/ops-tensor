@@ -23,4 +23,5 @@
 #include "blaze/gemm/tile/arch35/pad_mx_kl1.h"
 #include "blaze/gemm/tile/arch35/scale_mx_bias.h"
 #include "blaze/gemm/tile/arch35/shift_w4_to_w8.h"
+#include "blaze/gemm/tile/arch35/antiquant.h"
 #endif

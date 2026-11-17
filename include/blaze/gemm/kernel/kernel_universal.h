@@ -56,6 +56,7 @@
 #include "blaze/gemm/kernel/kernel_qgmm_swiglu_mx.h"
 #include "blaze/gemm/kernel/kernel_tbmm_basic.h"
 #include "blaze/gemm/kernel/kernel_tqbmm.h"
+#include "blaze/gemm/kernel/kernel_wqgmm_mix_antiquant.h"
 #include "blaze/gemm/kernel/kernel_wqmm_mix_antiquant.h"
 #include "blaze/gemm/kernel/kernel_wqmm_mix_pergroup.h"
 #include "blaze/gemm/kernel/kernel_rotate_quant.h"

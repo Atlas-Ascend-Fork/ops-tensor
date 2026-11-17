@@ -31,16 +31,18 @@
 namespace Blaze::Gemm::Block {
 
 template <uint64_t AivNum_, uint32_t UbMte2InnerSize_, uint32_t UbMte2BufNum_, QuantMode AntiquantType_,
-          bool HasAntiquantOffset_, class AType_, class LayoutA_, class BTypeTuple_, class LayoutBTuple_, class CType_,
-          class LayoutC_, class BiasType_, class LayoutBias_>
-class BlockMmad<
-    MatmulWithWeightAntiquant<AivNum_, UbMte2InnerSize_, UbMte2BufNum_, AntiquantType_, HasAntiquantOffset_>, AType_,
-    LayoutA_, BTypeTuple_, LayoutBTuple_, CType_, LayoutC_, BiasType_, LayoutBias_> {
+          bool HasAntiquantOffset_, class KernelSchedule_, class AType_, class LayoutA_, class BTypeTuple_,
+          class LayoutBTuple_, class CType_, class LayoutC_, class BiasType_, class LayoutBias_>
+class BlockMmad<MatmulWithWeightAntiquant<AivNum_, UbMte2InnerSize_, UbMte2BufNum_, AntiquantType_, HasAntiquantOffset_,
+                                          KernelSchedule_>,
+                AType_, LayoutA_, BTypeTuple_, LayoutBTuple_, CType_, LayoutC_, BiasType_, LayoutBias_> {
 public:
+    // L1 tiling ABI is (M, N, Ka, Kb).
+    static constexpr uint32_t L1_KB_INDEX = 3;
     static_assert(AscendC::Std::tuple_size_v<BTypeTuple_> == 2, "B type tuple must contain weight and scale");
     static_assert(AscendC::Std::tuple_size_v<LayoutBTuple_> == 2, "B layout tuple must contain weight and scale");
     using DispatchPolicy = MatmulWithWeightAntiquant<AivNum_, UbMte2InnerSize_, UbMte2BufNum_, AntiquantType_,
-                                                     HasAntiquantOffset_>;
+                                                     HasAntiquantOffset_, KernelSchedule_>;
     using AType = AType_;
     using BType = typename AscendC::Std::tuple_element<0, BTypeTuple_>::type;
     using ScaleType = typename AscendC::Std::tuple_element<1, BTypeTuple_>::type;
@@ -59,10 +61,30 @@ public:
     static_assert(AscendC::Std::is_same_v<CType, half> || AscendC::Std::is_same_v<CType, bfloat16_t>,
                   "WQMM Blaze requires FP16/BF16 C");
     static_assert(AscendC::Std::is_same_v<BType, int8_t> || AscendC::Std::is_same_v<BType, float8_e4m3_t> ||
-                      AscendC::Std::is_same_v<BType, hifloat8_t>,
-                  "WQMM Blaze requires int8/FP8 E4M3/HiFloat8 B");
+                      AscendC::Std::is_same_v<BType, hifloat8_t> ||
+                      (AscendC::Std::is_same_v<KernelSchedule_, KernelWqgmmMixAntiquant> &&
+                       AscendC::Std::is_same_v<BType, float8_e5m2_t>),
+                  "Unsupported weight dtype for the weight antiquant kernel schedule");
     static_assert(AscendC::Std::is_same_v<ScaleType, AType>,
                   "WQMM Blaze requires antiquant scale/offset type to match A");
+
+    static_assert(!AscendC::Std::is_same_v<KernelSchedule_, KernelWqgmmMixAntiquant> || DispatchPolicy::AIV_NUM == 1,
+                  "Grouped weight antiquant MMAD requires MIX_AIC_1_1");
+    static_assert(!AscendC::Std::is_same_v<KernelSchedule_, KernelWqgmmMixAntiquant> ||
+                      (AscendC::Std::is_same_v<AType, CType> &&
+                       AscendC::Std::is_same_v<LayoutA, asc::te::nd_ext_layout_ptn> &&
+                       AscendC::Std::is_same_v<LayoutC, asc::te::nd_ext_layout_ptn>),
+                  "Grouped weight antiquant requires matching x/y dtype and non-transposed ND x/y");
+    static_assert(!AscendC::Std::is_same_v<KernelSchedule_, KernelWqgmmMixAntiquant> ||
+                      ((AscendC::Std::is_same_v<LayoutB, asc::te::nd_ext_layout_ptn> ||
+                        AscendC::Std::is_same_v<LayoutB, asc::te::dn_ext_layout_ptn>) &&
+                       AscendC::Std::is_same_v<LayoutScale, asc::te::nd_ext_layout_ptn> &&
+                       AscendC::Std::is_same_v<LayoutBias, asc::te::nd_ext_layout_ptn>),
+                  "Grouped weight antiquant requires ND weight, scale and bias");
+    static_assert(!AscendC::Std::is_same_v<KernelSchedule_, KernelWqgmmMixAntiquant> ||
+                      (AscendC::Std::is_same_v<BiasType, AType> ||
+                       (AscendC::Std::is_same_v<AType, bfloat16_t> && AscendC::Std::is_same_v<BiasType, float>)),
+                  "Bias must match A dtype, or be FP32 when A is BF16");
 
     struct Params {
         GM_ADDR aGmAddr{nullptr};
@@ -113,6 +135,11 @@ public:
         return asc::te::make_mem_ptr<MemoryLocation, DType>(bL1Slots_[bufferId].Addr());
     }
 
+    __aicore__ inline auto GetWeightL1Tensor(uint32_t bufferId, int64_t k, int64_t n) const
+    {
+        return asc::te::make_tensor(GetShareMemPtr<asc::te::location::l1, AType>(bufferId), MakeBL1Layout{}(k, n));
+    }
+
     template <class TensorA, class TensorBias, class TensorC, class Shape>
     __aicore__ inline void operator()(const TensorA& tensorA, const TensorBias& tensorBias, TensorC& tensorC,
                                       const Shape& actualShape)
@@ -142,7 +169,6 @@ public:
     }
 
 private:
-    static constexpr int32_t L1_KB_INDEX = 3;
     using SyncProtocol = typename DispatchPolicy::SyncProtocol;
     using MakeAL1Layout = asc::te::frame_layout_format<asc::te::nz_layout_ptn, asc::te::layout_trait_default<AType>>;
     // LayoutB uses (N,K) coordinates for weight: ND stores N x K, DN stores K x N.

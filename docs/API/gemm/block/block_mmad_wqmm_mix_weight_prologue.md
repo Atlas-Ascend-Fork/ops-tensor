@@ -13,11 +13,14 @@ AIV Prologue 将量化权重 `weight` 转换为输入 `x` 的类型并写入共�
 
 ## 使用限制
 
-- 面向 Ascend 950 / DAV_3510，仅支持 `MatmulWithWeightAntiquant` 调度策略。
+- 使用 `MatmulWithWeightAntiquant` 策略。默认调度类型服务于 DAV_3510 的 WQMM；
+  GroupedMatmul 在组装处直接指定 `KernelWqgmmMixAntiquant` 调度类型和单 AIV 配置，面向 DAV_9201。
 - 矩阵乘计算由 AIC 执行；AIV 可初始化组件并查询共享权重缓冲区地址。
 - 输入 `x` 和输出 `y` 的类型支持 FP16、BF16；量化权重支持 INT8、FP8 E4M3、HiFloat8。
   反量化参数类型必须与 `x` 相同。配套 Kernel 的类型组合及布局限制见
-  [Kernel 支持范围](../kernel/kernel_wqmm_mix_antiquant.md#支持范围)。
+  [WQMM Kernel 支持范围](../kernel/kernel_wqmm_mix_antiquant.md#支持范围)。
+  GroupedMatmul 另支持 FP8 E5M2，x/y 同类型且为不转置 ND，bias 为 x 的类型或 BF16 x 配 FP32 bias；
+  完整组合见 [GroupedMatmul Kernel](../kernel/kernel_wqgmm_mix_antiquant.md#输入与输出)。
 - 必须配合 AIV Prologue 使用，双方按相同的 M/N 分块顺序及 K 分块配置处理数据。
   缺少对应的权重就绪信号时，AIC 无法完成计算。
 - 输出写回 GM。分块配置须满足 L1、L0 和偏置缓冲区的容量及对齐要求；尾块计算使用真实有效长度。
@@ -93,6 +96,15 @@ __aicore__ inline auto GetShareMemPtr(uint32_t bufferId) const;
 | `bufferId` | 取 0 或 1，指定两份共享权重缓冲区之一 |
 
 该接口只提供地址，不执行搬运或核间同步。调用方通过配套 Prologue 管理权重写入及缓冲区复用。
+
+### GetWeightL1Tensor
+
+```cpp
+__aicore__ inline auto GetWeightL1Tensor(uint32_t bufferId, int64_t k, int64_t n) const;
+```
+
+返回指定权重槽中逻辑形状为 `(k,n)` 的 L1 Tensor。GroupedMatmul 的 AIV 前处理通过此接口写入反量化权重；
+`bufferId` 为 0 或 1。布局由 `LayoutB` 决定，与 AIC 读取同一段权重时的布局一致。
 
 ### operator()
 
@@ -205,4 +217,21 @@ AIC/AIV 通过 `MatmulWithWeightAntiquant::SyncProtocol` 协调共享权重缓�
 2. AIC 等待对应信号，将权重搬入 L0 后通知 AIV 该缓冲区可以复用。
 3. AIV 复用缓冲区前等待空闲信号，结束时等待最后写入的权重被读取。
 
-两个 AIV 使用各自的核间同步标志。输入 `x` 的装载方式不改变每个 K 分块所需的权重同步次数。
+AIC 通过 `CrossCoreWaitFlag/CrossCoreSetFlag` 显式选择 mode 4、MTE1。`AivNum_=2` 时依次等待 READY=25、9，
+依次发布 FREE=24、8；`AivNum_=1` 时仅处理 READY=9、FREE=8。两个 BL1 槽按段序号模 2 轮转，
+共用同一组 mode 4 计数信号。输入 `x` 的装载方式不改变每个 K 分块所需的权重同步次数。
+
+## GroupedMatmul 组装与 bias
+
+`MatmulWithWeightAntiquant` 的第六个模板参数 `KernelSchedule_` 默认为原 WQMM 调度类型；
+原有五参数组装、Params 字段及 `operator()` 四参数调用保持不变。
+GroupedMatmul 在使用处声明 `MatmulWithWeightAntiquant<1,256,2,QuantMode::PERCHANNEL_MODE,HasOffset,KernelWqgmmMixAntiquant>`。
+专家选择由 Kernel 通过 Tensor slice 完成，BlockMmad 不接收专家索引或 N 起点。
+GroupedMatmul 设置 `KaL1=KbL1`，使用普通双缓冲装载 x。
+
+每个输出块只在首 K 段搬入一次 bias，首 K 片由 L1 搬入 BT 并初始化累加结果。
+GM/L1 bias 视图为 `[1,tileN]`，BT 视图为 `[1,Align16(tileN)]`。L1→BT 接口按 16 元素粒度向上取整搬运，实际读取范围包含补齐列并位于预留的 bias 槽内。
+补齐列不清零，MMAD 和 Fixpipe 使用有效 N，补齐列不参与有效列的计算。
+bias 搬运与读取分别受对应 AL1 槽的 MTE2/MTE1 锁保护。
+
+GroupedMatmul 的主块配置和 UB 前处理见 [Kernel 的分块与 UB 布局](../kernel/kernel_wqgmm_mix_antiquant.md#分块与-ub-布局)。

@@ -11,3 +11,4 @@ ops_example_add_executable(grouped_matmul_finalize_routing_mx VER ascend950
                            grouped_matmul_finalize_routing_mx/grouped_matmul_finalize_routing_mx.cpp)
 ops_example_add_executable(grouped_matmul_finalize_routing VER ascend950
     grouped_matmul_finalize_routing/grouped_matmul_finalize_routing.cpp)
+ops_example_add_executable(grouped_matmul_weight_antiquant VER ascend960 grouped_matmul_weight_antiquant/grouped_matmul_weight_antiquant.cpp)
