@@ -258,6 +258,17 @@ def swish(x, beta=1.0):
     )
 
 
+def sigmoid_mul(gate, content):
+    """FP32 sigmoid and multiplication, followed by one BF16 RINT boundary."""
+    gate = np.asarray(gate, dtype=np.float32)
+    content = np.asarray(content, dtype=bfloat16).astype(np.float32)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        denominator = np.float32(1.0) + _ftz_float32(np.exp(-gate))
+        sigmoid = _ftz_float32(np.float32(1.0) / denominator)
+        # Mul preserves subnormal products; let the BF16 cast round them.
+        return (sigmoid * content).astype(bfloat16)
+
+
 def mx_quantize(data, emax, dtype_max, scale_alg):
     """Quantize the last axis in 32-element blocks using OCP(0) or BLAS(1) scale."""
     values = np.asarray(data, dtype=np.float32)
@@ -316,17 +327,21 @@ def generate(args):
         raise ValueError("beta can differ from 1 only for swish")
     if min(args.m, args.n, args.k) <= 0:
         raise ValueError("M/N/K must be positive")
-    if args.activation not in ("silu", "swish") and args.k % 8 != 0:
+    if args.activation not in ("silu", "swish", "sigmoid") and args.k % 8 != 0:
         raise ValueError("GELU/SwiGLU examples require K to be a multiple of 8")
     if args.bias not in (0, args.n):
         raise ValueError("bias must be 0 or N")
-    if args.b_dtype == "fp8_e5m2" and args.activation not in ("silu", "swish"):
-        raise ValueError("This example enables E5M2 B only for Swish/SiLU")
-    if args.activation in ("silu", "swish"):
+    if args.b_dtype == "fp8_e5m2" and args.activation not in (
+        "silu",
+        "swish",
+        "sigmoid",
+    ):
+        raise ValueError("This example enables E5M2 B only for Swish/SiLU/sigmoid")
+    if args.activation in ("silu", "swish", "sigmoid"):
         if args.a_dtype == "fp4_e2m1" or args.b_dtype == "fp4_e2m1":
-            raise ValueError("Swish/SiLU requires FP8 inputs")
+            raise ValueError("Swish/SiLU/sigmoid requires FP8 inputs")
         if args.format == "(ND,NZ)" and (args.trans_a or args.b_dtype != "fp8_e4m3"):
-            raise ValueError("Swish/SiLU NZ requires transA=false and E4M3 B")
+            raise ValueError("Swish/SiLU/sigmoid NZ requires transA=false and E4M3 B")
     if args.activation == "swiglu":
         if (
             args.n % 64 != 0
@@ -362,9 +377,19 @@ def generate(args):
         bias_np = np.where(np.arange(args.n) % 2 == 0, 0.5, -1.0).astype(np.float32)
     matmul_with_bias = matmul_result + bias_np
 
+    if args.activation == "sigmoid":
+        # Golden consumes the BF16 multiplication input stored in mul_input.bin, including zeros and both signs.
+        content = rng.uniform(-4.0, 4.0, (args.m, args.n)).astype(bfloat16)
+        content[:, ::17] = 0
+        content_path = os.path.join(args.output_dir, "mul_input.bin")
+        _write_bin(content_path, content)
+        content = np.fromfile(content_path, dtype=bfloat16).reshape(args.m, args.n)
+
     # C dtype = float (L0C float32 accumulator, DualDst fixpipe to UB as float).
     # The epilogue performs activation in FP32 and rounds its result to BF16 before MX quantization.
-    if args.activation == "swiglu":
+    if args.activation == "sigmoid":
+        activation_result = sigmoid_mul(matmul_with_bias, content)
+    elif args.activation == "swiglu":
         activation_result = swiglu(matmul_with_bias).astype(bfloat16)
     elif args.activation in ("silu", "swish"):
         activation_result = swish(matmul_with_bias, beta).astype(bfloat16)
@@ -453,7 +478,9 @@ def main():
     parser.add_argument("--trans-b", action="store_true", default=False)
     parser.add_argument("--format", default="(ND,NZ)", choices=("(ND,ND)", "(ND,NZ)"))
     parser.add_argument(
-        "--activation", default="gelu", choices=("gelu", "swiglu", "silu", "swish")
+        "--activation",
+        default="gelu",
+        choices=("gelu", "swiglu", "silu", "swish", "sigmoid"),
     )
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--scale-alg", type=int, default=0, choices=(0, 1))

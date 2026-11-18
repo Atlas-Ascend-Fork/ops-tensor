@@ -20,6 +20,7 @@
 | [block_epilogue_flat_quant](./block/block_epilogue_flat_quant.md) | FlatQuant AIV 侧 MX FP4 量化后处理，bf16→eMax→E8M0 scale→FP4 量化 |
 | [block_epilogue_gelu_mx_quant](./block/block_epilogue_gelu_mx_quant.md) | GELU 激活 + 动态 MXFP8/MXFP4 量化 |
 | [block_epilogue_swish_mx_quant](./block/block_epilogue_swish_mx_quant.md) | Swish 激活 + 动态 MXFP8 量化 |
+| [block_epilogue_sigmoid_mul_mx_quant](./block/block_epilogue_sigmoid_mul_mx_quant.md) | Sigmoid 激活后与 BF16 输入逐元素相乘，再执行动态 MXFP8 量化 |
 | [block_epilogue_swiglu_mx_quant](./block/block_epilogue_swiglu_mx_quant.md) | SwiGLU 激活 + 动态 MXFP8 量化 |
 | [block_epilogue_gelu_tanh_mx_quant](./block/block_epilogue_gelu_tanh_mx_quant.md) | GELU（tanh）激活 + 动态 MXFP8/MXFP4 量化 |
 | [block_epilogue_block_attn_res_prepare](./block/block_epilogue_block_attn_res_prepare.md) | BlockAttnResPrepare AIV 后处理，执行 V 平方和、RMS-softmax、空输入处理和结果搬运 |
@@ -64,6 +65,7 @@ BlockEpilogue
 | BlockEpilogueFlatQuant | MX FP4 量化：eMax→E8M0 scale→FP4 quant | AIV 核 | 不支持 | 支持 bf16 → FP4(int8) | 不支持 | Attention FlatQuant Kernel |
 | BlockEpilogueGeluMxQuant | GELU + MXFP8/MXFP4 量化 | AIV 核 | 不支持 | 支持 float → bf16 → FP8/FP4 | GELU | QBMM MX ActivationQuant Kernel |
 | BlockEpilogueSwishMxQuant | Swish(x, β) + MXFP8 量化 | AIV 核 | 不支持 | float → Swish → bf16 → FP8 | Swish | QBMM MX ActivationQuant Kernel |
+| BlockEpilogueSigmoidMulMxQuant | sigmoid(G) × B + MXFP8 量化 | AIV 核 | 不支持 | FP32 sigmoid/mul → BF16 → FP8 | Sigmoid | QBMM MX ActivationQuant Kernel |
 | BlockEpilogueSwigluMxQuant | SwiGLU + MXFP8 量化 | AIV 核 | 不支持 | 支持 float → bf16 → FP8 | SwiGLU | QBMM/QGMM MIX Kernel |
 | BlockEpilogueGeluTanhMxQuant | GELU（tanh） + OCP/cuBLAS MXFP8 或 MXFP4 量化 | AIV 核 | 不支持 | float → GELU（tanh） → FP8/FP4 | GELU（tanh） | QGMM MX ActivationQuant MIX Kernel |
 | BlockEpilogueBlockAttnResPrepare | V 平方和、RMS-softmax、空输入处理和结果搬运 | AIV 核 | 支持 | FP32 | 不支持 | BlockAttnResPrepare Kernel |

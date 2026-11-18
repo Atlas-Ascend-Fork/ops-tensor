@@ -24,6 +24,7 @@
 #include "quant_batch_matmul/qbmm_cpu_debug_stub.h"
 
 #include "blaze/epilogue/block/block_epilogue_gelu_mx_quant.h"
+#include "blaze/epilogue/block/block_epilogue_sigmoid_mul_mx_quant.h"
 #include "blaze/epilogue/block/block_epilogue_swish_mx_quant.h"
 #include "blaze/epilogue/block/block_epilogue_swiglu_mx_quant.h"
 #include "blaze/gemm/block/block_mmad_qbmm_mx.h"
@@ -144,6 +145,24 @@ __global__ __aicore__ void quant_matmul_activation_quant_legacy_epilogue_entry()
     typename Kernel::Params params{};
     Kernel kernel;
     kernel(params);
+}
+
+template <typename OutputType_, uint32_t ScaleAlg_>
+__global__ __aicore__ void quant_matmul_sigmoid_mul_quant_epilogue_setup_entry(GM_ADDR y, GM_ADDR yScale,
+                                                                               GM_ADDR mulInput)
+{
+    using Epilogue = Blaze::Epilogue::Block::BlockEpilogueSigmoidMulMxQuant<OutputType_, float>;
+    typename Epilogue::Params params{y, yScale, mulInput, ScaleAlg_};
+    // Exercise Params lifetime, rebasing, and repeated construction/destruction.
+    // VF arithmetic and GM writes are validated by the CSV example on device.
+    for (uint32_t iteration = 0; iteration < 2U; ++iteration) {
+        Epilogue epilogue;
+        epilogue.Init(params);
+        epilogue.UpdateNextProblem({16L, 64L, 64L, 2L});
+        epilogue.UpdateGlobalAddr({1024L, 32L});
+        epilogue.UpdateNextProblem({16L, 33L, 64L, 1L});
+        epilogue.UpdateGlobalAddr({0L, 0L});
+    }
 }
 
 template <typename OutputType_, uint32_t ScaleAlg_>

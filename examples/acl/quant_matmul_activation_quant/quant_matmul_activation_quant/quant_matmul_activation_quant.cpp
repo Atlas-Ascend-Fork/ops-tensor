@@ -10,7 +10,7 @@
 
 /**
  * @file quant_matmul_activation_quant.cpp
- * @brief CSV-driven MX quantized matmul + GELU/SwiGLU/Swish + dynamic MX quant fusion example.
+ * @brief CSV-driven MX quantized matmul + GELU/SwiGLU/Swish/SigmoidMul + dynamic MX quant fusion example.
  *
  * Both batch and without_batch options use the same GemmUniversal kernel with batch=1.
  *
@@ -21,11 +21,13 @@
  * Supported transposes: transA (A stored as (K,M)), transB (B stored as (N,K))
  * Weight B supports ND and NZ layouts (DN/ZN when transB=true).
  *
- * For Swish in ND, A and B can independently use fp8_e4m3 or fp8_e5m2.
+ * For Swish/SigmoidMul in ND, A and B can independently use fp8_e4m3 or fp8_e5m2.
  * In NZ, B must use fp8_e4m3 and A must not be transposed.
  * For GELU/SwiGLU with FP8 inputs, B must use fp8_e4m3; A may use fp8_e4m3 or fp8_e5m2.
  * GELU also supports fp4_e2m1 for both A and B. Swish uses FP8 output with RINT only.
  * The silu entry selects Swish with beta=1.
+ * The sigmoid entry computes sigmoid(FP32 matmul) * FP32(mul_input), then rounds to BF16.
+ * mul_input is a separate BF16 ND [M,N] tensor, loaded from mul_input.bin, with no broadcasting.
  * C dtype (matmul intermediate / epilogue input): float32 (L0C accumulator, DualDst to UB).
  * Bias dtype: float32
  */
@@ -34,6 +36,7 @@
 #define K_MAX_SHAPE_DIM 0
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -45,6 +48,7 @@
 #include "acl/acl.h"
 #include "blaze/epilogue/block/block_epilogue_gelu_mx_quant.h"
 #include "blaze/epilogue/block/block_epilogue_swish_mx_quant.h"
+#include "blaze/epilogue/block/block_epilogue_sigmoid_mul_mx_quant.h"
 #include "blaze/epilogue/block/block_epilogue_swiglu_mx_quant.h"
 #include "blaze/gemm/block/block_mmad_qbmm_mx.h"
 #include "blaze/gemm/block/block_scheduler_qbmm.h"
@@ -64,16 +68,16 @@ static constexpr int64_t BLOCK_16 = 16L;
 static constexpr uint64_t C0_SIZE_B8 = 32UL;
 static constexpr uint64_t C0_SIZE_B4 = 64UL;
 
-enum class ActivationKind { GELU, SWIGLU, SWISH };
+enum class ActivationKind { GELU, SWIGLU, SWISH, SIGMOID_MUL };
 
 /* ========================================================================== */
 /* Macros                                                                     */
 /* ========================================================================== */
 
-#define LAUNCH_KERNEL_IMPL(FULL_LOAD_MODE, ACTIVATION)                                                           \
-    quant_matmul_activation_quant_kernel<A_TYPE, B_TYPE, A_TYPE, LAYOUT_A, LAYOUT_B, FULL_LOAD_MODE, ACTIVATION> \
-        <<<p.blockNum, 0, p.stream>>>(p.dA, p.dB, p.dBias, p.dScaleA, p.dScaleB, p.dY, p.dYScale, p.m, p.k, p.n, \
-                                      p.baseM, p.baseN, p.baseK, p.kL1, p.scaleKL1, p.l1BufferNum, p.dbL0C,      \
+#define LAUNCH_KERNEL_IMPL(FULL_LOAD_MODE, ACTIVATION)                                                                \
+    quant_matmul_activation_quant_kernel<A_TYPE, B_TYPE, A_TYPE, LAYOUT_A, LAYOUT_B, FULL_LOAD_MODE, ACTIVATION>      \
+        <<<p.blockNum, 0, p.stream>>>(p.dA, p.dB, p.dBias, p.dScaleA, p.dScaleB, p.dY, p.dYScale, p.dMulInput, p.m,   \
+                                      p.k, p.n, p.baseM, p.baseN, p.baseK, p.kL1, p.scaleKL1, p.l1BufferNum, p.dbL0C, \
                                       p.biasElements, p.scaleAlg, p.beta)
 
 #define DISPATCH_TRANS(A_TYPE, B_TYPE, TRANS_A, TRANS_B, IS_NZ, FULL_LOAD_MODE, ACTIVATION)                      \
@@ -135,6 +139,7 @@ struct CliArgs {
     uint32_t scaleAlg = 0;
     std::string kernelVariant = "batch";
     float beta = 1.0F;
+    int64_t coreLimit = 0;
 };
 
 static bool ParseBool(const char* s)
@@ -145,12 +150,12 @@ static bool ParseBool(const char* s)
 
 static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
 {
-    if (argc != 21 && argc != 22) {
+    if (argc < 21 || argc > 23) {
         std::fprintf(stderr,
                      "Usage: %s <m> <k> <n> <bias> <a_dtype> <b_dtype>"
                      " <transA> <transB> <format> <base_m> <base_n> <base_k> <tile_k_l1> <scale_k_l1>"
-                     " <l1_buffers> <db_l0c> <a_full_load> <gelu|swiglu|silu|swish> <scale_alg>"
-                     " <batch|without_batch> [beta=1]\n",
+                     " <l1_buffers> <db_l0c> <a_full_load> <gelu|swiglu|silu|swish|sigmoid> <scale_alg>"
+                     " <batch|without_batch> [beta=1] [core_limit=0]\n",
                      argv[0]);
         return false;
     }
@@ -176,11 +181,19 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
     args.activation = argv[18];
     args.scaleAlg = static_cast<uint32_t>(std::atoll(argv[19]));
     args.kernelVariant = argv[20];
-    if (argc == 22) {
+    if (argc >= 22) {
         char* end = nullptr;
         args.beta = std::strtof(argv[21], &end);
         if (end == argv[21] || *end != '\0' || !std::isfinite(args.beta)) {
             std::fprintf(stderr, "Error: beta must be a finite FP32 scalar.\n");
+            return false;
+        }
+    }
+    if (argc == 23) {
+        char* end = nullptr;
+        args.coreLimit = std::strtoll(argv[22], &end, 10);
+        if (end == argv[22] || *end != '\0' || args.coreLimit < 0) {
+            std::fprintf(stderr, "Error: core_limit must be a nonnegative integer.\n");
             return false;
         }
     }
@@ -222,12 +235,13 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
         return false;
     }
     if (args.activation != "gelu" && args.activation != "swiglu" && args.activation != "silu" &&
-        args.activation != "swish") {
-        std::fprintf(stderr, "Error: activation must be gelu, swiglu, silu, or swish.\n");
+        args.activation != "swish" && args.activation != "sigmoid") {
+        std::fprintf(stderr, "Error: activation must be gelu, swiglu, silu, swish, or sigmoid.\n");
         return false;
     }
-    if (args.bDtype == "fp8_e5m2" && args.activation != "silu" && args.activation != "swish") {
-        std::fprintf(stderr, "Error: this example enables E5M2 B only for Swish/SiLU.\n");
+    if (args.bDtype == "fp8_e5m2" && args.activation != "silu" && args.activation != "swish" &&
+        args.activation != "sigmoid") {
+        std::fprintf(stderr, "Error: this example enables E5M2 B only for Swish/SiLU/sigmoid.\n");
         return false;
     }
     if (args.scaleAlg > 1U) {
@@ -250,14 +264,15 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
             return false;
         }
     }
-    if (args.activation == "silu" || args.activation == "swish") {
+    if (args.activation == "silu" || args.activation == "swish" || args.activation == "sigmoid") {
         if (aIsFp4 || bIsFp4 || (args.format == "(ND,NZ)" && (args.transA || args.bDtype != "fp8_e4m3"))) {
-            std::fprintf(stderr, "Error: Swish/SiLU requires FP8 inputs; NZ requires transA=false and E4M3 B.\n");
+            std::fprintf(stderr,
+                         "Error: Swish/SiLU/sigmoid requires FP8 inputs; NZ requires transA=false and E4M3 B.\n");
             return false;
         }
         if (args.baseM <= 0 || args.baseM > 256 || args.baseM % 16 != 0 || args.baseN <= 0 || args.baseN > 256 ||
             args.baseN % GROUP_SIZE != 0) {
-            std::fprintf(stderr, "Error: Swish/SiLU requires base_m in [16,256] aligned to 16 and "
+            std::fprintf(stderr, "Error: Swish/SiLU/sigmoid requires base_m in [16,256] aligned to 16 and "
                                  "base_n in [32,256] aligned to 32.\n");
             return false;
         }
@@ -317,8 +332,8 @@ template <class AType, class BType, class CType, class LayoutA, class LayoutB, u
           ActivationKind Activation>
 __global__ __aicore__ void quant_matmul_activation_quant_kernel(
     GM_ADDR aGm, GM_ADDR bGm, GM_ADDR biasGm, GM_ADDR scaleAGm, GM_ADDR scaleBGm, GM_ADDR yGm, GM_ADDR yScaleGm,
-    int64_t m, int64_t k, int64_t n, uint64_t baseM, uint64_t baseN, uint64_t baseK, uint64_t kL1, uint64_t scaleKL1,
-    uint64_t l1BufferNum, uint64_t dbL0C, uint64_t biasElements, uint32_t scaleAlg, float beta)
+    GM_ADDR mulInputGm, int64_t m, int64_t k, int64_t n, uint64_t baseM, uint64_t baseN, uint64_t baseK, uint64_t kL1,
+    uint64_t scaleKL1, uint64_t l1BufferNum, uint64_t dbL0C, uint64_t biasElements, uint32_t scaleAlg, float beta)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::InitSocState();
@@ -339,9 +354,13 @@ __global__ __aicore__ void quant_matmul_activation_quant_kernel(
                                                     LayoutC, BiasType, LayoutBias>;
     using BlockEpilogue = AscendC::Std::conditional_t<
         IsSwiGlu, Blaze::Epilogue::Block::BlockEpilogueSwigluMxQuant<OutType, MatmulOutType, fp8_e8m0_t>,
-        AscendC::Std::conditional_t<Activation == ActivationKind::SWISH,
-                                    Blaze::Epilogue::Block::BlockEpilogueSwishMxQuant<OutType, MatmulOutType>,
-                                    Blaze::Epilogue::Block::BlockEpilogueGeluMxQuant<OutType, MatmulOutType>>>;
+        AscendC::Std::conditional_t<
+            Activation == ActivationKind::SWISH,
+            Blaze::Epilogue::Block::BlockEpilogueSwishMxQuant<OutType, MatmulOutType>,
+            AscendC::Std::conditional_t<
+                Activation == ActivationKind::SIGMOID_MUL,
+                Blaze::Epilogue::Block::BlockEpilogueSigmoidMulMxQuant<OutType, MatmulOutType, bfloat16_t>,
+                Blaze::Epilogue::Block::BlockEpilogueGeluMxQuant<OutType, MatmulOutType>>>>;
     using Kernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
 
     typename Kernel::Params params{};
@@ -355,6 +374,8 @@ __global__ __aicore__ void quant_matmul_activation_quant_kernel(
         params.epilogueParams.yGmAddr = yGm;
         params.epilogueParams.yScaleGmAddr = yScaleGm;
         params.epilogueParams.scaleAlg = static_cast<uint8_t>(scaleAlg);
+    } else if constexpr (Activation == ActivationKind::SIGMOID_MUL) {
+        params.epilogueParams = {yGm, yScaleGm, mulInputGm, scaleAlg};
     } else if constexpr (Activation == ActivationKind::SWISH) {
         params.epilogueParams = {yGm,      yScaleGm, static_cast<uint32_t>(baseM), static_cast<uint32_t>(baseN),
                                  scaleAlg, beta};
@@ -407,6 +428,7 @@ struct LaunchParams {
     uint8_t* dScaleB;
     uint8_t* dY;
     uint8_t* dYScale;
+    uint8_t* dMulInput;
     int64_t m, n, k;
     int64_t blockNum;
     uint64_t baseM, baseN, baseK;
@@ -425,10 +447,10 @@ void LaunchKernel(const LaunchParams& p)
         IsNzFormat, std::conditional_t<TransB, asc::te::zn_layout_ptn, asc::te::nz_layout_ptn>,
         std::conditional_t<TransB, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>>;
 
-    if constexpr (Activation == ActivationKind::SWISH && IsNzFormat &&
+    if constexpr ((Activation == ActivationKind::SWISH || Activation == ActivationKind::SIGMOID_MUL) && IsNzFormat &&
                   (TransA || !std::is_same_v<B_TYPE, fp8_e4m3fn_t>)) {
         // ParseCliArgs rejects these combinations before allocating device memory.
-        std::fprintf(stderr, "Unsupported Swish/SiLU WeightNZ layout/dtype combination.\n");
+        std::fprintf(stderr, "Unsupported Swish/SiLU/sigmoid WeightNZ layout/dtype combination.\n");
         std::exit(1);
     } else {
         LAUNCH_KERNEL_IMPL(FullLoadMode, Activation);
@@ -450,6 +472,20 @@ void LaunchElementwiseByFullLoad(const CliArgs& args, bool isNzFormat, const Lau
     } else {
         LaunchElementwiseByTrans<A_TYPE, B_TYPE, Blaze::Gemm::NONE_FULL_LOAD_MODE, Activation>(args, isNzFormat,
                                                                                                launchParams);
+    }
+}
+
+template <ActivationKind Activation>
+void LaunchFp8Elementwise(const CliArgs& args, bool isNzFormat, const LaunchParams& launchParams)
+{
+    if (args.aDtype == "fp8_e4m3" && args.bDtype == "fp8_e4m3") {
+        LaunchElementwiseByFullLoad<fp8_e4m3fn_t, fp8_e4m3fn_t, Activation>(args, isNzFormat, launchParams);
+    } else if (args.aDtype == "fp8_e5m2" && args.bDtype == "fp8_e4m3") {
+        LaunchElementwiseByFullLoad<fp8_e5m2_t, fp8_e4m3fn_t, Activation>(args, isNzFormat, launchParams);
+    } else if (args.aDtype == "fp8_e4m3" && args.bDtype == "fp8_e5m2") {
+        LaunchElementwiseByFullLoad<fp8_e4m3fn_t, fp8_e5m2_t, Activation>(args, isNzFormat, launchParams);
+    } else {
+        LaunchElementwiseByFullLoad<fp8_e5m2_t, fp8_e5m2_t, Activation>(args, isNzFormat, launchParams);
     }
 }
 
@@ -491,6 +527,9 @@ static void Run(const CliArgs& args)
     ACLDeviceGuard guard(stream);
 
     int64_t blockNum = GetAicCoreNum();
+    if (args.coreLimit > 0) {
+        blockNum = std::min(blockNum, args.coreLimit);
+    }
     if (blockNum <= 0) {
         std::cerr << "blockNum cannot be less than 0, but current: " << blockNum << std::endl;
         return;
@@ -526,6 +565,8 @@ static void Run(const CliArgs& args)
     const size_t scaleBSize = static_cast<size_t>(args.n) * scaleK;
     const size_t ySize = ElementCountToBytes(args.m * outputN, args.aDtype);
     const size_t yScaleSize = static_cast<size_t>(args.m) * scaleN;
+    const bool isSigmoidMul = args.activation == "sigmoid";
+    const size_t mulInputSize = isSigmoidMul ? static_cast<size_t>(args.m * args.n) * sizeof(bfloat16_t) : 0;
 
     std::string inputDir = "./input";
     std::string outputDir = "./output";
@@ -538,6 +579,7 @@ static void Run(const CliArgs& args)
     std::vector<uint8_t> hostScaleB(scaleBSize);
     std::vector<uint8_t> hostY(ySize, 0);
     std::vector<uint8_t> hostYScale(yScaleSize, 0);
+    std::vector<uint8_t> hostMulInput(mulInputSize);
 
     if (!ReadFile(inputDir + "/input_a.bin", hostA.data(), aSize)) {
         std::cerr << "Failed to read input A" << std::endl;
@@ -562,6 +604,11 @@ static void Run(const CliArgs& args)
         }
     }
 
+    if (isSigmoidMul && !ReadFile(inputDir + "/mul_input.bin", hostMulInput.data(), mulInputSize)) {
+        std::cerr << "Failed to read BF16 multiplication input" << std::endl;
+        std::exit(1);
+    }
+
     // Allocate device buffers
     uint8_t* deviceA{nullptr};
     uint8_t* deviceB{nullptr};
@@ -570,6 +617,7 @@ static void Run(const CliArgs& args)
     uint8_t* deviceScaleB{nullptr};
     uint8_t* deviceY{nullptr};
     uint8_t* deviceYScale{nullptr};
+    uint8_t* deviceMulInput{nullptr};
 
     ACL_CHECK(aclrtMalloc(reinterpret_cast<void**>(&deviceA), aSize, ACL_MEM_MALLOC_HUGE_FIRST));
     ACL_CHECK(aclrtMalloc(reinterpret_cast<void**>(&deviceB), bSize, ACL_MEM_MALLOC_HUGE_FIRST));
@@ -584,6 +632,11 @@ static void Run(const CliArgs& args)
     ACL_CHECK(aclrtMemcpy(deviceBias, biasSize, hostBias.data(), biasSize, ACL_MEMCPY_HOST_TO_DEVICE));
     ACL_CHECK(aclrtMemcpy(deviceScaleA, scaleASize, hostScaleA.data(), scaleASize, ACL_MEMCPY_HOST_TO_DEVICE));
     ACL_CHECK(aclrtMemcpy(deviceScaleB, scaleBSize, hostScaleB.data(), scaleBSize, ACL_MEMCPY_HOST_TO_DEVICE));
+    if (isSigmoidMul) {
+        ACL_CHECK(aclrtMalloc(reinterpret_cast<void**>(&deviceMulInput), mulInputSize, ACL_MEM_MALLOC_HUGE_FIRST));
+        ACL_CHECK(
+            aclrtMemcpy(deviceMulInput, mulInputSize, hostMulInput.data(), mulInputSize, ACL_MEMCPY_HOST_TO_DEVICE));
+    }
     // Poison outputs so missing stores (including the paired scale padding byte) fail verification.
     ACL_CHECK(aclrtMemset(deviceY, ySize, 0xFF, ySize));
     ACL_CHECK(aclrtMemset(deviceYScale, yScaleSize, 0xFF, yScaleSize));
@@ -621,6 +674,7 @@ static void Run(const CliArgs& args)
                                  deviceScaleB,
                                  deviceY,
                                  deviceYScale,
+                                 deviceMulInput,
                                  args.m,
                                  args.n,
                                  args.k,
@@ -647,19 +701,10 @@ static void Run(const CliArgs& args)
                          args.bDtype.c_str());
             std::exit(1);
         }
+    } else if (isSigmoidMul) {
+        LaunchFp8Elementwise<ActivationKind::SIGMOID_MUL>(args, isNzFormat, launchParams);
     } else if (args.activation == "silu" || args.activation == "swish") {
-        if (args.aDtype == "fp8_e4m3" && args.bDtype == "fp8_e4m3") {
-            LaunchElementwiseByFullLoad<fp8_e4m3fn_t, fp8_e4m3fn_t, ActivationKind::SWISH>(args, isNzFormat,
-                                                                                           launchParams);
-        } else if (args.aDtype == "fp8_e5m2" && args.bDtype == "fp8_e4m3") {
-            LaunchElementwiseByFullLoad<fp8_e5m2_t, fp8_e4m3fn_t, ActivationKind::SWISH>(args, isNzFormat,
-                                                                                         launchParams);
-        } else if (args.aDtype == "fp8_e4m3" && args.bDtype == "fp8_e5m2") {
-            LaunchElementwiseByFullLoad<fp8_e4m3fn_t, fp8_e5m2_t, ActivationKind::SWISH>(args, isNzFormat,
-                                                                                         launchParams);
-        } else {
-            LaunchElementwiseByFullLoad<fp8_e5m2_t, fp8_e5m2_t, ActivationKind::SWISH>(args, isNzFormat, launchParams);
-        }
+        LaunchFp8Elementwise<ActivationKind::SWISH>(args, isNzFormat, launchParams);
     } else if (args.aDtype == "fp8_e4m3" && args.bDtype == "fp8_e4m3") {
         LaunchElementwiseByFullLoad<fp8_e4m3fn_t, fp8_e4m3fn_t>(args, isNzFormat, launchParams);
     } else if (args.aDtype == "fp8_e5m2" && args.bDtype == "fp8_e4m3") {
@@ -678,6 +723,30 @@ static void Run(const CliArgs& args)
 
     ACL_CHECK(aclrtMemcpy(hostY.data(), ySize, deviceY, ySize, ACL_MEMCPY_DEVICE_TO_HOST));
     ACL_CHECK(aclrtMemcpy(hostYScale.data(), yScaleSize, deviceYScale, yScaleSize, ACL_MEMCPY_DEVICE_TO_HOST));
+
+    if (isSigmoidMul) {
+        std::vector<uint8_t> contentAfter(mulInputSize);
+        ACL_CHECK(
+            aclrtMemcpy(contentAfter.data(), mulInputSize, deviceMulInput, mulInputSize, ACL_MEMCPY_DEVICE_TO_HOST));
+        if (contentAfter != hostMulInput) {
+            std::cerr << "SigmoidMul modified its GM multiplication input" << std::endl;
+            std::exit(1);
+        }
+        // Reuse the same input allocations to check repeated-launch stability, without timing this run.
+        LaunchFp8Elementwise<ActivationKind::SIGMOID_MUL>(args, isNzFormat, launchParams);
+        ACL_CHECK(aclrtSynchronizeStream(stream));
+        std::vector<uint8_t> repeatY(ySize), repeatScale(yScaleSize);
+        ACL_CHECK(aclrtMemcpy(repeatY.data(), ySize, deviceY, ySize, ACL_MEMCPY_DEVICE_TO_HOST));
+        ACL_CHECK(aclrtMemcpy(repeatScale.data(), yScaleSize, deviceYScale, yScaleSize, ACL_MEMCPY_DEVICE_TO_HOST));
+        ACL_CHECK(
+            aclrtMemcpy(contentAfter.data(), mulInputSize, deviceMulInput, mulInputSize, ACL_MEMCPY_DEVICE_TO_HOST));
+        if (repeatY != hostY || repeatScale != hostYScale || contentAfter != hostMulInput) {
+            std::cerr << "SigmoidMul repeated launch changed output, scale, or multiplication input" << std::endl;
+            std::exit(1);
+        }
+        ACL_CHECK(aclrtFree(deviceMulInput));
+        std::cout << "  SigmoidMul: multiplication input unchanged; repeated outputs/scales identical" << std::endl;
+    }
 
     // Write outputs
     std::string yPath = outputDir + "/npu_y.bin";

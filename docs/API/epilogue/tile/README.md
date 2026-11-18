@@ -30,6 +30,7 @@ BlockEpilogue（Block 层）
                     │                              / BlockEpilogueQbmmPertensorStreamK
                     ├── MxQuant                  → BlockEpilogueGeluMxQuant / BlockEpilogueGeluTanhMxQuant
                     │                              / BlockEpilogueSwishMxQuant / BlockEpilogueSwigluMxQuant
+                    │                              / BlockEpilogueSigmoidMulMxQuant
                     │                              / BlockEpilogueFlatQuant
                     ├── InitializeEmptySoftmax   ┐
                     ├── ReduceSquare             ├→ BlockEpilogueBlockAttnResPrepare

@@ -233,4 +233,7 @@ y（FP8/FP4, DIST_PACK4_B32 打包）        ↓ TransScaleLayout（ceil(N/32) �
 - [BlockEpilogueSwishMxQuant](../../block/block_epilogue_swish_mx_quant.md)：
   OCP/cuBLAS、FP8 RINT，`zeroScaleOnZeroExp = false`。
 
+- [BlockEpilogueSigmoidMulMxQuant](../../block/block_epilogue_sigmoid_mul_mx_quant.md)：
+  sigmoid 结果与升为 FP32 的 BF16 输入逐元素相乘，乘积 RINT 转 BF16 后量化，OCP/cuBLAS、FP8 RINT，`zeroScaleOnZeroExp = false`。
+
 Block 根据输出类型和 Host 参数选择配置，管理 UB 布局、同步、尾部补零和 GM 写回。

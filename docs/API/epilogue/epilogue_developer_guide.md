@@ -79,6 +79,7 @@ private:
 | **MX 量化+激活** | `BlockEpilogueGeluMxQuant` | fp32→GELU→bf16→MaxExp→Scale→FP8/FP4→GM |
 | **SwiGLU+MX 量化** | `BlockEpilogueSwigluMxQuant` | fp32→SwiGLU→bf16→MX 量化→GM |
 | **Swish+MX 量化** | [BlockEpilogueSwishMxQuant](./block/block_epilogue_swish_mx_quant.md) | fp32→Swish(x, β)→bf16→MXFP8 量化→GM，保留完整 N |
+| **Sigmoid + 逐元素乘法 + MX 量化** | [BlockEpilogueSigmoidMulMxQuant](./block/block_epilogue_sigmoid_mul_mx_quant.md) | fp32→sigmoid→与 BF16 输入逐元素相乘→bf16→MXFP8 量化→GM；UB 乘法输入/乘积复用 |
 | **StreamK 归约** | `BlockEpilogueMatmulStreamK` | workspace GM→UB→K 轴 Add→cast→GM |
 | **Per-TOKEN Scale** | `BlockEpiloguePerTokenScale` | UB→×perTokenScale→cast→GM |
 | **Scale+Add** | `BlockEpilogueFmmWithScaleAdd` | UB→×alpha+beta×x3→GM |

@@ -297,6 +297,79 @@ void RunEpilogueSetup(float dstTypeMax)
     ASSERT_TRUE(KERNEL_RUN_KF(kernel, BLOCK_NUM, y.Get(), yScale.Get(), dstTypeMax)) << "GELU epilogue setup failed";
 }
 
+template <typename A, typename B, typename LayoutA, typename LayoutB, uint64_t FullLoadMode>
+void CheckSigmoidMulAssembly()
+{
+    using Base = QuantMatmulActivationQuantTypes<A, B, A, LayoutA, LayoutB, FullLoadMode>;
+    using Epilogue = Blaze::Epilogue::Block::BlockEpilogueSigmoidMulMxQuant<A>;
+    using ExplicitEpilogue = Blaze::Epilogue::Block::BlockEpilogueSigmoidMulMxQuant<A, float, bfloat16_t>;
+    static_assert(std::is_same_v<Epilogue, ExplicitEpilogue>);
+    static_assert(std::is_same_v<Epilogue, Blaze::Epilogue::Block::BlockEpilogueSigmoidMulMxQuant<A, float>>);
+    using Kernel = Blaze::Gemm::Kernel::GemmUniversal<typename Base::ProblemShape, typename Base::BlockMmad, Epilogue,
+                                                      typename Base::BlockScheduler>;
+    static_assert(
+        std::is_same_v<typename Base::DispatchPolicy::ScheduleType, Blaze::Gemm::KernelMmadWithScaleMxActivationQuant>);
+    static_assert(Base::DispatchPolicy::L0C2UB_MODE == Blaze::Gemm::L0C2UB_MODE_DUAL_DST_SPLIT_M);
+    static_assert(Base::DispatchPolicy::FULL_LOAD_MODE == FullLoadMode);
+    static_assert(!Base::BlockMmad::CONCAT_N);
+    static_assert(std::is_same_v<typename Base::BlockMmad::CType, typename Epilogue::DataTypeIn>);
+    static_assert(std::is_same_v<typename Epilogue::DataTypeIn, float>);
+    static_assert(std::is_same_v<typename Epilogue::DataTypeMul, bfloat16_t>);
+    static_assert(std::is_same_v<typename Epilogue::DataTypeOut, A>);
+    static_assert(
+        std::is_same_v<decltype(std::declval<Epilogue&>().Init(std::declval<const typename Epilogue::Params&>())),
+                       void>);
+    static_assert(std::is_same_v<decltype(std::declval<Epilogue&>().UpdateNextProblem(
+                                     std::declval<const typename Base::ProblemShape&>())),
+                                 void>);
+    static_assert(std::is_same_v<decltype(std::declval<Epilogue&>().UpdateGlobalAddr(
+                                     std::declval<const typename Epilogue::BlockCoord&>())),
+                                 void>);
+    static_assert(
+        std::is_same_v<decltype(std::declval<Epilogue&>()(std::declval<const typename Epilogue::BlockShape&>(),
+                                                          std::declval<const typename Epilogue::BlockCoord&>())),
+                       void>);
+    static_assert(
+        std::is_same_v<decltype(std::declval<Kernel&>()(std::declval<const typename Kernel::Params&>())), void>);
+
+    typename Kernel::Params params{};
+    uint8_t y{}, scale{}, content{};
+    params.epilogueParams = {&y, &scale, &content, 1U};
+    EXPECT_EQ(params.epilogueParams.yGmAddr, &y);
+    EXPECT_EQ(params.epilogueParams.yScaleGmAddr, &scale);
+    EXPECT_EQ(params.epilogueParams.mulGmAddr, &content);
+    EXPECT_EQ(params.epilogueParams.scaleAlg, 1U);
+}
+
+template <typename A, typename B, typename LayoutA, typename LayoutB>
+void CheckSigmoidMulLoadModes()
+{
+    CheckSigmoidMulAssembly<A, B, LayoutA, LayoutB, Blaze::Gemm::NONE_FULL_LOAD_MODE>();
+    CheckSigmoidMulAssembly<A, B, LayoutA, LayoutB, Blaze::Gemm::A_FULL_LOAD_MODE>();
+}
+
+template <typename A, typename B>
+void CheckSigmoidMulNdLayouts()
+{
+    CheckSigmoidMulLoadModes<A, B, ND, ND>();
+    CheckSigmoidMulLoadModes<A, B, ND, DN>();
+    CheckSigmoidMulLoadModes<A, B, DN, ND>();
+    CheckSigmoidMulLoadModes<A, B, DN, DN>();
+}
+
+template <typename Output, uint32_t ScaleAlg>
+void RunSigmoidMulEpilogueSetup()
+{
+    constexpr size_t ELEMENTS = 2U * static_cast<size_t>(M * N);
+    GmBuffer y(ELEMENTS), scale(2U * static_cast<size_t>(M * 2)), content(ELEMENTS * sizeof(bfloat16_t));
+    ASSERT_NE(y.Get(), nullptr);
+    ASSERT_NE(scale.Get(), nullptr);
+    ASSERT_NE(content.Get(), nullptr);
+    AscendC::SetKernelMode(KernelMode::MIX_MODE);
+    auto kernel = quant_matmul_sigmoid_mul_quant_epilogue_setup_entry<Output, ScaleAlg>;
+    ASSERT_TRUE(KERNEL_RUN_KF(kernel, BLOCK_NUM, y.Get(), scale.Get(), content.Get()));
+}
+
 } // namespace
 
 TEST(QuantMatmulActivationQuantTest, PublicAssemblyCoversSupportedDtypeMatrix)
@@ -379,4 +452,28 @@ TEST(QuantMatmulActivationQuantTest, SwishEpilogueSetupCoversOutputDtypesAndScal
     RunSwishEpilogueSetup<fp8_e4m3fn_t, 1U>(0.5F);
     RunSwishEpilogueSetup<fp8_e5m2_t, 0U>(2.0F);
     RunSwishEpilogueSetup<fp8_e5m2_t, 1U>(-1.0F);
+}
+
+TEST(QuantMatmulActivationQuantTest, SigmoidMulAssemblySupportsNdDtypesTransposesAndLoadModes)
+{
+    CheckSigmoidMulNdLayouts<fp8_e4m3fn_t, fp8_e4m3fn_t>();
+    CheckSigmoidMulNdLayouts<fp8_e4m3fn_t, fp8_e5m2_t>();
+    CheckSigmoidMulNdLayouts<fp8_e5m2_t, fp8_e4m3fn_t>();
+    CheckSigmoidMulNdLayouts<fp8_e5m2_t, fp8_e5m2_t>();
+}
+
+TEST(QuantMatmulActivationQuantTest, SigmoidMulAssemblySupportsWeightNzTransposesAndLoadModes)
+{
+    CheckSigmoidMulLoadModes<fp8_e4m3fn_t, fp8_e4m3fn_t, ND, NZ>();
+    CheckSigmoidMulLoadModes<fp8_e4m3fn_t, fp8_e4m3fn_t, ND, ZN>();
+    CheckSigmoidMulLoadModes<fp8_e5m2_t, fp8_e4m3fn_t, ND, NZ>();
+    CheckSigmoidMulLoadModes<fp8_e5m2_t, fp8_e4m3fn_t, ND, ZN>();
+}
+
+TEST(QuantMatmulActivationQuantTest, SigmoidMulEpilogueSetupCoversOutputDtypesAndScaleAlgorithms)
+{
+    RunSigmoidMulEpilogueSetup<fp8_e4m3fn_t, 0U>();
+    RunSigmoidMulEpilogueSetup<fp8_e4m3fn_t, 1U>();
+    RunSigmoidMulEpilogueSetup<fp8_e5m2_t, 0U>();
+    RunSigmoidMulEpilogueSetup<fp8_e5m2_t, 1U>();
 }
