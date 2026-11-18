@@ -67,7 +67,6 @@ public:
 
 private:
     static constexpr uint8_t DEFAULT_EVENT_ID = 0U;
-    static constexpr uint32_t SECOND_BUFFER_INDEX = 1U;
 
     template <typename VTensor>
     __aicore__ inline auto MakeVUbTensor(const VTensor& vTensor, uint32_t bufferIndex) const;
@@ -225,9 +224,6 @@ __aicore__ inline void BLAZE_ATTN_EPILOGUE_CLASS::ReduceVByDTiles(const VTensor&
         }
     }
     WaitVectorToMte2(DEFAULT_EVENT_ID);
-    if (params_->dTileNum > SECOND_BUFFER_INDEX) {
-        WaitVectorToMte2(GetEvent(SECOND_BUFFER_INDEX));
-    }
 }
 
 BLAZE_ATTN_EPILOGUE_CLASS_TEMPLATE
