@@ -137,8 +137,8 @@ public:
         }
         // 连续且非全载场景切K
         splitSingleCoreK_ = params.splitSingleCoreKBase;
-        splitSingleCoreKRound_ = k_ / splitSingleCoreK_;
-        splitSingleCoreKTail_ = k_ % splitSingleCoreK_ + splitSingleCoreK_;
+        splitSingleCoreKRound_ = k_ < splitSingleCoreK_ ? 1 : k_ / splitSingleCoreK_;
+        splitSingleCoreKTail_ = k_ < splitSingleCoreK_ ? k_ : k_ % splitSingleCoreK_ + splitSingleCoreK_;
     }
 
     template <typename TensorA, typename TensorB, typename TensorBias, typename TensorC>
