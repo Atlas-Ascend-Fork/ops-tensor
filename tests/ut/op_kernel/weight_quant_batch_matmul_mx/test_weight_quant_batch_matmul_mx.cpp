@@ -45,8 +45,7 @@ uint64_t Align(uint64_t value, uint64_t alignment)
 
 class GmBuffer {
 public:
-    explicit GmBuffer(size_t size) : address_(reinterpret_cast<GM_ADDR>(AscendC::GmAlloc(size)))
-    {}
+    explicit GmBuffer(size_t size) : address_(reinterpret_cast<GM_ADDR>(AscendC::GmAlloc(size))) {}
 
     ~GmBuffer()
     {
@@ -58,10 +57,7 @@ public:
     GmBuffer(const GmBuffer&) = delete;
     GmBuffer& operator=(const GmBuffer&) = delete;
 
-    GM_ADDR Get() const
-    {
-        return address_;
-    }
+    GM_ADDR Get() const { return address_; }
 
 private:
     GM_ADDR address_{nullptr};
@@ -81,6 +77,7 @@ struct CaseConfig {
     uint64_t l1BufferNum;
     bool weightNz;
     bool hasBias;
+    bool scaleBNz = false;
 };
 
 struct BufferSizes {
@@ -124,11 +121,12 @@ void GenerateData(const std::string& dataDir, const CaseConfig& config)
 {
     std::string command = "cd " + dataDir + " && rm -f *.bin && python3 gen_data.py --m " + std::to_string(config.m) +
                           " --n " + std::to_string(config.n) + " --k " + std::to_string(config.k) +
-                          " --weight-layout " + (config.weightNz ? "nz" : "nd") + (config.hasBias ? " --bias" : "");
+                          " --weight-layout " + (config.weightNz ? "nz" : "nd") + " --scale-layout " +
+                          (config.scaleBNz ? "nz" : "nd") + (config.hasBias ? " --bias" : "");
     ASSERT_EQ(system(command.c_str()), 0) << "Failed to generate Weight Quant MX test data";
 }
 
-template <bool WeightNz>
+template <bool WeightNz, bool ScaleBNz>
 BufferSizes CalculateBufferSizes(const CaseConfig& config)
 {
     const size_t aSize = static_cast<size_t>(config.m * config.k) * sizeof(fp8_e4m3fn_t);
@@ -136,7 +134,8 @@ BufferSizes CalculateBufferSizes(const CaseConfig& config)
     const size_t bSize = static_cast<size_t>(weightElements / FP4_PACK_FACTOR) * sizeof(fp4x2_e2m1_t);
     const size_t scaleK = static_cast<size_t>(Align(config.k, 64U) / 32U);
     const size_t scaleASize = static_cast<size_t>(config.m) * scaleK * sizeof(AscendC::fp8_e8m0_t);
-    const size_t scaleBSize = scaleK * static_cast<size_t>(config.n) * sizeof(AscendC::fp8_e8m0_t);
+    const size_t scaleBN = ScaleBNz ? Align(static_cast<uint64_t>(config.n), 16U) : static_cast<uint64_t>(config.n);
+    const size_t scaleBSize = scaleK * static_cast<size_t>(scaleBN) * sizeof(AscendC::fp8_e8m0_t);
     const size_t biasSize = static_cast<size_t>(config.n) * sizeof(half);
     const size_t cSize = static_cast<size_t>(config.m * config.n) * sizeof(half);
     return BufferSizes{aSize, bSize, biasSize, scaleASize, scaleBSize, cSize};
@@ -153,8 +152,8 @@ void ValidateBuffers(const CaseBuffers& buffers)
     ASSERT_NE(buffers.tilingGm.Get(), nullptr);
 }
 
-void LoadInputData(
-    const std::string& dataDir, const CaseConfig& config, const BufferSizes& sizes, const CaseBuffers& buffers)
+void LoadInputData(const std::string& dataDir, const CaseConfig& config, const BufferSizes& sizes,
+                   const CaseBuffers& buffers)
 {
     ASSERT_NO_FATAL_FAILURE(GenerateData(dataDir, config));
     ASSERT_NO_FATAL_FAILURE(ReadBinary(dataDir + "/input_a.bin", buffers.aGm.Get(), sizes.aSize));
@@ -173,43 +172,42 @@ void InitializeOutput(const CaseBuffers& buffers, const BufferSizes& sizes)
 
 WeightQuantBatchMatmulMxTilingData BuildTiling(const CaseConfig& config)
 {
-    return WeightQuantBatchMatmulMxTilingData{
-        config.m,
-        config.n,
-        config.k,
-        config.baseM,
-        config.baseN,
-        config.baseK,
-        config.tileShapeKL1,
-        config.tileShapeScaleKL1,
-        config.kBubSize,
-        config.nBubSize,
-        config.l1BufferNum,
-        config.hasBias ? 1U : 0U,
-        1U,
-        1U,
-        1U,
-        1U,
-        0U,
-        0U};
+    return WeightQuantBatchMatmulMxTilingData{config.m,
+                                              config.n,
+                                              config.k,
+                                              config.baseM,
+                                              config.baseN,
+                                              config.baseK,
+                                              config.tileShapeKL1,
+                                              config.tileShapeScaleKL1,
+                                              config.kBubSize,
+                                              config.nBubSize,
+                                              config.l1BufferNum,
+                                              config.hasBias ? 1U : 0U,
+                                              1U,
+                                              1U,
+                                              1U,
+                                              1U,
+                                              0U,
+                                              0U};
 }
 
-template <bool WeightNz>
+template <bool WeightNz, bool ScaleBNz>
 void RunKernel(const CaseBuffers& buffers)
 {
     AscendC::SetKernelMode(KernelMode::MIX_MODE);
-    auto kernel = weight_quant_batch_matmul_mx_kernel_entry<WeightNz>;
+    auto kernel = weight_quant_batch_matmul_mx_kernel_entry<WeightNz, ScaleBNz>;
     // tikicpulib does not model FP8 x FP4 MMAD numerics; validate the mixed-kernel pipeline and synchronization.
-    ASSERT_TRUE(KERNEL_RUN_KF(
-        kernel, 1U, buffers.aGm.Get(), buffers.bGm.Get(), buffers.biasGm.Get(), buffers.scaleAGm.Get(),
-        buffers.scaleBGm.Get(), buffers.cGm.Get(), buffers.tilingGm.Get()))
+    ASSERT_TRUE(KERNEL_RUN_KF(kernel, 1U, buffers.aGm.Get(), buffers.bGm.Get(), buffers.biasGm.Get(),
+                              buffers.scaleAGm.Get(), buffers.scaleBGm.Get(), buffers.cGm.Get(),
+                              buffers.tilingGm.Get()))
         << "Weight Quant MX mixed kernel execution failed";
 }
 
-template <bool WeightNz>
+template <bool WeightNz, bool ScaleBNz>
 void RunCase(const CaseConfig& config)
 {
-    const BufferSizes sizes = CalculateBufferSizes<WeightNz>(config);
+    const BufferSizes sizes = CalculateBufferSizes<WeightNz, ScaleBNz>(config);
     const CaseBuffers buffers(sizes);
     ASSERT_NO_FATAL_FAILURE(ValidateBuffers(buffers));
 
@@ -219,7 +217,7 @@ void RunCase(const CaseConfig& config)
 
     auto* tiling = reinterpret_cast<WeightQuantBatchMatmulMxTilingData*>(buffers.tilingGm.Get());
     *tiling = BuildTiling(config);
-    ASSERT_NO_FATAL_FAILURE(RunKernel<WeightNz>(buffers));
+    ASSERT_NO_FATAL_FAILURE((RunKernel<WeightNz, ScaleBNz>(buffers)));
 }
 
 class WeightQuantBatchMatmulMxTest : public testing::Test {
@@ -235,25 +233,37 @@ protected:
 TEST_F(WeightQuantBatchMatmulMxTest, NdWithoutBias)
 {
     const CaseConfig config{32, 40, 128, 32, 32, 64, 64, 64, 64, 64, 2, false, false};
-    RunCase<false>(config);
+    RunCase<false, false>(config);
 }
 
 TEST_F(WeightQuantBatchMatmulMxTest, NzMultiKWithFp16Bias)
 {
     const CaseConfig config{32, 40, 128, 32, 32, 64, 64, 64, 64, 64, 2, true, true};
-    RunCase<true>(config);
+    RunCase<true, false>(config);
 }
 
 TEST_F(WeightQuantBatchMatmulMxTest, NdTwoBufferWraparound)
 {
     const CaseConfig config{32, 40, 192, 32, 32, 64, 64, 64, 64, 64, 2, false, false};
-    RunCase<false>(config);
+    RunCase<false, false>(config);
 }
 
 TEST_F(WeightQuantBatchMatmulMxTest, NzFourBufferWraparoundWithFp16Bias)
 {
     const CaseConfig config{32, 40, 320, 32, 32, 64, 64, 64, 64, 64, 4, true, true};
-    RunCase<true>(config);
+    RunCase<true, false>(config);
+}
+
+TEST_F(WeightQuantBatchMatmulMxTest, NzScaleNzMultiK)
+{
+    const CaseConfig config{32, 40, 128, 32, 32, 64, 64, 64, 64, 64, 2, true, false, true};
+    RunCase<true, true>(config);
+}
+
+TEST_F(WeightQuantBatchMatmulMxTest, NzScaleNzWithFp16Bias)
+{
+    const CaseConfig config{32, 40, 128, 32, 32, 64, 64, 64, 64, 64, 2, true, true, true};
+    RunCase<true, true>(config);
 }
 
 } // namespace

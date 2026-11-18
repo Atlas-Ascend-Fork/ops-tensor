@@ -25,7 +25,7 @@
 
 namespace WeightQuantBatchMatmulMxUT {
 
-template <bool WeightNz>
+template <bool WeightNz, bool ScaleBNz>
 __aicore__ inline void Run(GM_ADDR aGm, GM_ADDR bGm, GM_ADDR biasGm, GM_ADDR scaleAGm, GM_ADDR scaleBGm, GM_ADDR cGm,
                            const WeightQuantBatchMatmulMxTilingData& tiling)
 {
@@ -38,7 +38,7 @@ __aicore__ inline void Run(GM_ADDR aGm, GM_ADDR bGm, GM_ADDR biasGm, GM_ADDR sca
     using LayoutB = AscendC::Std::conditional_t<WeightNz, asc::te::zn_layout_ptn, asc::te::dn_ext_layout_ptn>;
     using LayoutC = asc::te::nd_ext_layout_ptn;
     using LayoutScaleA = asc::te::scalea_nd_layout_ptn;
-    using LayoutScaleB = asc::te::scaleb_dn_layout_ptn;
+    using LayoutScaleB = AscendC::Std::conditional_t<ScaleBNz, asc::te::nn_layout_ptn, asc::te::scaleb_dn_layout_ptn>;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t>;
     using DispatchPolicy = Blaze::Gemm::MatmulWithWeightQuantMx;
     using BlockMmad = Blaze::Gemm::Block::BlockMmad<
@@ -65,12 +65,12 @@ __aicore__ inline void Run(GM_ADDR aGm, GM_ADDR bGm, GM_ADDR biasGm, GM_ADDR sca
 
 } // namespace WeightQuantBatchMatmulMxUT
 
-template <bool WeightNz>
+template <bool WeightNz, bool ScaleBNz = false>
 __global__ __aicore__ void weight_quant_batch_matmul_mx_kernel_entry(GM_ADDR aGm, GM_ADDR bGm, GM_ADDR biasGm,
                                                                      GM_ADDR scaleAGm, GM_ADDR scaleBGm, GM_ADDR cGm,
                                                                      GM_ADDR tilingGm)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     const auto* tiling = reinterpret_cast<const WeightQuantBatchMatmulMxTilingData*>(tilingGm);
-    WeightQuantBatchMatmulMxUT::Run<WeightNz>(aGm, bGm, biasGm, scaleAGm, scaleBGm, cGm, *tiling);
+    WeightQuantBatchMatmulMxUT::Run<WeightNz, ScaleBNz>(aGm, bGm, biasGm, scaleAGm, scaleBGm, cGm, *tiling);
 }

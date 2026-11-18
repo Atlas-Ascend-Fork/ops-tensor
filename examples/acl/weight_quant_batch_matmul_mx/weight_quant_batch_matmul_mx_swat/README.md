@@ -7,7 +7,7 @@ FP8 E4M3 激活、打包的 FP4 E2M1 权重和 E8M0 MX Scale 完成矩阵乘，�
 
 - **算子**: weight_quant_batch_matmul_mx
 - **场景**: weight_quant_batch_matmul_mx_swat
-- **算法特点**: 支持 Weight ND 和 Weight NZ 布局，以及可选的 FP16 Bias
+- **算法特点**: 支持 Weight ND 和 Weight NZ 布局、ScaleB ND/NZ，以及可选的 FP16 Bias
 - **参考实现**: 基于 Blaze 框架 `blaze/gemm/kernel/kernel_matmul_mix_weight_prologue.h`
 
 ## 支持架构
@@ -41,6 +41,13 @@ Weight NZ: [align(K, 32) / 32, align(N, 16) / 16, 16, 16]
 
 Scale A 按 M 行存储；Scale B 的原始字节按 N 优先存储，对应 kernel 使用的 ScaleBDN 布局。计算结果 C
 按照 `[M, N]` 的 ND 布局存储。
+
+CSV 的 `layout` 字段控制 Weight 与 ScaleB 的组合：
+
+- `ND`：Weight ND + ScaleB ND
+- `NZ`：Weight NZ + ScaleB ND
+- `NZ:scale_nd`：Weight NZ + ScaleB ND，显式指定 scale 布局
+- `NZ:scale_nz`：Weight NZ + ScaleB NZ
 
 ## CSV 驱动测试
 
@@ -78,6 +85,10 @@ AIV 转换 B 和可选 bias 后写入共享 L1，AIC 搬运 A、ScaleA、ScaleB 
 casename,m,k,n,bias,layout,base_m,base_n,base_k,tile_k_l1,scale_k_l1,k_bub,n_bub,l1_buffers,block_num
 ND_multik_tail_n,32,128,40,0,ND,32,32,64,64,64,64,32,2,1
 NZ_multik_tail_n_bias,32,128,40,40,NZ,32,32,64,64,64,64,32,2,1
+NZ_scale_nd,32,128,40,0,NZ:scale_nd,32,32,64,64,64,64,32,2,1
+NZ_scale_nz,32,128,40,0,NZ:scale_nz,32,32,64,64,64,64,32,2,1
+NZ_scale_nz_bias,32,128,40,40,NZ:scale_nz,32,32,64,64,64,64,32,2,1
+NZ_scale_nz_multik,32,192,40,0,NZ:scale_nz,32,32,64,128,128,64,32,2,1
 ```
 
 **列说明**：
@@ -87,7 +98,7 @@ NZ_multik_tail_n_bias,32,128,40,40,NZ,32,32,64,64,64,64,32,2,1
 | casename | 用例名称 |
 | m, k, n | 矩阵维度 |
 | bias | bias 元素数量，必须为 n 或 0 |
-| layout | 权重布局：ND / NZ |
+| layout | 权重与 ScaleB 布局：ND / NZ / NZ:scale_nd / NZ:scale_nz |
 | base_m, base_n, base_k | Cube 基础分块大小 |
 | tile_k_l1 | L1 中 K 方向的 Tile 大小 |
 | scale_k_l1 | L1 中 Scale K 方向的 Tile 大小 |

@@ -31,6 +31,7 @@ GROUP_SIZE = 32
 NZ_K0 = 32
 NZ_N0 = 16
 RANDOM_SEED = 20260727
+SUPPORTED_LAYOUTS = ("nd", "nz", "nz:scale_nd", "nz:scale_nz")
 
 
 @dataclass(frozen=True)
@@ -58,12 +59,27 @@ def align(value, alignment):
     return (value + alignment - 1) // alignment * alignment
 
 
+def format_scale_nz(scale_b, n):
+    """Convert canonical (scale_k, N) scale pairs into NZ storage (n1, kg, 16, 2) bytes."""
+    scale_k = scale_b.shape[0]
+    n1 = align(n, 16)
+    padded = np.zeros((scale_k, n1), dtype=scale_b.dtype)
+    padded[:, :n] = scale_b
+    # canonical (kg, n1, 2) with last-dim pairs split -> view as (kg, n1*2) bytes then reshape NZ (n1/16, kg, 16, 2)
+    pairs = np.zeros((scale_k // 2, n1, 2), dtype=np.uint8)
+    pairs[:, :, 0] = padded[0::2, :].view(np.uint8)
+    pairs[:, :, 1] = padded[1::2, :].view(np.uint8)
+    nz = pairs.reshape(scale_k // 2, n1 // 16, 16, 2).transpose(1, 0, 2, 3)
+    return np.ascontiguousarray(nz)
+
+
 def validate_config(config):
     if min(config.m, config.n, config.k) <= 0:
         raise ValueError("M, N, and K must be positive")
     if config.k % 8 != 0:
         raise ValueError("K must be a multiple of 8")
-    if config.layout == "nz" and config.n % 8 != 0:
+    weight_layout = config.layout.split(":", maxsplit=1)[0]
+    if weight_layout == "nz" and config.n % 8 != 0:
         raise ValueError("NZ N must be a multiple of 8")
     if config.bias not in (0, config.n):
         raise ValueError("bias must be 0 or N")
@@ -169,13 +185,20 @@ def generate_artifacts(config):
     )
 
 
-def write_artifacts(output_dir, artifacts):
+def write_artifacts(output_dir, artifacts, config=None):
     os.makedirs(output_dir, exist_ok=True)
     artifacts.activation.view(np.uint8).tofile(os.path.join(output_dir, "input_a.bin"))
     artifacts.packed_weight.tofile(os.path.join(output_dir, "input_b.bin"))
     artifacts.scale_a.view(np.uint8).tofile(os.path.join(output_dir, "scale_a.bin"))
     # ScaleBDN uses an N-major GM stride while its logical shape is (scale_k, N).
-    artifacts.scale_b.T.view(np.uint8).tofile(os.path.join(output_dir, "scale_b.bin"))
+    if config.layout.endswith(":scale_nz"):
+        format_scale_nz(artifacts.scale_b, config.n).tofile(
+            os.path.join(output_dir, "scale_b.bin")
+        )
+    else:
+        artifacts.scale_b.T.view(np.uint8).tofile(
+            os.path.join(output_dir, "scale_b.bin")
+        )
     artifacts.bias.tofile(os.path.join(output_dir, "bias.bin"))
     artifacts.initial_c.tofile(os.path.join(output_dir, "initial_c.bin"))
     artifacts.golden_c.tofile(os.path.join(output_dir, "golden_c.bin"))
@@ -184,7 +207,7 @@ def write_artifacts(output_dir, artifacts):
 def generate(config):
     validate_config(config)
     artifacts = generate_artifacts(config)
-    write_artifacts(config.output_dir, artifacts)
+    write_artifacts(config.output_dir, artifacts, config)
     print(f"[SUCCESS] Test data generated in {config.output_dir}")
 
 
@@ -196,7 +219,9 @@ def parse_args():
     parser.add_argument("--k", type=int, required=True)
     parser.add_argument("--n", type=int, required=True)
     parser.add_argument("--bias", type=int, default=0)
-    parser.add_argument("--layout", type=str.lower, choices=("nd", "nz"), required=True)
+    parser.add_argument(
+        "--layout", type=str.lower, choices=SUPPORTED_LAYOUTS, required=True
+    )
     parser.add_argument("--output-dir", required=True)
     args = parser.parse_args()
     return MxDataConfig(

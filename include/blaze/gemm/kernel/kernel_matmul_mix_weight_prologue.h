@@ -51,6 +51,8 @@ public:
         uint64_t nUbSize{0};
         uint64_t l1BufferNum{0};
         bool hasBias{false};
+        bool disableWeightL2{false};
+        uint64_t problemM{0};
     };
 
     __aicore__ inline explicit KernelMatmulMixWeightPrologue(const Params& params) { Init(params); }
@@ -66,7 +68,8 @@ public:
     __aicore__ inline void operator()(const GMWeightTensor& gmWeightTensor, const GMBiasTensor& gmBiasTensor,
                                       const ActualBlockShape& actualBlockShape)
     {
-        BlockContext block{static_cast<int64_t>(asc::te::get<MNK_K>(actualBlockShape)),
+        BlockContext block{static_cast<int64_t>(asc::te::get<MNK_M>(actualBlockShape)),
+                           static_cast<int64_t>(asc::te::get<MNK_K>(actualBlockShape)),
                            static_cast<int64_t>(asc::te::get<MNK_N>(actualBlockShape)),
                            Align16(static_cast<uint64_t>(asc::te::get<MNK_N>(actualBlockShape)))};
         const int64_t kL1Size = static_cast<int64_t>(kL1Size_);
@@ -86,8 +89,20 @@ public:
 
 private:
     static constexpr bool WEIGHT_NZ = IsWeightNz<LayoutB>::value;
+    static constexpr uint64_t CACHE_LINE_BYTES = 128UL;
+
+    template <typename Tp>
+    __aicore__ inline static bool IsCacheLineAligned(uint64_t innerSize)
+    {
+        constexpr uint64_t FP4_ELEMENTS_PER_BYTE = 2UL;
+        if constexpr (IsFp4<Tp>) {
+            return innerSize % (CACHE_LINE_BYTES * FP4_ELEMENTS_PER_BYTE) == 0UL;
+        }
+        return innerSize % CACHE_LINE_BYTES == 0UL;
+    }
 
     struct BlockContext {
+        int64_t mLength;
         int64_t kLength;
         int64_t nLength;
         uint64_t nStride;
@@ -225,6 +240,8 @@ private:
         l1BufferNum_ = params.l1BufferNum;
         l1BufferMask_ = l1BufferNum_ - 1U;
         hasBias_ = params.hasBias;
+        disableWeightL2_ = params.disableWeightL2;
+        problemM_ = params.problemM;
         ubStorage_.Init(params.baseN, nUbSize_, kUbSize_, l1BufferNum_, hasBias_);
         l1Storage_.Init(params.baseN, kL1Size_, l1BufferNum_, hasBias_);
     }
@@ -313,6 +330,9 @@ private:
         const auto& inputSlot = ubStorage_.GetInputSlot(ubBufIdx);
         const auto& outputSlot = ubStorage_.GetOutputSlot(ubBufIdx);
         auto gmSlice = MakeGmWeightSlice(gmWeightTensor, slice);
+        const bool disableWeightL2 = disableWeightL2_ && block.mLength >= static_cast<int64_t>(problemM_) &&
+                                     IsCacheLineAligned<InType>(slice.kLength);
+        gmSlice.set_l2_cache_hint(disableWeightL2 ? asc::te::cache_mode::disable : asc::te::cache_mode::normal);
         auto weight4BitTensor = ubStorage_.MakePackedWeight(ubBufIdx, slice.nLength, slice.kLength);
         {
             auto mte2Lock = inputSlot.LockMte2();
@@ -375,6 +395,8 @@ private:
     uint64_t l1BufferNum_{DOUBLE_BUFFER_COUNT};
     uint64_t l1BufferMask_{DOUBLE_BUFFER_COUNT - 1U};
     bool hasBias_{false};
+    bool disableWeightL2_{false};
+    uint64_t problemM_{0};
     UbStorage ubStorage_;
     L1Storage l1Storage_;
 };
@@ -417,6 +439,7 @@ public:
         GM_ADDR biasGmAddr{nullptr};
         uint64_t kBubSize{0};
         uint64_t nBubSize{0};
+        bool disableWeightL2{false};
     };
 
     struct Params {
@@ -461,16 +484,13 @@ private:
             params.prologueParams.kBubSize,
             params.prologueParams.nBubSize,
             params.mmadParams.l1BufferNum,
-            params.mmadParams.hasBias};
+            params.mmadParams.hasBias,
+            params.prologueParams.disableWeightL2,
+            static_cast<uint64_t>(asc::te::get<MNK_M>(params.problemShape))};
         BlockPrologue blockPrologue(prologueParams);
         auto gmBias = MakeGmBiasTensor(params, n);
-        if constexpr (WEIGHT_NZ) {
-            auto gmWeight = MakeGmNzWeightTensor(params, k, n);
-            ProcessAivTiles(gmWeight, gmBias, blockPrologue, scheduler, curBlockIdx, tileNum);
-        } else {
-            auto gmWeight = MakeGmNdWeightTensor(params, k, n);
-            ProcessAivTiles(gmWeight, gmBias, blockPrologue, scheduler, curBlockIdx, tileNum);
-        }
+        auto gmWeight = MakeGmWeightTensor<WEIGHT_NZ>(params, k, n);
+        ProcessAivTiles(params, gmWeight, gmBias, blockPrologue, scheduler, curBlockIdx, tileNum);
     }
 
     __aicore__ inline static auto MakeGmBiasTensor(const Params& params, int64_t n)
@@ -480,25 +500,27 @@ private:
                                     asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(static_cast<int64_t>(1), n));
     }
 
-    __aicore__ inline static auto MakeGmNzWeightTensor(const Params& params, int64_t k, int64_t n)
+    template <bool IsWeightNz>
+    __aicore__ inline static auto MakeGmWeightTensor(const Params& params, int64_t k, int64_t n)
     {
-        return asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::gm>(
-                reinterpret_cast<__gm__ BType*>(params.prologueParams.bGmAddr)),
-            asc::te::make_frame_layout<LayoutB, AscendC::Std::Int<asc::te::c0_element<AType>>>(k, n));
-    }
-
-    __aicore__ inline static auto MakeGmNdWeightTensor(const Params& params, int64_t k, int64_t n)
-    {
-        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(
-                                        reinterpret_cast<__gm__ BType*>(params.prologueParams.bGmAddr)),
-                                    asc::te::frame_layout_format<LayoutB>{}(k, n));
+        if constexpr (IsWeightNz) {
+            auto gmWeight = asc::te::make_tensor(
+                asc::te::make_mem_ptr<asc::te::location::gm>(
+                    reinterpret_cast<__gm__ BType*>(params.prologueParams.bGmAddr)),
+                asc::te::make_frame_layout<LayoutB, AscendC::Std::Int<asc::te::c0_element<AType>>>(k, n));
+            return gmWeight;
+        } else {
+            return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(
+                                            reinterpret_cast<__gm__ BType*>(params.prologueParams.bGmAddr)),
+                                        asc::te::frame_layout_format<LayoutB>{}(k, n));
+        }
     }
 
     template <typename GMWeightTensor, typename GMBiasTensor>
-    __aicore__ inline static void ProcessAivTiles(const GMWeightTensor& gmWeight, const GMBiasTensor& gmBias,
-                                                  BlockPrologue& blockPrologue, const BlockScheduler& scheduler,
-                                                  uint64_t curBlockIdx, uint64_t tileNum)
+    __aicore__ inline static void ProcessAivTiles(const Params& params, GMWeightTensor& gmWeight,
+                                                  const GMBiasTensor& gmBias, BlockPrologue& blockPrologue,
+                                                  const BlockScheduler& scheduler, uint64_t curBlockIdx,
+                                                  uint64_t tileNum)
     {
         for (uint64_t loopIdx = curBlockIdx; loopIdx < tileNum; loopIdx += AscendC::GetBlockNum()) {
             auto blockCoord = scheduler.GetBlockCoord(loopIdx);
@@ -536,7 +558,10 @@ private:
         auto gmC = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ CType*>(params.mmadParams.cGmAddr)),
             MakeLayoutC{}(m, n));
-        BlockMmad blockMmad(params.mmadParams);
+        auto mmadParams = params.mmadParams;
+        mmadParams.disableWeightL2 = params.prologueParams.disableWeightL2;
+        mmadParams.problemM = static_cast<uint64_t>(m);
+        BlockMmad blockMmad(mmadParams);
         for (uint64_t loopIdx = curBlockIdx; loopIdx < tileNum; loopIdx += AscendC::GetBlockNum()) {
             auto blockCoord = scheduler.GetBlockCoord(loopIdx);
             auto blockShape = scheduler.GetBlockShape(blockCoord);

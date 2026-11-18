@@ -95,6 +95,8 @@ public:
         uint16_t readyFlag{6};
         uint16_t freeFlag{8};
         bool seedWeightCredits{true};
+        bool disableWeightL2{false};
+        uint64_t problemM{0};
     };
 
     __aicore__ inline explicit BlockMmad(const Params& params) { Init(params); }
@@ -296,6 +298,13 @@ private:
     };
 
 private:
+    static constexpr uint64_t CACHE_LINE_BYTES = 128UL;
+
+    __aicore__ inline static bool IsScaleCacheLineAligned(uint64_t innerSize)
+    {
+        return innerSize % CACHE_LINE_BYTES == 0UL;
+    }
+
     __aicore__ inline void Init(const Params& params)
     {
         constexpr uint32_t SCALE_K_INDEX = 3;
@@ -314,6 +323,8 @@ private:
         }
         readyFlag_ = params.readyFlag;
         freeFlag_ = params.freeFlag;
+        disableWeightL2_ = params.disableWeightL2;
+        problemM_ = params.problemM;
         kAL1Size_ = kL1Size_;
         InitBufferSlots(l1BaseN);
         if (params.seedWeightCredits) {
@@ -499,6 +510,10 @@ private:
             auto gmBlockScaleB = tensorScaleB.slice(
                 asc::te::make_coord(scaleKOffset, 0),
                 asc::te::make_shape(static_cast<int64_t>(scaleWindowCols), static_cast<int64_t>(nL1Len_)));
+            const bool disableScaleBL2 = disableWeightL2_ && mL1Len_ >= problemM_ &&
+                                         IsScaleCacheLineAligned(scaleWindowCols);
+            gmBlockScaleB.set_l2_cache_hint(disableScaleBL2 ? asc::te::cache_mode::disable :
+                                                              asc::te::cache_mode::normal);
             asc::te::copy(copyScaleGM2L1, tensorScaleBL1, gmBlockScaleB);
         }
     }
@@ -697,6 +712,8 @@ private:
     uint64_t l1BufferNum_{DOUBLE_BUFFER_COUNT};
     uint64_t l1BufferMask_{DOUBLE_BUFFER_COUNT - 1U};
     bool hasBias_{false};
+    bool disableWeightL2_{false};
+    uint64_t problemM_{0};
     L1Storage l1Storage_;
     BufferManager<QUADRUPLE_BUFFER_COUNT, QUADRUPLE_BUFFER_COUNT, DOUBLE_BUFFER_COUNT> bufferManager_;
 };

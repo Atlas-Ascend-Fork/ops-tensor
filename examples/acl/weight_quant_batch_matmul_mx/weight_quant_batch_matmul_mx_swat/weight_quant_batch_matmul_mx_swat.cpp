@@ -47,6 +47,7 @@ struct ExampleConfig {
     int64_t n;
     uint64_t biasElements;
     bool weightNz;
+    bool scaleBNz;
     uint64_t baseM;
     uint64_t baseN;
     uint64_t baseK;
@@ -81,12 +82,28 @@ bool ParseArgs(int argc, const char** argv, ExampleConfig& config)
     config.k = std::atoll(argv[2]);
     config.n = std::atoll(argv[3]);
     config.biasElements = static_cast<uint64_t>(std::atoll(argv[4]));
-    const std::string layout = argv[5];
+    std::string layout = argv[5];
+    config.scaleBNz = false;
+    const auto colon = layout.find(':');
+    if (colon != std::string::npos) {
+        const std::string scaleLayout = layout.substr(colon + 1U);
+        if (scaleLayout == "scale_nz" || scaleLayout == "SCALE_NZ") {
+            config.scaleBNz = true;
+        } else if (scaleLayout != "scale_nd" && scaleLayout != "SCALE_ND") {
+            std::fprintf(stderr, "Unsupported scale layout: %s\n", scaleLayout.c_str());
+            return false;
+        }
+        layout = layout.substr(0U, colon);
+    }
     if (layout != "nd" && layout != "ND" && layout != "nz" && layout != "NZ") {
         std::fprintf(stderr, "Unsupported weight layout: %s\n", argv[5]);
         return false;
     }
     config.weightNz = layout == "nz" || layout == "NZ";
+    if (config.scaleBNz && !config.weightNz) {
+        std::fprintf(stderr, "ScaleB NZ requires Weight NZ layout\n");
+        return false;
+    }
     config.baseM = static_cast<uint64_t>(std::atoll(argv[6]));
     config.baseN = static_cast<uint64_t>(std::atoll(argv[7]));
     config.baseK = static_cast<uint64_t>(std::atoll(argv[8]));
@@ -180,7 +197,7 @@ private:
     size_t size_{0U};
 };
 
-template <bool WeightNz>
+template <bool WeightNz, bool ScaleBNz>
 __global__ __aicore__ void QuantBatchMatmulMxKernel(GM_ADDR aGm, GM_ADDR bGm, GM_ADDR biasGm, GM_ADDR scaleAGm,
                                                     GM_ADDR scaleBGm, GM_ADDR cGm, int64_t m, int64_t k, int64_t n,
                                                     uint64_t baseM, uint64_t baseN, uint64_t baseK,
@@ -200,7 +217,7 @@ __global__ __aicore__ void QuantBatchMatmulMxKernel(GM_ADDR aGm, GM_ADDR bGm, GM
     using LayoutB = AscendC::Std::conditional_t<WeightNz, asc::te::zn_layout_ptn, asc::te::dn_ext_layout_ptn>;
     using LayoutC = asc::te::nd_ext_layout_ptn;
     using LayoutScaleA = asc::te::scalea_nd_layout_ptn;
-    using LayoutScaleB = asc::te::scaleb_dn_layout_ptn;
+    using LayoutScaleB = AscendC::Std::conditional_t<ScaleBNz, asc::te::nn_layout_ptn, asc::te::scaleb_dn_layout_ptn>;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t>;
     using DispatchPolicy = Blaze::Gemm::MatmulWithWeightQuantMx;
     using BlockMmad = Blaze::Gemm::Block::BlockMmad<
@@ -223,13 +240,15 @@ __global__ __aicore__ void QuantBatchMatmulMxKernel(GM_ADDR aGm, GM_ADDR bGm, GM
     kernel(params);
 }
 
-template <bool WeightNz>
+template <bool WeightNz, bool ScaleBNz>
 void RunCase(const ExampleConfig& config, aclrtStream stream)
 {
     const uint64_t weightElements = WeightNz ? AlignUp(static_cast<uint64_t>(config.k), 32U) *
                                                    AlignUp(static_cast<uint64_t>(config.n), 16U) :
                                                static_cast<uint64_t>(config.k * config.n);
     const uint64_t scaleK = AlignUp(static_cast<uint64_t>(config.k), 64U) / 32U;
+    const uint64_t scaleBBytes = ScaleBNz ? AlignUp(static_cast<uint64_t>(config.n), 16U) * scaleK :
+                                            static_cast<uint64_t>(config.n) * scaleK;
     const size_t aSize = static_cast<size_t>(config.m * config.k);
     const size_t bSize = static_cast<size_t>(weightElements / FP4_PACK_FACTOR);
     const size_t biasSize = static_cast<size_t>(config.n) * sizeof(half);
@@ -241,7 +260,7 @@ void RunCase(const ExampleConfig& config, aclrtStream stream)
     DeviceBuffer b(bSize);
     DeviceBuffer bias(biasSize);
     DeviceBuffer scaleA(scaleASize);
-    DeviceBuffer scaleB(scaleBSize);
+    DeviceBuffer scaleB(scaleBBytes);
     DeviceBuffer c(cSize);
     a.CopyFromFile(config.dataDir + "/input_a.bin");
     b.CopyFromFile(config.dataDir + "/input_b.bin");
@@ -250,7 +269,7 @@ void RunCase(const ExampleConfig& config, aclrtStream stream)
     scaleB.CopyFromFile(config.dataDir + "/scale_b.bin");
     c.CopyFromFile(config.dataDir + "/initial_c.bin");
 
-    QuantBatchMatmulMxKernel<WeightNz><<<config.blockNum, 0, stream>>>(
+    QuantBatchMatmulMxKernel<WeightNz, ScaleBNz><<<config.blockNum, 0, stream>>>(
         a.Get(), b.Get(), bias.Get(), scaleA.Get(), scaleB.Get(), c.Get(), config.m, config.k, config.n, config.baseM,
         config.baseN, config.baseK, config.tileShapeKL1, config.tileShapeScaleKL1, config.kBubSize, config.nBubSize,
         config.l1BufferNum, config.biasElements);
@@ -272,9 +291,13 @@ int main(int argc, const char** argv)
     ACL_CHECK(aclrtSetDevice(0));
     ACL_CHECK(aclrtCreateStream(&stream));
     if (config.weightNz) {
-        RunCase<true>(config, stream);
+        if (config.scaleBNz) {
+            RunCase<true, true>(config, stream);
+        } else {
+            RunCase<true, false>(config, stream);
+        }
     } else {
-        RunCase<false>(config, stream);
+        RunCase<false, false>(config, stream);
     }
     ACL_CHECK(aclrtDestroyStream(stream));
     ACL_CHECK(aclrtResetDevice(0));
