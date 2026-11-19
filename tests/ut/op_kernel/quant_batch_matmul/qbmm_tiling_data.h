@@ -101,6 +101,11 @@ struct QBMML0CPingpongTilingData {
     uint32_t dbL0C;
     uint32_t isBias{0U};
     uint32_t weightMustHitL2{1U};
+    uint32_t mL0{0U};
+    uint32_t nL0{0U};
+    uint32_t batchA{0U};
+    uint32_t batchB{0U};
+    uint32_t biasThreeDim{0U};
 };
 
 struct QBMMStreamKTilingData {

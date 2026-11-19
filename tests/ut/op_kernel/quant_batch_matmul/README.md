@@ -26,6 +26,15 @@ GTEST_FILTER='QbmmMxMix.*' bash build.sh --opkernel -u --ops=quant_batch_matmul 
 
 `--cov` 生成本次执行的覆盖率报告。
 
+## MX 显式 L0 子块
+
+`QBMMV3Test.ExplicitMx*` 从 `kernel(params)` 下发非零 `mL0/nL0`，覆盖全程切 N 复用 A/ScaleA、
+MXFP4 切 M 复用 B/ScaleB、切 M 重新搬入和 FP32 AtomicAdd。K=320、baseK=64，最后一个 L1 窗口只含一个计算子块。
+AtomicAdd 的输出初值为 7。另有整块不切分和零 M/N 沿用旧策略的用例，覆盖一次初始化的显式计划和零参数回退。用例使用非恒定矩阵及 E8M0 scale。新增显式计划覆盖双边 batch、A/B 分别广播、共享 bias、逐 batch bias，以及 without-batch bias；输入及 scale 随 batch 变化，golden 逐 batch 计算。
+
+默认 CPU-debug 用例验证内核执行。使用支持 Cube/Fixpipe 写回 GM 的仿真后端时，设置
+`QBMM_MX_UT_VERIFY_OUTPUT=1` 启用逐元素 golden 校验。仅记录指令的后端会保留输出初值。
+
 ## HiF4 冒烟测试（Ascend960）
 
 `arch92/test_qbmm_mx_hif4.cpp` 覆盖 batched 与 without_batch 的 HiF4 scale 寻址，

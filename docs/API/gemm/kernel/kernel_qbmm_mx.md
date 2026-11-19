@@ -143,6 +143,8 @@ struct Params {
 };
 ```
 
+以上是常规 MX Block 的地址参数。L0C PingPong Block 在这些地址字段后追加初始化和子块计划字段，见[显式 L0 子块计划](#显式-l0-子块计划)。
+
 ## 特殊成员方法
 
 ### Init函数
@@ -263,6 +265,42 @@ Params params = {
 QBMMKernel qbmm;
 qbmm(params);  // 或 qbmm.Run(params);
 ```
+
+### 显式 L0 子块计划
+
+带 batch 的 MXFP8/MXFP4 调用方可以选用 `MatmulWithScaleMxL0CPingpong`，将 Host 选择的计算子块写入 `mmadParams`。以下示例沿用上节的数据类型和布局。
+
+```cpp
+using PingpongPolicy = Blaze::Gemm::MatmulWithScaleMxL0CPingpong<Blaze::Gemm::NONE_FULL_LOAD_MODE, false>;
+using PingpongBlock = Blaze::Gemm::Block::BlockMmad<
+    PingpongPolicy, AType, LayoutA, BType, LayoutB, CType, LayoutC, BiasType, LayoutBias>;
+using PingpongScheduler = Blaze::Gemm::Block::BlockSchedulerQuantBatchMatmulV3<
+    ProblemShape, Blaze::Gemm::NONE_FULL_LOAD_MODE, LayoutA, LayoutB, AType>;
+using PingpongKernel = Blaze::Gemm::Kernel::GemmUniversal<
+    ProblemShape, PingpongBlock, Blaze::Epilogue::Block::BlockEpilogueEmpty, PingpongScheduler>;
+
+// params 的类型为 PingpongKernel::Params。按上节填好问题规模、GM 地址、L1、调度和 batch tiling 参数。
+auto& plan = params.mmadParams;
+plan.problemShape = params.problemShape;
+plan.l1TileShape = {params.qbmmParams.baseM, params.qbmmParams.baseN,
+                    static_cast<int64_t>(params.l1Params.kL1), 0};
+plan.mL0 = mL0;  // Host 选定的计算子块 M
+plan.nL0 = nL0;  // Host 选定的计算子块 N
+plan.kL0 = params.qbmmParams.baseK;
+plan.l1Params = params.l1Params;
+plan.isBias = params.qbmmParams.isBias == 1;
+plan.dbL0C = params.qbmmParams.dbL0C > 1;
+
+PingpongKernel kernel;
+kernel(params);
+```
+
+`l1TileShape` 表示 GM 到 L1 的搬运块，其中 `baseM/baseN` 同时用于调度，K 取 `kL1`。
+`mL0/nL0/kL0` 表示 MMAD 的计算子块，其中计算 K 取 Host tiling 的 `baseK`。Batch 维度、广播和 Bias 的 batch 配置继续通过 `qbmmParams` 传递。
+
+当策略的 `IS_L0C_PINGPONG` 为 `true` 且 `mmadParams.kL0` 非零时，Kernel 调用 `BlockMmad::Init(mmadParams)`。传入非零 `mL0/nL0` 时，所有 K-L1 段按同一 M/N 计划计算。旧调用保留默认零的 `kL0`，沿用原多参数 `Init`。普通策略及未定义该标记的旧策略也沿用原入口。
+
+容量、对齐和旧接口说明见 [L0C PingPong BlockMmad](../block/block_mmad_qbmm_mx_l0c_pingpong.md)。
 
 ## 数据流
 

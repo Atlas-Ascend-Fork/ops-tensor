@@ -16,6 +16,7 @@
 #pragma once
 
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
+#include "blaze/gemm/policy/dispatch_policy.h"
 #include "kernel_basic_intf.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
@@ -38,6 +39,7 @@ public:
     __aicore__ inline ~GemmUniversal() {}
 
     using BlockMmadParams = typename BlockMmad::Params;
+    using DispatchPolicy = typename BlockMmad::DispatchPolicy;
     using L1Params = typename BlockMmad::L1Params;
     using AType = typename BlockMmad::AType;
     using BType = typename BlockMmad::BType;
@@ -157,7 +159,15 @@ __aicore__ inline void GemmUniversal<QBMM_MX_WITHOUT_BATCH_KERNEL_TEM_PARAMS>::R
     BlockScheduler bs(problemShape, params.schParams);
 
     const BlockShape l0BlockShape{qbmmParams.baseM, qbmmParams.baseN, qbmmParams.baseK, 0};
-    mmadOp_.Init(problemShape, l0BlockShape, params.l1Params, isBias, qbmmParams.dbL0C > 1);
+    if constexpr (IsL0CPingpongPolicy<DispatchPolicy>::value) {
+        if (params.mmadParams.kL0 != 0) {
+            mmadOp_.Init(params.mmadParams);
+        } else {
+            mmadOp_.Init(problemShape, l0BlockShape, params.l1Params, isBias, qbmmParams.dbL0C > 1);
+        }
+    } else {
+        mmadOp_.Init(problemShape, l0BlockShape, params.l1Params, isBias, qbmmParams.dbL0C > 1);
+    }
 
     Process(params, bs);
     if constexpr (IS_ATOMIC_ADD) {

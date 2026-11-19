@@ -16,6 +16,7 @@
 #include <fstream>
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <type_traits>
@@ -1466,6 +1467,131 @@ TEST_F(QBMMV3Test, Test_MX_FP8_WithoutBatchQuadBuffer)
     RunMxWithoutBatchSmoke<MxType, MxType, float, float>(cfg);
 }
 
+// Encode the exactly representable values 1 and 2 in E4M3 or packed E2M1.
+template <typename T>
+void WriteMxValue(GM_ADDR data, size_t index, bool two)
+{
+    if constexpr (Blaze::Gemm::IsFp4<T>()) {
+        const uint8_t nibble = two ? 0x4U : 0x2U;
+        if ((index & 1U) == 0) {
+            data[index / 2] = nibble;
+        } else {
+            data[index / 2] |= nibble << 4U;
+        }
+    } else {
+        data[index] = two ? 0x40U : 0x38U;
+    }
+}
+
+template <typename T, bool AtomicAdd = false, bool Batched = false>
+void CheckExplicitMxTile(uint32_t mL0, uint32_t nL0, uint32_t kL1, uint32_t batchA = 1, uint32_t batchB = 1,
+                         bool hasBias = false, bool biasThreeDim = false)
+{
+    constexpr uint32_t M = 128, N = 128, K = 320, BASE_K = 64;
+    constexpr uint32_t scaleK = 2 * (K / 64);
+    const uint32_t batch = std::max(batchA, batchB);
+    const uint32_t biasBatch = biasThreeDim ? batch : 1;
+    GmBuffer a(GetMxInputSize<T>(batchA * M * K)), b(GetMxInputSize<T>(batchB * K * N));
+    GmBuffer scaleA(batchA * M * scaleK), scaleB(batchB * scaleK * N), c(batch * M * N * sizeof(float));
+    GmBuffer bias(biasBatch * N * sizeof(float));
+    GmBuffer tiling(sizeof(QBMMUT::QBMML0CPingpongTilingData));
+    ASSERT_NE(a.Get(), nullptr);
+    ASSERT_NE(b.Get(), nullptr);
+    ASSERT_NE(scaleA.Get(), nullptr);
+    ASSERT_NE(scaleB.Get(), nullptr);
+    ASSERT_NE(c.Get(), nullptr);
+    ASSERT_NE(bias.Get(), nullptr);
+    ASSERT_NE(tiling.Get(), nullptr);
+    auto aTwo = [](uint32_t batchIndex, uint32_t m, uint32_t k) { return (batchIndex + m + m / 64 + k / 64) % 3 == 0; };
+    auto bTwo = [](uint32_t batchIndex, uint32_t k, uint32_t n) { return (batchIndex + n + n / 64 + k / 32) % 3 == 1; };
+    for (uint32_t bi = 0; bi < batchA; ++bi) {
+        for (uint32_t m = 0; m < M; ++m) {
+            for (uint32_t k = 0; k < K; ++k) {
+                WriteMxValue<T>(a.Get(), (bi * M + m) * K + k, aTwo(bi, m, k));
+            }
+            std::fill_n(scaleA.Get() + (bi * M + m) * scaleK, scaleK, 127U + (bi + m / 64) % 2);
+        }
+    }
+    for (uint32_t bi = 0; bi < batchB; ++bi) {
+        for (uint32_t k = 0; k < K; ++k) {
+            for (uint32_t n = 0; n < N; ++n) {
+                WriteMxValue<T>(b.Get(), (bi * K + k) * N + n, bTwo(bi, k, n));
+            }
+        }
+        // ND scaleB: [batch, K/64, N, 2].
+        for (uint32_t group = 0; group < K / 64; ++group) {
+            for (uint32_t n = 0; n < N; ++n) {
+                std::fill_n(scaleB.Get() + ((bi * (K / 64) + group) * N + n) * 2, 2, 127U + (bi + n / 64) % 2);
+            }
+        }
+    }
+    for (uint32_t bi = 0; bi < biasBatch; ++bi) {
+        for (uint32_t n = 0; n < N; ++n) {
+            const float value = 3.0F + bi * 2 + n % 5;
+            std::memcpy(bias.Get() + (bi * N + n) * sizeof(float), &value, sizeof(value));
+        }
+    }
+    constexpr float initial = 7.0F;
+    FillGmValues<float>(c.Get(), batch * M * N, initial);
+    const QBMMUT::QBMML0CPingpongTilingData config{
+        M,      N,   K,   batch,  M,      N,
+        BASE_K, kL1, kL1, 2,      2,      static_cast<uint32_t>(hasBias),
+        1,      mL0, nL0, batchA, batchB, static_cast<uint32_t>(biasThreeDim)};
+    std::memcpy(tiling.Get(), &config, sizeof(config));
+    AscendC::SetKernelMode(KernelMode::MIX_MODE);
+    if constexpr (Batched) {
+        auto entry = qbmm_mx_l0c_pingpong_kernel_entry<T, T, float, float>;
+        ASSERT_TRUE(KERNEL_RUN_KF(entry, 1, a.Get(), b.Get(), scaleA.Get(), scaleB.Get(),
+                                  hasBias ? bias.Get() : nullptr, c.Get(), tiling.Get()));
+    } else {
+        auto entry = qbmm_mx_l0c_pingpong_without_batch_kernel_entry<T, T, float, float, AtomicAdd>;
+        ASSERT_TRUE(KERNEL_RUN_KF(entry, 1, a.Get(), b.Get(), scaleA.Get(), scaleB.Get(),
+                                  hasBias ? bias.Get() : nullptr, c.Get(), tiling.Get()));
+    }
+    // Trace-only backends do not write Cube/Fixpipe results to GM.
+    const char* verifyOutput = std::getenv("QBMM_MX_UT_VERIFY_OUTPUT");
+    if (verifyOutput == nullptr || std::string(verifyOutput) != "1") {
+        return;
+    }
+    for (uint32_t bi = 0; bi < batch; ++bi) {
+        const uint32_t ai = batchA == 1 ? 0 : bi;
+        const uint32_t bj = batchB == 1 ? 0 : bi;
+        for (uint32_t m = 0; m < M; ++m) {
+            for (uint32_t n = 0; n < N; ++n) {
+                uint32_t dot = 0;
+                for (uint32_t k = 0; k < K; ++k) {
+                    dot += (1U + aTwo(ai, m, k)) * (1U + bTwo(bj, k, n));
+                }
+                const float biasValue = hasBias ? 3.0F + (biasThreeDim ? bi * 2 : 0) + n % 5 : 0.0F;
+                const float expected = dot * (1U + (ai + m / 64) % 2) * (1U + (bj + n / 64) % 2) + biasValue +
+                                       (AtomicAdd ? initial : 0.0F);
+                float actual = 0;
+                std::memcpy(&actual, c.Get() + ((bi * M + m) * N + n) * sizeof(float), sizeof(actual));
+                ASSERT_EQ(actual, expected) << "batch=" << bi << ", m=" << m << ", n=" << n;
+            }
+        }
+    }
+}
+
+TEST_F(QBMMV3Test, ExplicitMxSplitNReuseAndOneSubtileTail) { CheckExplicitMxTile<fp8_e4m3fn_t>(128, 64, 128); }
+TEST_F(QBMMV3Test, ExplicitMxSplitMFp4ReuseAndOneSubtileTail) { CheckExplicitMxTile<fp4x2_e2m1_t>(64, 128, 128); }
+TEST_F(QBMMV3Test, ExplicitMxSplitMNoReuse) { CheckExplicitMxTile<fp8_e4m3fn_t>(64, 128, 256); }
+TEST_F(QBMMV3Test, ExplicitMxSplitNAtomicAdd) { CheckExplicitMxTile<fp8_e4m3fn_t, true>(128, 64, 128); }
+TEST_F(QBMMV3Test, ExplicitMxWholeTile) { CheckExplicitMxTile<fp8_e4m3fn_t>(128, 128, 128); }
+TEST_F(QBMMV3Test, ExplicitMxZeroTileUsesLegacyInit) { CheckExplicitMxTile<fp8_e4m3fn_t>(0, 0, 128); }
+TEST_F(QBMMV3Test, ExplicitMxSplitNBothBatch) { CheckExplicitMxTile<fp8_e4m3fn_t, false, true>(128, 64, 128, 2, 2); }
+TEST_F(QBMMV3Test, ExplicitMxSplitNABroadcast) { CheckExplicitMxTile<fp8_e4m3fn_t, false, true>(128, 64, 128, 1, 2); }
+TEST_F(QBMMV3Test, ExplicitMxSplitMBBroadcast) { CheckExplicitMxTile<fp8_e4m3fn_t, false, true>(64, 128, 128, 2, 1); }
+TEST_F(QBMMV3Test, ExplicitMxSplitNSharedBias)
+{
+    CheckExplicitMxTile<fp8_e4m3fn_t, false, true>(128, 64, 128, 2, 2, true);
+}
+TEST_F(QBMMV3Test, ExplicitMxSplitMBatchBias)
+{
+    CheckExplicitMxTile<fp8_e4m3fn_t, false, true>(64, 128, 128, 2, 2, true, true);
+}
+TEST_F(QBMMV3Test, ExplicitMxWithoutBatchBias) { CheckExplicitMxTile<fp8_e4m3fn_t>(128, 64, 128, 1, 1, true); }
+
 TEST_F(QBMMV3Test, Test_MX_FP8_L0CPingpong)
 {
     using MxType = fp8_e4m3fn_t;
@@ -1986,6 +2112,30 @@ void CheckMixTensorApiAssembly()
     params.qbmmParams.bMustHitL2 = 0U;
     EXPECT_GT(sizeof(Kernel), 0U);
     EXPECT_EQ(params.qbmmParams.bMustHitL2, 0U);
+}
+
+// A third-party Block may keep the original Policy and Init contract.
+struct LegacyMxPolicy {
+    using ScheduleType = Blaze::Gemm::KernelMmadWithScaleMxWithoutBatch;
+    static constexpr bool IS_ATOMIC_ADD = false;
+};
+using NativeMxPolicy = Blaze::Gemm::MatmulWithScaleMx<Blaze::Gemm::NONE_FULL_LOAD_MODE, false,
+                                                      LegacyMxPolicy::ScheduleType>;
+struct LegacyMxBlock
+    : Blaze::Gemm::Block::BlockMmad<NativeMxPolicy, fp8_e4m3fn_t, ND, fp8_e4m3fn_t, ND, float, ND, float, ND> {
+    using DispatchPolicy = LegacyMxPolicy;
+};
+
+using LegacyMxScheduler = Blaze::Gemm::Block::BlockSchedulerQuantBatchMatmulV3<
+    ProblemShape, Blaze::Gemm::NONE_FULL_LOAD_MODE, ND, ND, fp8_e4m3fn_t>;
+using LegacyMxKernel = Blaze::Gemm::Kernel::GemmUniversal<
+    ProblemShape, LegacyMxBlock, Blaze::Epilogue::Block::BlockEpilogueEmpty, LegacyMxScheduler>;
+
+// Compile the call body: checking its signature alone would miss an invalid Init dispatch.
+__aicore__ inline void CompileLegacyMxCall(const LegacyMxKernel::Params& params)
+{
+    LegacyMxKernel kernel;
+    kernel(params);
 }
 
 template <class Schedule, class AType, class BType, class OutType, class LayoutA, class LayoutB, uint64_t FullLoadMode>

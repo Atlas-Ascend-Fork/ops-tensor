@@ -21,6 +21,7 @@
 #pragma once
 
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
+#include "blaze/gemm/policy/dispatch_policy.h"
 #include "kernel_basic_intf.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
@@ -193,7 +194,15 @@ __aicore__ inline void GemmUniversal<QBMM_MX_KERNEL_TEM_PARAMS>::Run(const Param
     BlockScheduler bs(problemShape, params.schParams);
 
     const BlockShape l0BlockShape{qbmmParams.baseM, qbmmParams.baseN, qbmmParams.baseK, 0};
-    mmadOp_.Init(problemShape, l0BlockShape, params.l1Params, isBias_, qbmmParams.dbL0C > 1);
+    if constexpr (IsL0CPingpongPolicy<typename BlockMmad::DispatchPolicy>::value) {
+        if (params.mmadParams.kL0 != 0) {
+            mmadOp_.Init(params.mmadParams);
+        } else {
+            mmadOp_.Init(problemShape, l0BlockShape, params.l1Params, isBias_, qbmmParams.dbL0C > 1);
+        }
+    } else {
+        mmadOp_.Init(problemShape, l0BlockShape, params.l1Params, isBias_, qbmmParams.dbL0C > 1);
+    }
 
     if (asc::te::get<MNK_B>(problemShape) == 1) {
         ProcessSingleBatch(params, bs, 0, true);

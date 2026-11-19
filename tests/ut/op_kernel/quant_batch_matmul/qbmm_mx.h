@@ -131,6 +131,23 @@ __aicore__ inline void QBMMStreamKWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pe
     kernel(params);
 }
 
+template <typename KernelParams>
+__aicore__ inline void FillExplicitMxL0Plan(KernelParams& params, const QBMML0CPingpongTilingData& tilingData)
+{
+    if (tilingData.mL0 == 0 || tilingData.nL0 == 0) {
+        return;
+    }
+    auto& blockParams = params.mmadParams;
+    blockParams.mL0 = tilingData.mL0;
+    blockParams.nL0 = tilingData.nL0;
+    blockParams.problemShape = params.problemShape;
+    blockParams.l1TileShape = {tilingData.baseM, tilingData.baseN, tilingData.kL1, 0};
+    blockParams.kL0 = tilingData.baseK;
+    blockParams.l1Params = params.l1Params;
+    blockParams.isBias = tilingData.isBias == 1;
+    blockParams.dbL0C = tilingData.dbL0C > 1;
+}
+
 template <typename AType, typename BType, typename CType, typename BiasType,
           uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE>
 __aicore__ inline void QBMML0CPingpongWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM, GM_ADDR scaleGM,
@@ -190,6 +207,10 @@ __aicore__ inline void QBMML0CPingpongWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADD
                          tilingData.dbL0C,
                          tilingData.weightMustHitL2};
 
+    params.qbmmParams.batchA4 = tilingData.batchA == 0 ? tilingData.b : tilingData.batchA;
+    params.qbmmParams.batchB4 = tilingData.batchB == 0 ? tilingData.b : tilingData.batchB;
+    params.qbmmParams.biasThreeDim = tilingData.biasThreeDim;
+    FillExplicitMxL0Plan(params, tilingData);
     QBMMKernel kernel;
     kernel(params);
 }
@@ -241,7 +262,7 @@ __aicore__ inline void QBMMMxWithoutBatchWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_
 }
 
 template <typename AType, typename BType, typename CType, typename BiasType,
-          uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE>
+          uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE, bool AtomicAdd = false>
 __aicore__ inline void QBMML0CPingpongWithoutBatchWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM,
                                                           GM_ADDR scaleGM, GM_ADDR biasGM, GM_ADDR yGM,
                                                           const QBMML0CPingpongTilingData& tilingData)
@@ -251,7 +272,7 @@ __aicore__ inline void QBMML0CPingpongWithoutBatchWrapper(GM_ADDR x1GM, GM_ADDR 
     using LayoutC = asc::te::nd_ext_layout_ptn;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
 
-    using DispatchPolicy = Blaze::Gemm::MatmulWithScaleMxL0CPingpong<FullLoadMode, false,
+    using DispatchPolicy = Blaze::Gemm::MatmulWithScaleMxL0CPingpong<FullLoadMode, AtomicAdd,
                                                                      Blaze::Gemm::KernelMmadWithScaleMxWithoutBatch>;
     using BlockScheduler = Blaze::Gemm::Block::BlockSchedulerQuantBatchMatmulV3<ProblemShape, FullLoadMode, LayoutA,
                                                                                 LayoutB, AType>;
@@ -268,6 +289,7 @@ __aicore__ inline void QBMML0CPingpongWithoutBatchWrapper(GM_ADDR x1GM, GM_ADDR 
                   {tilingData.baseM, tilingData.baseN, tilingData.baseK, tilingData.isBias, tilingData.dbL0C,
                    tilingData.weightMustHitL2}};
 
+    FillExplicitMxL0Plan(params, tilingData);
     QBMMKernel kernel;
     kernel(params);
 }
@@ -313,14 +335,15 @@ __global__ __aicore__ void qbmm_mx_l0c_pingpong_a_full_load_kernel_entry(GM_ADDR
         x1GM, x2GM, pertokenScaleGM, scaleGM, biasGM, yGM, *tilingData);
 }
 
-template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS>
+template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS, bool AtomicAdd = false>
 __global__ __aicore__ void qbmm_mx_l0c_pingpong_without_batch_kernel_entry(GM_ADDR x1GM, GM_ADDR x2GM,
                                                                            GM_ADDR pertokenScaleGM, GM_ADDR scaleGM,
                                                                            GM_ADDR biasGM, GM_ADDR yGM,
                                                                            GM_ADDR tilingGM)
 {
     const auto* tilingData = reinterpret_cast<const QBMMUT::QBMML0CPingpongTilingData*>(tilingGM);
-    QBMMUT::QBMML0CPingpongWithoutBatchWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS>(
+    QBMMUT::QBMML0CPingpongWithoutBatchWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS,
+                                               Blaze::Gemm::NONE_FULL_LOAD_MODE, AtomicAdd>(
         x1GM, x2GM, pertokenScaleGM, scaleGM, biasGM, yGM, *tilingData);
 }
 

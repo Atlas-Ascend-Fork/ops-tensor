@@ -124,6 +124,16 @@ struct MatmulWithScaleMx {
     static constexpr bool CONCAT_N = ConcatN_;
 };
 
+template <class Policy, class = void>
+struct IsL0CPingpongPolicy {
+    static constexpr bool value = false;
+};
+
+template <class Policy>
+struct IsL0CPingpongPolicy<Policy, decltype(void(Policy::IS_L0C_PINGPONG))> {
+    static constexpr bool value = Policy::IS_L0C_PINGPONG;
+};
+
 enum class WeightPrologueMxKSchedule : std::uint8_t { FIXED, DYNAMIC };
 enum class WeightPrologueMxScaleBSource : std::uint8_t { AIC, AIV };
 enum class WeightPrologueMxOutput : std::uint8_t { GM, DEFERRED_UB };
@@ -202,6 +212,7 @@ struct MatmulWithScaleMxL0CPingpong {
     using ScheduleType = ScheduleType_;
     static constexpr uint64_t FULL_LOAD_MODE = FullLoadMode_;
     static constexpr bool IS_ATOMIC_ADD = AtomicAdd_;
+    static constexpr bool IS_L0C_PINGPONG = true;
 };
 
 /**

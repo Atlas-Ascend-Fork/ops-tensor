@@ -191,3 +191,34 @@ kernel(params);
 
 - Batch 固定为 1 且无需广播的 MX 量化推理
 - 希望减少多 Batch 分支和地址偏移开销的 QBMM MX 场景
+
+
+## 通过原 Params 传入 Host L0 子块计划
+
+使用 L0C PingPong BlockMmad 时，调用方根据 tiling 填好 `mmadParams` 的计算子块和初始化字段，然后调用普通入口：
+
+```cpp
+params.mmadParams.mL0 = mL0;
+params.mmadParams.nL0 = nL0;
+params.qbmmParams.baseK = baseK; // 使用已有的计算 K 字段
+params.mmadParams.problemShape = params.problemShape;
+params.mmadParams.l1TileShape = {params.qbmmParams.baseM, params.qbmmParams.baseN,
+                                 static_cast<int64_t>(params.l1Params.kL1), 0};
+params.mmadParams.kL0 = params.qbmmParams.baseK;
+params.mmadParams.l1Params = params.l1Params;
+params.mmadParams.isBias = params.qbmmParams.isBias == 1;
+params.mmadParams.dbL0C = params.qbmmParams.dbL0C > 1;
+MatmulKernel kernel;
+kernel(params);
+```
+
+`l1TileShape` 表示 L1 搬运块，`mL0/nL0/kL0` 表示 MMAD 计算子块。NN 使用原 tiling 的 `kBL1` 填写搬运 K，使用 `baseK` 填写 `kL0`。
+`qbmmParams.baseM/baseN` 保留原搬运和调度块含义，不能替换成切分后的 M/N。
+
+编译期检查 Block Policy 的可选标记 `IS_L0C_PINGPONG`。省略或设为 `false` 时调用原多参数
+`Init`。标记为 `true` 且 `mmadParams.kL0` 非零时，Tensor 直接调用 `blockMmad.Init(mmadParams)`。旧调用保留默认零的 `kL0`，继续走原多参数 `Init`。仓内 Pingpong Policy 启用该标记，包括 AtomicAdd 特化。无 batch 原生 MXFP8/MXFP4 的计划约束见下方 Block 说明。
+
+L0C PingPong 特化的 `BlockMmad::Params` 追加了默认初始化字段，外层 `Params` 因嵌入该类型也会变大。
+普通旧聚合初始化和 `kernel(params)` 写法仍受支持；不承诺固定布局、结构化绑定或新旧二进制混用兼容。
+`QBMMTiling`、`L1Params` 自身布局保持不变。约束与 Block 入口详见
+[BlockMmad 参数说明](../block/block_mmad_qbmm_mx_l0c_pingpong.md)。
