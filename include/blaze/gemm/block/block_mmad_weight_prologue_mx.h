@@ -19,6 +19,7 @@
 #include "blaze/gemm/block/block_mmad_decl.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/tile/compute.h"
+#include "blaze/gemm/tile/arch35/shift_w4_to_w8.h"
 #include "blaze/gemm/tile/tile_trait.h"
 #include "blaze/gemm/utils/buffer_manager.h"
 #include "blaze/gemm/utils/common_utils.h"
@@ -31,12 +32,23 @@ namespace Gemm {
 
 namespace Block {
 
-#if defined(__NPU_ARCH__)
+#if defined(__NPU_ARCH__) || defined(ASCENDC_CPU_DEBUG)
+using AscendC::CrossCoreSetFlag;
+using AscendC::CrossCoreWaitFlag;
+using AscendC::HardEvent;
+using AscendC::SetFlag;
+using AscendC::TEventID;
+using AscendC::WaitFlag;
+
+static constexpr uint64_t WQGMM_MX_GROUP_SIZE = MXFP_DIVISOR_SIZE / MXFP_MULTI_BASE_SIZE;
+static constexpr uint64_t WQGMM_MX_SYNC_MODE = Sync::SYNC_MODE_INTRA;
+static constexpr uint64_t WQGMM_MX_FLAG_ID_MAX = Sync::MIX_FLAG_ID_MAX;
+
 template <class ScheduleType_, WeightPrologueMxKSchedule KSchedule_, WeightPrologueMxScaleBSource ScaleBSource_,
-          class ATypeTuple_, class LayoutATuple_, class BTypeTuple_, class LayoutBTuple_, class CType_, class LayoutC_,
-          class BiasType_, class LayoutBias_>
-class BlockMmad<WeightQuantMxPolicy<ScheduleType_, KSchedule_, ScaleBSource_>, ATypeTuple_, LayoutATuple_, BTypeTuple_,
-                LayoutBTuple_, CType_, LayoutC_, BiasType_, LayoutBias_> {
+          WeightPrologueMxOutput Output_, class ATypeTuple_, class LayoutATuple_, class BTypeTuple_,
+          class LayoutBTuple_, class CType_, class LayoutC_, class BiasType_, class LayoutBias_>
+class BlockMmad<WeightQuantMxPolicy<ScheduleType_, KSchedule_, ScaleBSource_, Output_>, ATypeTuple_, LayoutATuple_,
+                BTypeTuple_, LayoutBTuple_, CType_, LayoutC_, BiasType_, LayoutBias_> {
 public:
     static_assert(AscendC::Std::tuple_size_v<ATypeTuple_> == 2, "A type tuple must contain A and ScaleA");
     static_assert(AscendC::Std::tuple_size_v<LayoutATuple_> == 2, "A layout tuple must contain A and ScaleA");
@@ -56,7 +68,8 @@ public:
     using LayoutScaleB = typename AscendC::Std::tuple_element<1, LayoutBTuple_>::type;
     using LayoutC = LayoutC_;
     using LayoutBias = LayoutBias_;
-    using DispatchPolicy = WeightQuantMxPolicy<ScheduleType_, KSchedule_, ScaleBSource_>;
+    using DispatchPolicy = WeightQuantMxPolicy<ScheduleType_, KSchedule_, ScaleBSource_, Output_>;
+    static constexpr bool DEFERRED_UB = Output_ == WeightPrologueMxOutput::DEFERRED_UB;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using L1TileShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using L0TileShape = asc::te::shape<int64_t, int64_t, int64_t>;
@@ -68,11 +81,12 @@ public:
                       AscendC::Std::is_same_v<ScaleBType, AscendC::fp8_e8m0_t>,
                   "Weight Quant MX expects E8M0 scales");
 
-    // Accept the paired QBMM, GMM and finalize-routing schedules only.
+    // Accept only the paired kernel/prologue scheduling and output policies.
     static_assert(AscendC::Std::is_same_v<DispatchPolicy, MatmulWithWeightQuantMx> ||
                       AscendC::Std::is_same_v<DispatchPolicy, GroupedMatmulWithWeightQuantMx> ||
+                      AscendC::Std::is_same_v<DispatchPolicy, GroupedMatmulSwigluWithWeightQuantMx> ||
                       AscendC::Std::is_same_v<DispatchPolicy, GroupedMatmulFinalizeRoutingWithWeightQuantMx>,
-                  "MX weight prologue requires a supported QBMM, GMM or finalize-routing policy");
+                  "MX weight prologue requires a paired QBMM, GMM or deferred-UB scheduling policy");
 
     struct Params {
         GM_ADDR aGmAddr{nullptr};
@@ -101,7 +115,19 @@ public:
 
     __aicore__ inline explicit BlockMmad(const Params& params) { Init(params); }
 
-    __aicore__ inline ~BlockMmad() { AscendC::SetMMLayoutTransform(false); }
+    __aicore__ inline ~BlockMmad()
+    {
+        if constexpr (DEFERRED_UB) {
+            for (uint64_t i = 0; i < DOUBLE_BUFFER_COUNT; i++) {
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID_M_TO_MTE1 + i);
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_IDS_MX_SCALE_MTE1_TO_MTE2 + i);
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_IDS_MTE1_TO_MTE2 + i);
+            }
+
+        } else {
+            AscendC::SetMMLayoutTransform(false);
+        }
+    }
 
     template <typename TensorA_, typename TensorScaleA_, typename TensorScaleB_, typename TensorC_>
     __aicore__ inline void operator()(const TensorA_& tensorA, const TensorScaleA_& tensorScaleA,
@@ -467,6 +493,8 @@ private:
         return Min(scaleWindowCols, totalScaleCols - scaleKOffset);
     }
 
+// Padding primitives below are device-only; host UT only parses the surrounding metadata.
+#if defined(__NPU_ARCH__)
     template <typename TensorA, typename TensorAL1>
     __aicore__ inline void CopyAGmToL1(const TensorA& tensorA, const TensorAL1& tensorAL1, int64_t kL1Offset,
                                        int64_t kL1Len)
@@ -494,6 +522,7 @@ private:
             asc::te::make_shape(static_cast<int64_t>(kMmadLen - kPhysicalLen), static_cast<int64_t>(Align16(nL1Len_))));
         Blaze::Gemm::Tile::PadMxKL1Base::PadZero(tailTensor, 1U, nL1Len_, 0U);
     }
+#endif
 
     template <typename TensorScaleA, typename TensorScaleB, typename TensorScaleAL1, typename TensorScaleBL1>
     __aicore__ inline void CopyMxScaleGmToL1(const TensorScaleA& tensorScaleA, const TensorScaleB& tensorScaleB,
@@ -578,6 +607,76 @@ private:
         }
     }
 
+    template <typename TensorL0C, typename TensorAL1, typename TensorBL1, typename TensorScaleAL1,
+              typename TensorScaleBL1, typename TensorBiasL1>
+    __aicore__ inline void IterateDeferredMatmul(uint64_t kLoopIdx, const TensorL0C& tensorL0C,
+                                                 const TensorAL1& tensorAL1, const TensorBL1& tensorBL1,
+                                                 const TensorScaleAL1& tensorScaleAL1,
+                                                 const TensorScaleBL1& tensorScaleBL1, const TensorBiasL1& tensorBiasL1,
+                                                 uint64_t kL1Len, uint64_t kOffsetInAWindow,
+                                                 uint64_t kOffsetInScaleWindow, const BufferSlot& l1DataSlot,
+                                                 const BufferSlot& scaleASlot, const BufferSlot& scaleBSlot,
+                                                 const BufferSlot& weightSlot, const BufferSlot& l0cSlot)
+    {
+        const uint64_t kL0Iter = CeilDiv(kL1Len, kL0Size_);
+        for (uint64_t kL0Idx = 0; kL0Idx < kL0Iter; ++kL0Idx) {
+            const uint64_t kL0Offset = kL0Idx * kL0Size_;
+            const uint64_t realL0K = Min(kL1Len - kL0Offset, kL0Size_);
+            const uint64_t operandK = DEFERRED_UB ? realL0K : Align64(realL0K);
+            const auto l0Slot = GetOperandSlot();
+            const BufferSlot btSlot{0UL, BT_BUFFER_ID};
+            auto tensorAL0 = Tile::MakeMxL0Operand<AType, false>(l0Slot.Addr(), mL1Len_, operandK);
+            auto tensorBL0 = Tile::MakeMxL0Operand<ConvertedBType, true>(l0Slot.Addr(), operandK, nL1Len_);
+            auto tensorBt = Tile::MakeMxBiasTable(btSlot.Addr(), nL1Len_);
+            const bool needBias = hasBias_ && kLoopIdx == 0U && kL0Idx == 0U;
+            LoadL0Operands(tensorAL0, tensorBL0, tensorAL1, tensorBL1, tensorScaleAL1, tensorScaleBL1, tensorBiasL1,
+                           tensorBt, kOffsetInAWindow + kL0Offset, kL0Offset, kOffsetInScaleWindow + kL0Offset, realL0K,
+                           operandK, needBias, l1DataSlot, scaleASlot, scaleBSlot, weightSlot, l0Slot, btSlot);
+            auto params = DeferredMakeMmadParams(kLoopIdx, kL0Idx, kL0Iter, realL0K, needBias);
+            DeferredComputeMmad(params, tensorL0C, tensorAL0, tensorBL0, tensorBt, needBias, l0Slot, l0cSlot, btSlot);
+            l0BufIdx_ ^= 1U;
+        }
+    }
+
+    __aicore__ inline BufferSlot GetOperandSlot()
+    {
+        const uint64_t index = l0BufIdx_ & 1U;
+        return {index * L0_BUF_OFFSET, static_cast<uint8_t>(L0_BUFFER_ID_BASE + index)};
+    }
+
+    template <typename AL0, typename BL0, typename AL1, typename BL1, typename SA, typename SB, typename Bias,
+              typename BT>
+    __aicore__ inline void LoadL0Operands(const AL0& a0, const BL0& b0, const AL1& a1, const BL1& b1, const SA& sa,
+                                          const SB& sb, const Bias& bias, const BT& bt, uint64_t aK, uint64_t bK,
+                                          uint64_t scaleK, uint64_t realK, uint64_t operandK, bool needBias,
+                                          const BufferSlot& aSlot, const BufferSlot& saSlot, const BufferSlot& sbSlot,
+                                          const BufferSlot& bSlot, const BufferSlot& l0Slot, const BufferSlot& btSlot)
+    {
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID_M_TO_MTE1 + l0BufIdx_);
+        CopyL0Operand<false>(a0, a1, aK, operandK);
+        const uint64_t cols = CeilDiv(realK, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
+        const uint64_t offset = scaleK / MXFP_DIVISOR_SIZE * MXFP_MULTI_BASE_SIZE;
+        Tile::CopyMxScaleToL0<ScaleAType, false, uint64_t>(sa, l0Slot.Addr(), mL1Len_, cols, offset);
+        CopyL0Operand<true>(b0, b1, bK, operandK);
+        Tile::CopyMxScaleToL0<ScaleBType, true, uint64_t>(sb, l0Slot.Addr(), cols, nL1Len_, offset);
+        SetFlag<HardEvent::MTE1_M>(EVENT_ID_MTE1_TO_M);
+        WaitFlag<HardEvent::MTE1_M>(EVENT_ID_MTE1_TO_M);
+    }
+
+    template <bool IsB, typename Destination, typename Source>
+    __aicore__ inline void CopyL0Operand(const Destination& destination, const Source& source, uint64_t kOffset,
+                                         uint64_t kSize)
+    {
+        if constexpr (IsB) {
+            Tile::CopyMxOperandTile(COPY_L1_TO_L0B_ATOM, destination, source, static_cast<int64_t>(kOffset),
+                                    int64_t{0L}, static_cast<int64_t>(kSize), static_cast<int64_t>(nL1Len_));
+        } else {
+            Tile::CopyMxOperandTile(COPY_L1_TO_L0A_ATOM, destination, source, int64_t{0L},
+                                    static_cast<int64_t>(kOffset), static_cast<int64_t>(mL1Len_),
+                                    static_cast<int64_t>(kSize));
+        }
+    }
+
     __aicore__ inline asc::te::mmad_params MakeMmadParams(uint64_t kLoopIdx, uint64_t kL0Idx, uint64_t kL0Iter,
                                                           uint64_t realL0K, bool needBias) const
     {
@@ -589,6 +688,17 @@ private:
                                    asc::te::unit_flag_mode::enable_update :
                                    asc::te::unit_flag_mode::enable_keep;
         mmadParams.init_with_zero = (kLoopIdx == 0U && kL0Idx == 0U && !needBias);
+        return mmadParams;
+    }
+
+    __aicore__ inline asc::te::mmad_params DeferredMakeMmadParams(uint64_t kLoopIdx, uint64_t kL0Idx, uint64_t kL0Iter,
+                                                                  uint64_t realL0K, bool needBias) const
+    {
+        asc::te::mmad_params mmadParams;
+        mmadParams.m = static_cast<uint16_t>(mL1Len_);
+        mmadParams.n = static_cast<uint16_t>(nL1Len_);
+        Tile::UpdateMxMmadParams(mmadParams, static_cast<uint16_t>(realL0K), kLoopIdx == 0U && kL0Idx == 0U,
+                                 ((kLoopIdx + 1U) * kL1Size_ >= kSize_) && kL0Idx + 1U == kL0Iter, needBias);
         return mmadParams;
     }
 
@@ -608,6 +718,16 @@ private:
         } else {
             asc::te::mmad(mmadAtom, tensorL0C, tensorAL0, tensorBL0);
         }
+    }
+
+    template <typename TensorL0C, typename TensorAL0, typename TensorBL0, typename TensorBt>
+    __aicore__ inline void DeferredComputeMmad(const asc::te::mmad_params& mmadParams, const TensorL0C& tensorL0C,
+                                               const TensorAL0& tensorAL0, const TensorBL0& tensorBL0,
+                                               const TensorBt& tensorBt, bool needBias, const BufferSlot& l0Slot,
+                                               const BufferSlot& l0cSlot, const BufferSlot& btSlot)
+    {
+        Tile::IssueMxMmad(mmadParams, tensorL0C, tensorAL0, tensorBL0);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID_M_TO_MTE1 + l0BufIdx_);
     }
 
     template <typename TensorAL0, typename TensorAL1>
@@ -714,9 +834,295 @@ private:
     bool hasBias_{false};
     bool disableWeightL2_{false};
     uint64_t problemM_{0};
-    L1Storage l1Storage_;
-    BufferManager<QUADRUPLE_BUFFER_COUNT, QUADRUPLE_BUFFER_COUNT, DOUBLE_BUFFER_COUNT> bufferManager_;
+    AscendC::Std::conditional_t<DEFERRED_UB, AscendC::Std::tuple<>, L1Storage> l1Storage_;
+    AscendC::Std::conditional_t<DEFERRED_UB, AscendC::Std::tuple<>,
+                                BufferManager<QUADRUPLE_BUFFER_COUNT, QUADRUPLE_BUFFER_COUNT, DOUBLE_BUFFER_COUNT>>
+        bufferManager_;
+
+public:
+    static_assert(!DEFERRED_UB ||
+                  asc::te::is_satisfied_ptn_format_v<
+                      decltype(asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>((AType*)0),
+                                                    asc::te::frame_layout_format<LayoutA>{}(0UL, 0UL))),
+                      asc::te::nd_ext_layout_ptn>);
+
+    constexpr static int32_t C0_SIZE = asc::te::c0_element<AType>;
+    constexpr static int32_t SCALE_C0 = MXFP_MULTI_BASE_SIZE;
+    constexpr static int32_t L0C_C0 = BLOCK_CUBE;
+    static constexpr uint64_t SWIGLU_HALF_COUNT = 2UL;
+    static constexpr uint64_t SPLIT_M_ROW_ALIGNMENT = 2UL;
+
+    __aicore__ inline BlockMmad();
+    template <typename A, typename S, typename B>
+    __aicore__ inline auto ComputeContinuousToL0c(const A& a, const S& scaleA, const B& scaleB, uint64_t rows,
+                                                  uint64_t halfN, uint64_t nOffset)
+    {
+        tensorScaleBGm_ = scaleB;
+        scaleBNOffset_ = nOffset;
+        scaleBufIdx_ = 0;
+        mL1Len_ = rows;
+        kSize_ = asc::te::get_total_column_shape(a.layout());
+        nL1Len_ = halfN * SWIGLU_HALF_COUNT;
+        CalcWeightQuantMxKBlock<AType, L1_N>(rows, nL1Len_, MxWeightQuantGmmL1Layout::A_L1_SINGLE_BUF_SIZE,
+                                             MxWeightQuantGmmL1Layout::A_L1_SINGLE_BUF_SIZE, A_B_LOAD_BALANCE_FACTOR,
+                                             kAL1Size_, kL1Size_, kL0Size_);
+        const uint64_t copyRows = CeilAlign(rows, SPLIT_M_ROW_ALIGNMENT);
+        const uint64_t bytes = CeilAlign(rows, static_cast<uint64_t>(BLOCK_CUBE)) * nL1Len_ * sizeof(float);
+        if (continuousL0cOffset_ + bytes > AscendC::TOTAL_L0C_SIZE)
+            continuousL0cOffset_ = 0;
+        auto layout = asc::te::make_frame_layout<asc::te::nz_layout_ptn, AscendC::Std::Int<L0C_C0>>(copyRows, nL1Len_);
+        auto accumulator = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l0c, float>(continuousL0cOffset_), layout);
+        if (kSize_ % kL1Size_ == 0)
+            ComputeTile<true>(a, scaleA, accumulator);
+        else
+            ComputeTile<false>(a, scaleA, accumulator);
+        return accumulator;
+    }
+    template <typename C>
+    __aicore__ inline void CopyContinuousResultToUb(const C& output, uint64_t rows, uint64_t halfN)
+    {
+        const uint64_t copyRows = CeilAlign(rows, SPLIT_M_ROW_ALIGNMENT);
+        auto layout = asc::te::make_frame_layout<asc::te::nz_layout_ptn, AscendC::Std::Int<L0C_C0>>(
+            copyRows, halfN * SWIGLU_HALF_COUNT);
+        auto accumulator = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l0c, float>(continuousL0cOffset_), layout);
+        auto copy = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Tile::CopyL0C2UBTraitMixSplitM{});
+        // MMAD and FIX both check/update the L0C unit flags, as in the native GMM pipeline.
+        // The next MMAD can proceed as soon as its L0C region is released.
+        asc::te::copy(copy.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::enable_update}), output,
+                      accumulator);
+        continuousL0cOffset_ += CeilAlign(rows, static_cast<uint64_t>(BLOCK_CUBE)) * halfN * SWIGLU_HALF_COUNT *
+                                sizeof(float);
+    }
+
+private:
+    __aicore__ inline void WaitAivToAic();
+    __aicore__ inline void SetAicToAiv();
+
+    template <typename TensorL0C_>
+    __aicore__ inline void ProcessTileL1(int64_t kbOffset, uint64_t kbL1RealSize, const TensorL0C_& tensorL0C);
+    __aicore__ inline void SetMTE1ToMTE2();
+    __aicore__ inline void SetScaleMTE1ToMTE2();
+    template <typename TensorA_>
+    __aicore__ inline void CopyAGmToL1(const TensorA_& tensorA, int64_t kaGmOffset);
+    template <typename TensorScaleA_>
+    __aicore__ inline void CopyMxScaleGmToL1(const TensorScaleA_& tensorScaleA, uint64_t kbL1Offset);
+    template <bool FullKStages, typename TensorA_, typename TensorScaleA_, typename TensorL0C_>
+    __aicore__ inline void ComputeTile(const TensorA_& tensorA, const TensorScaleA_& tensorScaleA,
+                                       const TensorL0C_& tensorL0C);
+
+    using MakeLayoutAL1 = asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<C0_SIZE>>;
+    using MakeLayoutScaleAL1 = typename asc::te::frame_layout_format<asc::te::zz_layout_ptn,
+                                                                     AscendC::Std::Int<SCALE_C0>>;
+    using MakeLayoutScaleBL1 = typename asc::te::frame_layout_format<asc::te::nn_layout_ptn,
+                                                                     AscendC::Std::Int<SCALE_C0>>;
+
+    static constexpr uint64_t L1_N = 256UL;
+
+    static constexpr uint64_t MX_SCALE_K_L1_SIZE = 4096UL;
+    static constexpr uint64_t A_B_LOAD_BALANCE_FACTOR = 2UL;
+
+    uint64_t continuousL0cOffset_ = 0;
+    uint64_t scaleBNOffset_ = 0;
+    using TensorScaleBGm = decltype(asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::gm>(static_cast<__gm__ ScaleBType*>(nullptr)),
+        asc::te::make_frame_layout<LayoutScaleB, AscendC::Std::Int<MXFP_MULTI_BASE_SIZE>>(int64_t{BLOCK_CUBE},
+                                                                                          int64_t{BLOCK_CUBE})));
+    AscendC::Std::conditional_t<DEFERRED_UB, TensorScaleBGm, AscendC::Std::tuple<>> tensorScaleBGm_;
+
+    using TensorAL1 = decltype(asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::l1, AType>(0UL),
+        MakeLayoutAL1{}(static_cast<uint64_t>(BLOCK_CUBE), static_cast<uint64_t>(BLOCK_CUBE))));
+    using TensorScaleAL1 = decltype(asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::l1, ScaleAType>(0UL),
+        MakeLayoutScaleAL1{}(static_cast<uint64_t>(BLOCK_CUBE), static_cast<uint64_t>(BLOCK_CUBE))));
+    using TensorScaleBL1 = decltype(asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::l1, ScaleBType>(0UL),
+        MakeLayoutScaleBL1{}(static_cast<uint64_t>(BLOCK_CUBE), static_cast<uint64_t>(BLOCK_CUBE))));
+
+    AscendC::Std::conditional_t<DEFERRED_UB, TensorAL1, AscendC::Std::tuple<>> tensorAL1_;
+    AscendC::Std::conditional_t<DEFERRED_UB, TensorScaleAL1, AscendC::Std::tuple<>> tensorScaleAL1_;
+    AscendC::Std::conditional_t<DEFERRED_UB, TensorScaleBL1, AscendC::Std::tuple<>> tensorScaleBL1_;
+
+    // --- sync ---
+    // 2 buffer
+    static constexpr TEventID EVENT_IDS_MTE1_TO_MTE2 = 0;
+    // 2 buffer
+    static constexpr TEventID EVENT_IDS_MX_SCALE_MTE1_TO_MTE2 = 2;
+    static constexpr TEventID EVENT_ID_MTE1_TO_MTE2 = 4;
+    static constexpr TEventID EVENT_ID_MTE2_TO_MTE1 = 0;
+    // Match the original basic API event assignment: M_MTE1 ping/pong uses
+    // slots 3/4 and the shared MTE1_M fence uses slot 3.
+    static constexpr TEventID EVENT_ID_M_TO_MTE1 = 3;
+    static constexpr TEventID EVENT_ID_MTE1_TO_M = 3;
+    static constexpr uint64_t SYNC_AIV_AIC_FLAG = 0UL;
+    static constexpr uint64_t SYNC_AIC_AIV_FLAG = 1UL;
+
+    /**
+     * L1 512KB Memory Map
+     * * Segment 1 [0KB - 256KB]:
+     * [0k]    [64k]      [96k]    [128k]                        [256k]
+     * |--B B0---|--scA0---|--scB0---|----------- A (Part 1) -------|
+     *     (64KB)     (32KB)    (32KB)            (128KB)
+     * * Segment 2 [256KB - 512KB]:
+     * [256k]                    [384k]        [448k]   [480k]   [512k]
+     * |-------- A (Part 2) -------|---- B B1 ----|--scA1--|--scB1--|
+     *          (128KB)               (64KB)        (32KB)    (32KB)
+     * * Note: A is a contiguous 256KB block spanning the middle of the buffer.
+     */
+
+    /**
+     * L0 64KB Memory Map (double-buffered B tiles)
+     * [0k]      [32KB]    [64KB]
+     * |--- B0 ---|--- B1 ---|
+     *    (32KB)     (32KB)
+     */
+    static constexpr uint64_t L0_BUF_OFFSET = 32UL * 1024UL;
+
+    // Tensor API atoms carry no runtime state. Keeping them as class constants avoids rebuilding the descriptors
+    // in every K iteration while preserving the same generated data-movement/MMAD operations.
+    static constexpr auto COPY_GM_TO_L1_ATOM = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+    static constexpr auto COPY_L1_TO_L0A_ATOM = asc::te::make_copy(asc::te::copy_l1_to_l0a{});
+    static constexpr auto COPY_L1_TO_L0B_ATOM = asc::te::make_copy(asc::te::copy_l1_to_l0b{});
 };
+
+#define BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM                                                                       \
+    template <class ScheduleType_, WeightPrologueMxKSchedule KSchedule_, WeightPrologueMxScaleBSource ScaleBSource_, \
+              WeightPrologueMxOutput Output_, class ATypeTuple_, class LayoutATuple_, class BTypeTuple_,             \
+              class LayoutBTuple_, class CType_, class LayoutC_, class BiasType_, class LayoutBias_>
+
+#define BLAZE_WQGMM_MX_MIX_MMAD_CLASS                                                                             \
+    BlockMmad<WeightQuantMxPolicy<ScheduleType_, KSchedule_, ScaleBSource_, Output_>, ATypeTuple_, LayoutATuple_, \
+              BTypeTuple_, LayoutBTuple_, CType_, LayoutC_, BiasType_, LayoutBias_>
+
+BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+template <typename TensorL0C_>
+__aicore__ inline void BLAZE_WQGMM_MX_MIX_MMAD_CLASS::ProcessTileL1(int64_t kbOffset, uint64_t kbL1RealSize,
+                                                                    const TensorL0C_& tensorL0C)
+{
+    auto tensorBL1 = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::l1, AType>(l1BufIdx_ * MxWeightQuantGmmL1Layout::L1_BUF_OFFSET),
+        asc::te::frame_layout_format<asc::te::zn_layout_ptn, AscendC::Std::Int<C0_SIZE>>{}(kbL1RealSize, nL1Len_));
+    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID_MTE2_TO_MTE1);
+    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID_MTE2_TO_MTE1);
+    const BufferSlot unused{0, 0};
+    const uint64_t stage = static_cast<uint64_t>(kbOffset) / kL1Size_;
+    IterateDeferredMatmul(stage, tensorL0C, tensorAL1_, tensorBL1, tensorScaleAL1_, tensorScaleBL1_, tensorBL1,
+                          kbL1RealSize, static_cast<uint64_t>(kbOffset) % kAL1Size_,
+                          static_cast<uint64_t>(kbOffset) % MX_SCALE_K_L1_SIZE, unused, unused, unused, unused, unused);
+}
+
+BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+__aicore__ inline void BLAZE_WQGMM_MX_MIX_MMAD_CLASS::SetScaleMTE1ToMTE2()
+{
+    SetFlag<HardEvent::MTE1_MTE2>(EVENT_IDS_MX_SCALE_MTE1_TO_MTE2 + scaleBufIdx_);
+    scaleBufIdx_ ^= 1;
+}
+
+BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+__aicore__ inline void BLAZE_WQGMM_MX_MIX_MMAD_CLASS::SetMTE1ToMTE2()
+{
+    SetFlag<HardEvent::MTE1_MTE2>(EVENT_IDS_MTE1_TO_MTE2 + aL1BufIdx_);
+    aL1BufIdx_ ^= 1;
+}
+
+BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+template <typename TensorA_>
+__aicore__ inline void BLAZE_WQGMM_MX_MIX_MMAD_CLASS::CopyAGmToL1(const TensorA_& tensorA, int64_t kaGmOffset)
+{
+    int64_t kaL1RealSize = (kaGmOffset + kAL1Size_) >= kSize_ ? kSize_ - kaGmOffset : kAL1Size_;
+    auto layoutAL1 = MakeLayoutAL1{}(mL1Len_, kaL1RealSize);
+    tensorAL1_ = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::l1, AType>(MxWeightQuantGmmL1Layout::A_L1_OFFSET +
+                                                            aL1BufIdx_ * MxWeightQuantGmmL1Layout::A_L1_BUF_OFFSET),
+        layoutAL1);
+    Tile::CopyMxOperandTile(COPY_GM_TO_L1_ATOM, tensorAL1_, tensorA, 0, kaGmOffset, mL1Len_, kaL1RealSize);
+}
+
+BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+template <typename TensorScaleA_>
+__aicore__ inline void BLAZE_WQGMM_MX_MIX_MMAD_CLASS::CopyMxScaleGmToL1(const TensorScaleA_& tensorScaleA,
+                                                                        uint64_t kbL1Offset)
+{
+    uint64_t scaleKL1StandardLen = MX_SCALE_K_L1_SIZE / WQGMM_MX_GROUP_SIZE;
+    uint64_t scaleKL1RealSize = (kbL1Offset + MX_SCALE_K_L1_SIZE) > kSize_ ?
+                                    (kSize_ - kbL1Offset) / WQGMM_MX_GROUP_SIZE :
+                                    scaleKL1StandardLen;
+    auto layoutScaleAL1 = MakeLayoutScaleAL1{}(mL1Len_, scaleKL1RealSize);
+    tensorScaleAL1_ = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::l1, fp8_e8m0_t>(
+            MxWeightQuantGmmL1Layout::SCALE_AL1_OFFSET + scaleBufIdx_ * MxWeightQuantGmmL1Layout::L1_BUF_OFFSET),
+        layoutScaleAL1);
+    auto layoutScaleBL1 = MakeLayoutScaleBL1{}(scaleKL1RealSize, nL1Len_);
+    tensorScaleBL1_ = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::l1, fp8_e8m0_t>(
+            MxWeightQuantGmmL1Layout::SCALE_BL1_OFFSET + scaleBufIdx_ * MxWeightQuantGmmL1Layout::L1_BUF_OFFSET),
+        layoutScaleBL1);
+    Tile::CopyMxScalesToL1<uint64_t>(tensorScaleA, tensorScaleBGm_, tensorScaleAL1_, tensorScaleBL1_, mL1Len_, nL1Len_,
+                                     kbL1Offset / WQGMM_MX_GROUP_SIZE, scaleKL1RealSize, scaleBNOffset_);
+}
+
+BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+__aicore__ inline BLAZE_WQGMM_MX_MIX_MMAD_CLASS::BlockMmad()
+{
+    static_assert(DEFERRED_UB, "Default construction requires deferred UB output");
+    for (uint64_t i = 0; i < DOUBLE_BUFFER_COUNT; i++) {
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID_M_TO_MTE1 + i);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_IDS_MX_SCALE_MTE1_TO_MTE2 + i);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_IDS_MTE1_TO_MTE2 + i);
+    }
+}
+
+BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+template <bool FullKStages, typename TensorA_, typename TensorScaleA_, typename TensorL0C_>
+__aicore__ inline void BLAZE_WQGMM_MX_MIX_MMAD_CLASS::ComputeTile(const TensorA_& tensorA,
+                                                                  const TensorScaleA_& tensorScaleA,
+                                                                  const TensorL0C_& tensorL0C)
+{
+    for (uint64_t kbGmOffset = 0; kbGmOffset < kSize_; kbGmOffset += kL1Size_, l1BufIdx_ ^= 1) {
+        uint64_t kbL1RealSize = FullKStages ? kL1Size_ :
+                                              ((kbGmOffset + kL1Size_) >= kSize_ ? kSize_ - kbGmOffset : kL1Size_);
+        if (kbGmOffset % MX_SCALE_K_L1_SIZE == 0) {
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_IDS_MX_SCALE_MTE1_TO_MTE2 + scaleBufIdx_);
+            CopyMxScaleGmToL1(tensorScaleA, kbGmOffset);
+        }
+
+        if (kbGmOffset % kAL1Size_ == 0) {
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_IDS_MTE1_TO_MTE2 + aL1BufIdx_);
+            CopyAGmToL1(tensorA, kbGmOffset);
+        }
+
+        WaitAivToAic();
+        ProcessTileL1(kbGmOffset, kbL1RealSize, tensorL0C);
+        uint64_t nextKbGmOffset = kbGmOffset + kL1Size_;
+        if (nextKbGmOffset % kAL1Size_ == 0 || nextKbGmOffset >= kSize_) {
+            SetMTE1ToMTE2();
+        }
+        if (nextKbGmOffset % MX_SCALE_K_L1_SIZE == 0 || nextKbGmOffset >= kSize_) {
+            SetScaleMTE1ToMTE2();
+        }
+        SetAicToAiv();
+    }
+}
+
+BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+__aicore__ inline void BLAZE_WQGMM_MX_MIX_MMAD_CLASS::WaitAivToAic()
+{
+    // Preserve second-AIV-first order; sync.h waits in base-first order.
+    CrossCoreWaitFlag<WQGMM_MX_SYNC_MODE, PIPE_MTE1>(SYNC_AIC_AIV_FLAG + WQGMM_MX_FLAG_ID_MAX);
+    CrossCoreWaitFlag<WQGMM_MX_SYNC_MODE, PIPE_MTE1>(SYNC_AIC_AIV_FLAG);
+}
+
+BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+__aicore__ inline void BLAZE_WQGMM_MX_MIX_MMAD_CLASS::SetAicToAiv()
+{
+    CrossCoreSetFlag<WQGMM_MX_SYNC_MODE, PIPE_MTE1>(SYNC_AIV_AIC_FLAG + WQGMM_MX_FLAG_ID_MAX);
+    CrossCoreSetFlag<WQGMM_MX_SYNC_MODE, PIPE_MTE1>(SYNC_AIV_AIC_FLAG);
+}
+
+#undef BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM
+#undef BLAZE_WQGMM_MX_MIX_MMAD_CLASS
 
 #endif
 

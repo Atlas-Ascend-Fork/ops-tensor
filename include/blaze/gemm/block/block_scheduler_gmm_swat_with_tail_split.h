@@ -122,6 +122,14 @@ public:
         endBlockIdx_ = blockNum_ > 0 ? blockNum_ - 1 : 0;
     }
 
+    __aicore__ inline void SetBaseM(int32_t baseM)
+    {
+        if (baseM_ != baseM) {
+            baseM_ = baseM;
+            m_ = 0;
+        }
+    }
+
     __aicore__ inline void UpdateNextProblem(const ProblemShape& problemShape)
     {
         // Scheduler maps only M/N blocks; K is kept for shape consistency and does not drive split-K here.

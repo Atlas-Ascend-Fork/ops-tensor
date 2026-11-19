@@ -110,10 +110,39 @@ public:
                                     uint32_t totalScale);
 
     /*!
-     * Stage 3: quantize totalCount bf16 elements (src * per-group reciprocal)
-     * into packed DataTypeOut written to the int8 buffer y. FP8 vs FP4 path is
-     * selected at compile time by DataTypeOut; FP4 rounding mode at runtime.
+     * Computes group maxima and OCP scales in one VF call when the input covers
+     * complete pairs of vector lanes and zeroScaleOnZeroExp is disabled.
+     * Other configurations use the existing GroupMaxExp and GenScale calls.
      */
+    template <typename SrcTensor, typename MaxTensor, typename ScaleTensor, typename ReciprocalTensor>
+    __aicore__ inline void GroupMaxAndScale(const SrcTensor& src, const MaxTensor& maxima, const ScaleTensor& scale,
+                                            const ReciprocalTensor& reciprocal, const MxQuantConfig& cfg,
+                                            uint32_t totalCount, uint32_t totalScale)
+    {
+        using MaxElementType = asc::te::get_attribute_element_type<typename MaxTensor::element_type*>;
+        static_assert(AscendC::Std::is_same_v<MaxElementType, uint16_t>, "GroupMaxAndScale maxima must be uint16_t.");
+        constexpr uint32_t lanes = asc_get_vf_len() / sizeof(bfloat16_t);
+        if (cfg.alg != MxScaleAlg::OCP || cfg.zeroScaleOnZeroExp ||
+            totalCount % (lanes * INTERLEAVED_REG_FACTOR) != 0) {
+            GroupMaxExp(src, maxima, totalCount, cfg.alg != MxScaleAlg::OCP);
+            GenScale(maxima, scale, reciprocal, cfg, totalScale);
+            return;
+        }
+        MxMaxAndScaleParams params{
+            {reinterpret_cast<__ubuf__ bfloat16_t*>(src.data().get()),
+             reinterpret_cast<__ubuf__ uint16_t*>(maxima.data().get()), DataLoopCount(totalCount), totalCount},
+            {reinterpret_cast<__ubuf__ uint16_t*>(maxima.data().get()),
+             reinterpret_cast<__ubuf__ uint16_t*>(scale.data().get()),
+             reinterpret_cast<__ubuf__ uint16_t*>(reciprocal.data().get()), ScaleLoopCount(totalScale, cfg.alg),
+             cfg.fpEmax, cfg.addValueBits, totalScale, cfg.invDstTypeMax}};
+        if (totalScale % lanes == 0) {
+            asc_vf_call<MaxAndOcpScaleVf<true>>(params);
+        } else {
+            asc_vf_call<MaxAndOcpScaleVf<false>>(params);
+        }
+    }
+
+    /*! Quantizes BF16 values using per-group reciprocals into packed FP8/FP4 output. */
     template <typename SrcTensor, typename ReciprocalTensor, typename YTensor>
     __aicore__ inline void Quantize(const SrcTensor& srcTensor, const ReciprocalTensor& reciprocalTensor,
                                     const YTensor& yTensor, uint32_t totalCount,
@@ -141,13 +170,15 @@ public:
                                     MxQuantFp4RoundMode fp4RoundMode = MxQuantFp4RoundMode::RINT);
 
     /*!
-     * Stage 4: yScale layout transpose. src holds scaleBlockN contiguous valid
-     * scales per row; dst is an mSize x 32B row-block buffer. The Block zeroes
-     * dst beforehand when stale bytes beyond the valid prefix are observable.
+     * Stage 4: yScale layout transpose. scaleBlockN is the source row pitch;
+     * validScales is the valid prefix (0 preserves the complete source row).
+     * The remaining bytes up to scaleBlockN are zeroed in the vector register
+     * before storing to the mSize x 32B UB buffer. The Block copies padding
+     * to GM only for the final N tile, matching the scale-pair output layout.
      */
     template <typename ScaleTensor, typename ScaleBlockTensor>
     __aicore__ inline void TransScaleLayout(const ScaleTensor& srcTensor, const ScaleBlockTensor& dstTensor,
-                                            uint16_t mSize, uint16_t scaleBlockN);
+                                            uint16_t mSize, uint16_t scaleBlockN, uint16_t validScales = 0);
 
     /*!
      * Repack mSize compact scale rows into 32B rows. Preserve [0, scaleCols),
@@ -241,6 +272,11 @@ private:
         bool roundSubnormalScaleUp;
     };
 
+    struct MxMaxAndScaleParams {
+        MxMaxExpVfParams maxima;
+        MxScaleVfParams scale;
+    };
+
     struct MxQuantizeVfParams {
         __ubuf__ bfloat16_t* srcAddr;
         __ubuf__ uint16_t* reciprocalAddr;
@@ -263,6 +299,7 @@ private:
         __ubuf__ int8_t* dstAddr;
         uint16_t mSize;
         uint16_t scaleBlockN;
+        uint16_t validScales;
     };
 
     struct MxPadScaleRowsVfParams {
@@ -344,6 +381,12 @@ private:
     // ---- Vf implementations (static __simd_vf__ inline, defined in-class) ----
     template <bool FULL_BLOCK, bool USE_ABS, bool EVEN_COUNT>
     static __simd_vf__ inline void MaxExpVf(MxMaxExpVfParams params)
+    {
+        MaxExpCallee<FULL_BLOCK, USE_ABS, EVEN_COUNT>(params);
+    }
+
+    template <bool FULL_BLOCK, bool USE_ABS, bool EVEN_COUNT>
+    static __simd_callee__ inline void MaxExpCallee(MxMaxExpVfParams params)
     {
         constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
         constexpr uint16_t ELEMENT_AFTER_REDUCE = static_cast<uint16_t>(asc_get_vf_len() / BLOCK_SIZE);
@@ -453,6 +496,20 @@ private:
 
     template <bool ZERO_SCALE_ON_ZERO_EXP, bool FULL_BLOCK>
     static __simd_vf__ inline void ScaleOcpVf(MxScaleVfParams params)
+    {
+        ScaleOcpCallee<ZERO_SCALE_ON_ZERO_EXP, FULL_BLOCK>(params);
+    }
+
+    template <bool FULL_SCALE>
+    static __simd_vf__ inline void MaxAndOcpScaleVf(MxMaxAndScaleParams params)
+    {
+        MaxExpCallee<true, false, true>(params.maxima);
+        AscendC::Reg::LocalMemBar<AscendC::Reg::MemType::VEC_STORE, AscendC::Reg::MemType::VEC_LOAD>();
+        ScaleOcpCallee<false, FULL_SCALE>(params.scale);
+    }
+
+    template <bool ZERO_SCALE_ON_ZERO_EXP, bool FULL_BLOCK>
+    static __simd_callee__ inline void ScaleOcpCallee(MxScaleVfParams params)
     {
         constexpr uint16_t VL_FOR_16F = static_cast<uint16_t>(asc_get_vf_len() / sizeof(bfloat16_t));
         AscendC::Reg::RegTensor<uint16_t> expMask;
@@ -892,8 +949,16 @@ private:
         }
     }
 
+    template <bool ClearPadding>
     static __simd_vf__ inline void TransScaleVf(MxTransScaleVfParams params)
     {
+        AscendC::Reg::MaskReg validMask;
+        AscendC::Reg::RegTensor<int8_t> zero;
+        if constexpr (ClearPadding) {
+            uint32_t validCount = params.validScales;
+            validMask = AscendC::Reg::UpdateMask<int8_t>(validCount);
+            AscendC::Reg::Duplicate(zero, static_cast<int8_t>(0));
+        }
         for (uint16_t row = 0; row < params.mSize; ++row) {
             uint32_t elementCount = params.scaleBlockN;
             AscendC::Reg::MaskReg mask = AscendC::Reg::UpdateMask<int8_t>(elementCount);
@@ -902,6 +967,10 @@ private:
             __ubuf__ int8_t* rowSource = params.srcAddr + row * params.scaleBlockN;
             AscendC::Reg::LoadUnAlignPre(unalign, rowSource);
             AscendC::Reg::LoadUnAlign(value, unalign, rowSource);
+            // Keep the aligned source pitch, but zero the scale for a wholly padded group.
+            if constexpr (ClearPadding) {
+                AscendC::Reg::Select(value, value, zero, validMask);
+            }
             __ubuf__ int8_t* rowDestination = params.dstAddr + row * AscendC::ONE_BLK_SIZE;
             AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::StoreDist::DIST_NORM_B8>(rowDestination, value, mask);
         }
@@ -1222,7 +1291,7 @@ template <typename DataTypeOut_>
 template <typename ScaleTensor, typename ScaleBlockTensor>
 __aicore__ inline void MxQuant<DataTypeOut_>::TransScaleLayout(const ScaleTensor& srcTensor,
                                                                const ScaleBlockTensor& dstTensor, uint16_t mSize,
-                                                               uint16_t scaleBlockN)
+                                                               uint16_t scaleBlockN, uint16_t validScales)
 {
     using SrcElementType = asc::te::get_attribute_element_type<typename ScaleTensor::element_type*>;
     using DstElementType = asc::te::get_attribute_element_type<typename ScaleBlockTensor::element_type*>;
@@ -1240,8 +1309,13 @@ __aicore__ inline void MxQuant<DataTypeOut_>::TransScaleLayout(const ScaleTensor
         return;
     }
     MxTransScaleVfParams params{reinterpret_cast<__ubuf__ int8_t*>(srcTensor.data().get()),
-                                reinterpret_cast<__ubuf__ int8_t*>(dstTensor.data().get()), mSize, scaleBlockN};
-    asc_vf_call<TransScaleVf>(params);
+                                reinterpret_cast<__ubuf__ int8_t*>(dstTensor.data().get()), mSize, scaleBlockN,
+                                validScales == 0 ? scaleBlockN : validScales};
+    if (validScales == 0) {
+        asc_vf_call<TransScaleVf<false>>(params);
+    } else {
+        asc_vf_call<TransScaleVf<true>>(params);
+    }
 }
 
 // ===========================================================================

@@ -6,6 +6,7 @@
 `MxQuant` 将 UB 中的 BF16 数据按每 32 个元素一组量化为 FP8/FP4，并生成 E8M0 scale。各接口可独立调用：
 
 - **GroupMaxExp**：提取每组最大指数（OCP）或最大绝对值（cuBLAS / DynDtypeRange），以 `uint16_t` 位编码输出。
+- **GroupMaxAndScale**：满足条件时在一次VF调用中完成组最大值与OCP scale计算；其他配置复用两阶段实现。
 - **GenScale**：生成 E8M0 scale 和 BF16 倒数，倒数以 `uint16_t` 位编码存储。
 - **Quantize**：将输入乘以对应组的倒数，转换并打包为 FP8/FP4。
 - **TransScaleLayout**：将紧凑 scale 重排为 32 字节行距。
@@ -126,6 +127,34 @@ public:
 | reciprocalTensor | ReciprocalTensor | 输出 UB Tensor，uint16_t |
 | cfg | MxQuantConfig | 算法配置（alg 三选一分派） |
 | totalScale | uint32_t | 组数（= CeilDiv(totalCount, 32)） |
+
+### MxQuant::GroupMaxAndScale
+
+```cpp
+template <typename SrcTensor, typename MaxTensor, typename ScaleTensor, typename ReciprocalTensor>
+__aicore__ inline void GroupMaxAndScale(const SrcTensor& src, const MaxTensor& maxima,
+    const ScaleTensor& scale, const ReciprocalTensor& reciprocal, const MxQuantConfig& cfg,
+    uint32_t totalCount, uint32_t totalScale);
+```
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| src | SrcTensor | UB中的连续BF16输入，totalCount个元素 |
+| maxima | MaxTensor | UB中的uint16_t组最大值缓冲，类型由static_assert检查；保留回退所需空间 |
+| scale | ScaleTensor | UB中的int8_t输出，按字节存储E8M0 scale |
+| reciprocal | ReciprocalTensor | UB中的uint16_t输出，存储BF16倒数位编码 |
+| cfg | MxQuantConfig | 与GenScale相同的量化配置 |
+| totalCount | uint32_t | 输入元素数，与缓冲容量一致 |
+| totalScale | uint32_t | 组数，应为CeilDiv(totalCount, 32) |
+
+仅当`cfg.alg == MxScaleAlg::OCP`、`zeroScaleOnZeroExp == false`，且
+`totalCount`为`2 * asc_get_vf_len() / sizeof(bfloat16_t)`的整数倍时使用融合VF。
+融合路径仍将组最大值写入`maxima`，再通过局部存储屏障保证后续scale计算可读取；
+收益来自合并VF调用，不代表消除了这次UB中间读写。
+不满足条件时依次调用已有`GroupMaxExp`和`GenScale`，因此cuBLAS等算法仍受支持。
+两条路径都生成`scale`和`reciprocal`，不改变调用方的量化配置与输出语义。
+缓冲的UB位置、类型、容量与连续布局约束沿用上述两阶段接口；该接口不负责
+跨流水同步、量化结果转换或GM回写，这些操作仍由Block组织。
 
 ### MxQuant::Quantize
 | 参数 | 类型 | 说明 |

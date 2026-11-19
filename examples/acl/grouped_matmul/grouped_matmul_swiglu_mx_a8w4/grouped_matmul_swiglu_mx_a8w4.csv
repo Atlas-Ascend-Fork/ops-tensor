@@ -1,0 +1,5 @@
+caseName,experts,m,n,k,algorithm,smooth,groupType
+a8w4_no_smooth_count,2,32,256,256,0,0,1
+a8w4_smooth_count,2,33,256,256,0,1,1
+a8w4_smooth_cumsum_cublas,3,35,512,384,1,1,0
+a8w4_no_smooth_cumsum,1,1,256,256,1,0,0

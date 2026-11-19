@@ -242,6 +242,27 @@ blockMmad(gmBlockA, gmBlockScaleA, tensorScaleBGm, gmBlockC, kaL1Size, kbL1Size,
 - 不适合单独调用；没有对应 AIV producer 时，B/bias L1 数据和 ready 标志不存在。
 
 
+## 延迟 UB 输出策略
+
+`WeightQuantMxPolicy` 增加输出策略，默认 `WeightPrologueMxOutput::GM`，原 GMM/QBMM
+调用保持原来的构造、缓冲和同步协议。`GroupedMatmulSwigluWithWeightQuantMx` 使用
+`DYNAMIC + AIC ScaleB + DEFERRED_UB`，在同一个 `BlockMmad` 模板类中使用延迟UB输出流程，
+不再单独定义处理类特化。构造和析构保留各自的缓冲协议；分支专用成员通过编译期配置选择，
+GM输出路径不会构造UB路径的Tensor描述符。
+
+- `ComputeContinuousToL0c` 计算两路权重对应的FP32结果并留在L0C。
+- `CopyContinuousResultToUb` 按调用方的交接时机通过Fixpipe搬到UB。
+- `CalcWeightQuantMxKBlock` 与原GMM共用K分块算式；各调用方传入原有容量模型和复用系数，
+  原GMM仍用80 KiB模型，融合路径仍用128 KiB模型，选块策略不变。
+- A/B 的L0描述符、矩阵切片搬运、scale读取及MMAD发射共用 `gemm/tile/compute.h` 的
+  `MakeMxL0Operand`、`CopyMxOperandTile`、`CopyMxScalesToL1` 和 `IssueMxMmad`；
+  scale L1→L0和MMAD参数设置也继续共用已有实现。
+- `MxWeightQuantGmmL1Layout` 统一原GMM Kernel、融合Block和Prologue相同的物理L1分区。
+  原GMM的bias占位和K尾块补零仍在原分支处理；融合路径删除不会执行的bias代码。
+
+融合分支仍保留自己的两路权重许可、L0C区域轮转和结果交接；不能将其同步协议直接套给
+写GM的原路径。它由现有 `GmmWeightQuantMxKernel` 的后处理特化组装，不需要独立的Block头文件。
+
 ## GMMFR 输出与缓冲约定
 
 `GroupedMatmulFinalizeRoutingWithWeightQuantMx` 使用公共特化的动态 K 入口，由 AIC 从 GM 搬运 ScaleB。配套 Kernel 提供有效的 L1 分区和 AIV 权重生产端。

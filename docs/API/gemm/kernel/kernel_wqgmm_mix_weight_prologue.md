@@ -155,3 +155,85 @@ ka = min(depth, maxDepth) * kb
 使用 example-local 适配代码直接实例化通用 Kernel，保留确定性数据生成、NPU 执行和原精度阈值。
 Transformer 的生产适配和 host tiling 映射位于 ops-transformer 的
 `gmm_weight_quant_tensor_api_mx_kernel.h`。
+
+
+## V3 A8W4 SwiGLU 后处理分支
+
+### 融合计算与入口
+
+`GmmWeightQuantMxKernel` 在同一个模板类内，根据是否配置Epilogue，通过 `if constexpr` 选择 `RunGm` 或 `RunEpilogue`，不再单独定义后处理类特化。非空Epilogue分支将MX A8W4 Grouped Matmul、mode 2 SwiGLU、可选expert smooth和MXFP8量化组装为AIC:AIV=1:2的TensorAPI Kernel。中间矩阵结果由Fixpipe从L0C写入UB，不落GM。
+
+`Params` 按编译期配置选择原GM参数或UB后处理参数，调用方仍通过 `Kernel::Params` 和 `operator()` 传入参数；分支专用成员也按编译期配置选择。
+
+原GM入口按参数准备、Cube/Vector分组和tile执行拆分，专家输入地址共用 `GetGmExpertAddress` 处理TensorList与连续存储两种形式。Prologue构造和阶段恢复共用 `ResumeVectorState` 初始化事件，事件顺序不变。
+
+```cpp
+using Prologue = Blaze::Gemm::Kernel::GroupedWeightPrologueMx<
+    fp8_e4m3fn_t, fp4x2_e2m1_t, bfloat16_t, true>;
+using Epilogue = Blaze::Epilogue::Block::BlockEpilogueSwigluMxQuant<
+    fp8_e4m3fn_t, float, fp8_e8m0_t, false, true, true>;
+using Kernel = Blaze::Gemm::Kernel::GmmWeightQuantMxKernel<asc::te::shape<int64_t, int64_t, int64_t, int64_t>, BlockMmad, Blaze::Gemm::Block::BlockSchedulerGmmSwatWithTailSplit, Epilogue, Prologue, true>;
+```
+
+`BlockMmad`采用专用的`GroupedMatmulSwigluWithWeightQuantMx`策略，提供`ComputeContinuousToL0c`和`CopyContinuousResultToUb`。Prologue的第四个模板参数`V3A8w4Fast`开启V3 A8W4路径，默认构造函数复用同一套L1参数和事件初始化。旧GMM调用仍使用三个模板参数，并通过MMAD参数构造Prologue。Epilogue的最后一个模板参数继续显式开启V3 A8W4路径。
+
+ScaleA/ScaleB的L1→L0搬运和MMAD参数更新复用`gemm/tile/compute.h`中的公共实现，纯GMM/QBMM与融合块共用这部分代码。融合分支保留成对权重同步、持续L0C结果和延迟Fixpipe输出；原GM输出入口继续保留在同一个Block类中，由GM策略使用。
+
+当前进一步共用A/B描述符、矩阵切片搬运、scale读取和MMAD发射。L1物理分区统一引用
+`MxWeightQuantGmmL1Layout`。`ReadMxGroupRows` 为原GMM与融合路径共用的groupList解析，
+保留累计偏移、逐专家计数及原GMM的稀疏分组语义；融合入口仍只接受type 0/1。
+两处Prologue到Epilogue的阶段交接统一由 `ConsumePrevious` 执行。
+`RunContinuousPairRange` 只接收实际使用的weight和分块参数，不再构造或传递未使用的scale/bias描述符。
+
+复用`BlockSchedulerGmmSwatWithTailSplit`分配任务，并按expert的实际M进行BalanceM。基本分块上限为M=256、半宽N=128，半宽N尾块为64。
+
+### 支持范围
+
+- X为FP8 E4M3 ND，Weight为FP4 E2M1 FRACTAL_NZ；X不转置，Weight仅支持转置ZN视图，ScaleB为ScaleB-DN。
+- FP4源存储C0=64，转换后按FP8计算布局使用C0=32。所有expert权重在一个连续缓冲中。
+- K和完整N按128对齐；M支持非对齐及零token expert。
+- `groupListType=0/1`分别表示累计偏移和逐expert计数。
+- mode 2，`scaleAlg=0/1`；无GMM bias，`gluBias`为激活公式的标量偏置。
+- 输出为FP8 E4M3，输出scale为E8M0；可选smooth为FP32 `[E,N/2]`。
+
+### 调用顺序
+
+调用方填充`Kernel::Params`的输入地址、M/N/K、expert数量、groupList类型、scheduler及epilogue参数，然后调用`kernel(params)`。
+
+1. AIC创建MMAD对象，AIV创建Prologue和Epilogue对象；这些对象在整次Kernel调用期间复用。
+2. Scheduler依次分配expert和tile，按当前expert的M调整M分块。
+3. `RunContinuousPairRange`分别读取激活分支与gate分支权重，一个VF调用内完成两段FP4→FP8转换，再写入配套L1区域；不再保留旧concat拼接搬运的分支和状态。
+4. AIC直接将weightScale搬入L1，复用A/xScale的K遍历，执行MMAD，结果保留在L0C。
+5. AIC等待输入UB可复用，随后Fixpipe输出到AIV的UB；AIV处理SwiGLU、smooth及MX量化。
+
+前一tile的输出处理与下一tile的权重阶段按显式握手交接，不能删除`FinalizeVectorCompute → epilogue → ResumeVectorState`顺序。
+
+### 数值顺序
+
+```text
+left  = converted_left_result  * inputScale
+right = converted_right_result * inputScale
+a     = min(left, clampLimit)
+out   = a / (1 + exp(-gluAlpha * a))
+out   = out * (clip(right, -clampLimit, clampLimit) + gluBias)
+out   = out * smoothScale[expert, channel]  // smooth为空时略过
+v     = BF16_RNE(out)
+y, yScale = MxQuant(v, scaleAlg)
+```
+
+Kernel把局部epilogue参数的`inputScale`设为64，恢复FP4转换的数值比例。smooth乘法在FP32激活之后、BF16舍入之前。调用方的原始参数不会被改写。
+
+### 缓冲与同步
+
+新路径权重输入区为64 KiB、转换输出区为128 KiB；Epilogue的FP32输入从64 KiB处开始，与权重暂存区按阶段复用。量化输出和打包scale使用独立双缓冲；smooth行位于246 KiB处，最多128个FP32元素。总地址范围不超过248 KiB UB。
+
+- K循环内使用L1双缓冲和AIC/AIV生产消费通知。
+- 结果就绪使用mode 4的2/18；输入UB可复用通知使用3/19。
+- Epilogue新路径使用独立本地事件5/6，保护两组输出槽位。
+- 模式和第二颗AIV的flag偏移复用公共sync常量；保留原pipe和等待顺序。
+
+同一expert、同一通道tile的smooth行会被缓存；切换expert或通道后重新搬入。关闭smooth时不搬运该输入。
+
+### 兼容性边界
+
+主线GMM/QBMM的公共MMAD和默认Epilogue路径不因此切换到新快速实现。参数合法性由上层ACLNN/Tiling校验；Kernel为设备侧`void`模板，不返回ACLNN错误码。

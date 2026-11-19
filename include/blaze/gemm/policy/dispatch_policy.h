@@ -126,16 +126,19 @@ struct MatmulWithScaleMx {
 
 enum class WeightPrologueMxKSchedule : std::uint8_t { FIXED, DYNAMIC };
 enum class WeightPrologueMxScaleBSource : std::uint8_t { AIC, AIV };
+enum class WeightPrologueMxOutput : std::uint8_t { GM, DEFERRED_UB };
 
 /**
  * @struct WeightQuantMxPolicy
- * @brief MX 权重前处理策略，只声明调度类型、K 调度方式和 ScaleB 生产方。
+ * @brief MX 权重前处理策略，声明调度类型、K 调度方式、ScaleB 生产方和结果输出方式。
  */
-template <class ScheduleType_, WeightPrologueMxKSchedule KSchedule_, WeightPrologueMxScaleBSource ScaleBSource_>
+template <class ScheduleType_, WeightPrologueMxKSchedule KSchedule_, WeightPrologueMxScaleBSource ScaleBSource_,
+          WeightPrologueMxOutput Output_ = WeightPrologueMxOutput::GM>
 struct WeightQuantMxPolicy {
     using ScheduleType = ScheduleType_;
     static constexpr auto K_SCHEDULE = KSchedule_;
     static constexpr auto SCALE_B_SOURCE = ScaleBSource_;
+    static constexpr auto OUTPUT = Output_;
 };
 
 /**
@@ -171,6 +174,13 @@ using GroupedMatmulWithWeightQuantMx = WeightQuantMxPolicy<KernelWqgmmMxMix, Wei
 // Finalize routing uses dynamic K blocking with AIC ScaleB loads and a deferred AIV epilogue.
 using GroupedMatmulFinalizeRoutingWithWeightQuantMx = WeightQuantMxPolicy<
     KernelWqgmmMxMix, WeightPrologueMxKSchedule::DYNAMIC, WeightPrologueMxScaleBSource::AIC>;
+
+/**
+ * @brief Grouped MX weight conversion with AIC ScaleB and deferred UB output for an epilogue.
+ */
+using GroupedMatmulSwigluWithWeightQuantMx = WeightQuantMxPolicy<KernelWqgmmMxMix, WeightPrologueMxKSchedule::DYNAMIC,
+                                                                 WeightPrologueMxScaleBSource::AIC,
+                                                                 WeightPrologueMxOutput::DEFERRED_UB>;
 
 /**
  * @struct GroupedMatmulWithScaleMx
