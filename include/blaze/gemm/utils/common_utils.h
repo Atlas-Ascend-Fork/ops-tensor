@@ -61,6 +61,7 @@ constexpr uint16_t FIFTH_FLAG = 5;
 constexpr uint16_t SIXTH_FLAG = 6;
 constexpr uint16_t SEVENTH_FLAG = 7;
 constexpr int64_t PER_BLOCK_SIZE = 128LL;
+constexpr uint16_t MAX_GROUP_NUM = 1024;
 
 constexpr uint32_t L2_CACHE_DEFAULT = 0U;
 constexpr uint32_t A_L2_CACHE_DISABLE = 1U;

@@ -346,7 +346,7 @@ private:
     uint64_t aL1OneBufferBytes_ = 0;
     uint64_t iterBatch_ = 0;
     uint64_t bl1OffsetP2_ = 0;
-
+    // 2 means MaxL1ASlots/MaxL1BSlots/MaxL0Slots
     Gemm::BufferManager<2, 2, 2> bufMgr_;
 };
 

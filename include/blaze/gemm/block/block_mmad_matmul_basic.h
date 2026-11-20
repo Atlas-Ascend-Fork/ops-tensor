@@ -143,15 +143,11 @@ public:
         const bool isFirstSplitK = splitKIdx == 0;
         const bool isLastSplitK = splitKIdx == splitKNum_ - 1;
         static constexpr uint64_t HALF_L0C_SIZE = AscendC::TOTAL_L0C_SIZE / DOUBLE_BUFFER_COUNT;
+
         // m0 == m1 && n0 == n1
-        int64_t curM = Blaze::Gemm::Min(asc::te::get<MNK_M>(blockShape), static_cast<int64_t>(baseM_));
-        int64_t curN = Blaze::Gemm::Min(asc::te::get<MNK_N>(blockShape), static_cast<int64_t>(baseN_));
+        uint64_t curM = Blaze::Gemm::Min(asc::te::get<MNK_M>(blockShape), static_cast<int64_t>(mL1_));
+        uint64_t curN = Blaze::Gemm::Min(asc::te::get<MNK_N>(blockShape), static_cast<int64_t>(nL1_));
         uint64_t oriK = asc::te::get<MNK_K>(blockShape); // 非全载blockShape的K维度固定返回原始K
-        uint64_t l0cOffset = HALF_L0C_SIZE * (l0cPingPong_ & 0x1);
-        // LoC搬出
-        auto layoutL0C = asc::te::frame_layout_format<asc::te::nz_layout_ptn, asc::te::_16>{}(curM, curN);
-        auto tensorL0C = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0c, float>(l0cOffset),
-                                              layoutL0C);
 
         gmScalePtr_ = gmScalePtr;
         curNOut_ = static_cast<uint64_t>(curN);
@@ -169,43 +165,59 @@ public:
             auto tensorBL1 = asc::te::get<1>(l1TensorTuple);
             auto tensorBiasL1 = asc::te::get<2>(l1TensorTuple);
 
+            uint64_t mL0Iter = Blaze::Gemm::CeilDiv(curM, baseM_);
+            uint64_t nL0Iter = Blaze::Gemm::CeilDiv(curN, baseN_);
             uint64_t kL0Iter = Blaze::Gemm::CeilDiv(curKL1, baseK_);
-            for (uint64_t iter1 = 0; iter1 < kL0Iter; ++iter1) {
-                uint64_t curK0 = (iter1 + 1 == kL0Iter) ? (curKL1 - iter1 * baseK_) : baseK_;
-                uint16_t l0BufferId = l0PingPong_ & 0x1;
+            for (uint64_t iterM = 0; iterM < mL0Iter; iterM++) {
+                for (uint64_t iterN = 0; iterN < nL0Iter; iterN++) {
+                    uint64_t curM0 = Blaze::Gemm::Min(baseM_, curM - iterM * baseM_);
+                    uint64_t curN0 = Blaze::Gemm::Min(baseN_, curN - iterN * baseN_);
+                    uint64_t l0cOffset = HALF_L0C_SIZE * ((l0cPingPong_ + iterM + iterN) & 0x1);
+                    auto layoutL0C = asc::te::frame_layout_format<asc::te::nz_layout_ptn, asc::te::_16>{}(curM0, curN0);
+                    auto tensorL0C = asc::te::make_tensor(
+                        asc::te::make_mem_ptr<asc::te::location::l0c, float>(l0cOffset), layoutL0C);
+                    for (uint64_t iter1 = 0; iter1 < kL0Iter; ++iter1) {
+                        uint64_t curK0 = (iter1 + 1 == kL0Iter) ? (curKL1 - iter1 * baseK_) : baseK_;
+                        uint16_t l0BufferId = l0PingPong_ & 0x1;
 
-                // A L1->L0
-                TripleShape l0Shape{curM, curN, static_cast<int64_t>(curK0)};
-                bool needBias = NeedProcessBias(iter0, iter1, isFirstSplitK);
-                auto l0TensorTuple = CopyL0FromL1(tensorAL1, tensorBL1, tensorBiasL1, l0Shape, l0BufferId,
-                                                  baseK_ * iter1, needBias, l1BufId, btBufId);
-                auto tensorAL0 = asc::te::get<0>(l0TensorTuple);
-                auto tensorBL0 = asc::te::get<1>(l0TensorTuple);
-                auto tensorBiasL0 = asc::te::get<2>(l0TensorTuple);
+                        // A L1->L0
+                        TripleShape l0Shape{curM0, curN0, static_cast<int64_t>(curK0)};
+                        bool needBias = NeedProcessBias(iter0, iter1, isFirstSplitK);
+                        auto l0TensorTuple = CopyL0FromL1(tensorAL1, tensorBL1, tensorBiasL1, l0Shape, l0BufferId,
+                                                          baseK_ * iter1, iterM * baseM_, iterN * baseN_, needBias,
+                                                          l1BufId, btBufId);
+                        auto tensorAL0 = asc::te::get<0>(l0TensorTuple);
+                        auto tensorBL0 = asc::te::get<1>(l0TensorTuple);
+                        auto tensorBiasL0 = asc::te::get<2>(l0TensorTuple);
 
-                // 只有首个 split 清零 L0C（bias 场景由 bias 表初始化，不清零）
-                bool initCmatrix = iter0 == 0 && iter1 == 0 && isFirstSplitK && !needBias;
-                // 只有最后一个 split 的最后一拍才 update 单元标志
-                bool isFinalAccumulation = (iter0 + 1 == kL1Iter_ && iter1 + 1 == kL0Iter) && isLastSplitK;
-                asc::te::unit_flag_mode unitFlag = (isFinalAccumulation ? asc::te::unit_flag_mode::enable_update :
-                                                                          asc::te::unit_flag_mode::enable_keep);
+                        // 只有首个 split 清零 L0C（bias 场景由 bias 表初始化，不清零）
+                        bool initCmatrix = iter0 == 0 && iter1 == 0 && isFirstSplitK && !needBias;
+                        // 只有最后一个 split 的最后一拍才 update 单元标志
+                        bool isFinalAccumulation = (iter0 + 1 == kL1Iter_ && iter1 + 1 == kL0Iter) && isLastSplitK;
+                        asc::te::unit_flag_mode unitFlag = (isFinalAccumulation ?
+                                                                asc::te::unit_flag_mode::enable_update :
+                                                                asc::te::unit_flag_mode::enable_keep);
+                        {
+                            Gemm::LockM(l0BufferId + L0_BUFFER_ID_BASE);
+                            Compute(tensorAL0, tensorBL0, tensorBiasL0, tensorL0C, l0Shape, needBias, unitFlag,
+                                    initCmatrix);
+                            Gemm::UnLockM(l0BufferId + L0_BUFFER_ID_BASE);
+                        }
+                        l0PingPong_++;
 
-                {
-                    Gemm::LockM(l0BufferId + L0_BUFFER_ID_BASE);
-                    Compute(tensorAL0, tensorBL0, tensorBiasL0, tensorL0C, l0Shape, needBias, unitFlag, initCmatrix);
-                    Gemm::UnLockM(l0BufferId + L0_BUFFER_ID_BASE);
+                        if (iter0 + 1 == kL1Iter_ && iter1 + 1 == kL0Iter && isLastSplitK) {
+                            // 数据搬出到GM
+                            auto gmTileC = gmC.slice(asc::te::make_coord(iterM * baseM_, iterN * baseN_),
+                                                     asc::te::make_shape(curM0, curN0));
+                            CopyL0CToGM(gmTileC, tensorL0C);
+                        }
+                    }
                 }
-                l0PingPong_++;
             }
             abL1LoopCnt_++;
         }
-
-        // 数据搬出到GM（仅最后一个 split 触发一次）
-        if (isLastSplitK) {
-            CopyL0CToGM(gmC, tensorL0C);
-            if (enableL0cPingPong_) {
-                l0cPingPong_++;
-            }
+        if (isLastSplitK && enableL0cPingPong_) {
+            l0cPingPong_++;
         }
     }
 
@@ -342,8 +354,8 @@ private:
     template <typename TensorA, typename TensorB, typename TensorBias>
     __aicore__ inline auto CopyL0FromL1(const TensorA& tensorAL1, const TensorB& tensorBL1,
                                         const TensorBias& tensorBiasL1, const TripleShape& l0Shape,
-                                        const uint16_t l0BufferId, uint64_t kIdx, bool needBias,
-                                        const uint16_t l1BufferId, const uint16_t btBufferId)
+                                        const uint16_t l0BufferId, uint64_t kIdx, uint64_t mIdx, uint64_t nIdx,
+                                        bool needBias, const uint16_t l1BufferId, const uint16_t btBufferId)
     {
         static constexpr uint64_t HALF_L0_SIZE = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT;
         uint64_t l0BaseOffset = HALF_L0_SIZE * l0BufferId;
@@ -358,7 +370,7 @@ private:
             curM0, curK0);
         auto tensorAL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0a, AType>(l0BaseOffset),
                                               layoutAL0);
-        auto tensorBlockAL1 = tensorAL1.slice(asc::te::make_coord(0, kIdx), asc::te::make_shape(curM0, curK0));
+        auto tensorBlockAL1 = tensorAL1.slice(asc::te::make_coord(mIdx, kIdx), asc::te::make_shape(curM0, curK0));
         asc::te::copy(copyL12L0A, tensorAL0, tensorBlockAL1);
 
         // B L1->L0B
@@ -367,17 +379,22 @@ private:
             curK0, curN0);
         auto tensorBL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0b, BType>(l0BaseOffset),
                                               layoutBL0);
-        auto tensorBlockBL1 = tensorBL1.slice(asc::te::make_coord(kIdx, 0), asc::te::make_shape(curK0, curN0));
+        auto tensorBlockBL1 = tensorBL1.slice(asc::te::make_coord(kIdx, nIdx), asc::te::make_shape(curK0, curN0));
         asc::te::copy(copyL12L0B, tensorBL0, tensorBlockBL1);
 
         // Bias L1->L0
         uint64_t nl1Align = Blaze::Gemm::CeilAlign(curN0, static_cast<int64_t>(AscendC::BLOCK_CUBE));
         auto layoutBiasL0 = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, nl1Align);
         auto tensorBiasL0 = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::bias, float>(baseN_ * btBufferId * sizeof(float)), layoutBiasL0);
+            asc::te::make_mem_ptr<asc::te::location::bias, float>((nL1_ * btBufferId + nIdx) * sizeof(float)),
+            layoutBiasL0);
         if (needBias) {
             auto copyL12BT = asc::te::make_copy(asc::te::copy_l1_to_biastable{});
-            asc::te::copy(copyL12BT, tensorBiasL0, tensorBiasL1);
+            // l0cdb 使能时 baseN_ < nL1_，一个 L1 tile 内有多个 N 段：bias 源必须按
+            // nIdx 切片，否则后续段都会重复拷贝首段的 bias（奇数段施加前段 bias）。
+            auto tensorBiasL1Seg = tensorBiasL1.slice(asc::te::make_coord(0UL, nIdx),
+                                                      asc::te::make_shape(1UL, nl1Align));
+            asc::te::copy(copyL12BT, tensorBiasL0, tensorBiasL1Seg);
         }
         Gemm::UnLockMte1(l1BufferId + L1_BUFFER_ID_BASE);
         Gemm::UnLockMte1(l0BufferId + L0_BUFFER_ID_BASE);

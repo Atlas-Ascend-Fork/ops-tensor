@@ -76,6 +76,7 @@ public:
         }
         // Rows >= nBlockNums_ hold no upper-triangle slot (coordN <= nBlockNums_-1 < coordM).
         effRows_ = AscendC::Std::min(mBlockNums_, nBlockNums_);
+        // calcu formula (1 + n) * n / 2
         slotsPerBatch_ = effRows_ * nBlockNums_ - effRows_ * (effRows_ - 1) / 2;
         // Single tail block per axis: the last block carries the full remainder.
         tailM_ = m - (mBlockNums_ - 1) * mL1_;

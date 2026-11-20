@@ -599,7 +599,6 @@ private:
         if constexpr (ENABLE_INPLACE_ADD) {
             gmC.set_l2_cache_hint(asc::te::cache_mode::disable);
         }
-
         auto blockIdx = static_cast<int64_t>(AscendC::GetBlockIdx());
         if (blockIdx >= bs.GetCoreNums()) {
             return;

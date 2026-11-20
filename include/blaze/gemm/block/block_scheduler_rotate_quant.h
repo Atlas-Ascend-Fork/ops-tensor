@@ -139,9 +139,9 @@ private:
 
     __aicore__ inline void InitGroups(int64_t blockNum)
     {
-        if (blockNum <= 0 || groups_.groupListGmAddr == nullptr || groups_.groupNum <= 0 || groups_.groupNum > 1024 ||
-            (groups_.groupListType != 0 && groups_.groupListType != 1) || b_ > MAX_OFFSET / groups_.groupNum ||
-            groups_.groupNum * b_ > MAX_OFFSET / (k_ * k_)) {
+        if (blockNum <= 0 || groups_.groupListGmAddr == nullptr || groups_.groupNum <= 0 ||
+            groups_.groupNum > MAX_GROUP_NUM || (groups_.groupListType != 0 && groups_.groupListType != 1) ||
+            b_ > MAX_OFFSET / groups_.groupNum || groups_.groupNum * b_ > MAX_OFFSET / (k_ * k_)) {
             return;
         }
         groupList_ = reinterpret_cast<__gm__ int64_t*>(groups_.groupListGmAddr);

@@ -2,7 +2,7 @@
 > [代码位置](../../../../include/blaze/gemm/block/block_mmad_matmul_basic.h)
 
 ## 功能说明
-基础矩阵乘 Block，基于 Tensor API 实现，仅支持 AIC 计算。支持 L1/L0C 可配置缓冲、Bias 加法，适用于 Basic Kernel 场景。
+基础矩阵乘 Block，基于 Tensor API 实现，仅支持 AIC 计算。支持 L1/L0C 可配置缓冲、**自适应L0C 双缓冲乒乓**、Bias 加法，适用于 Basic Kernel 场景。
 
 **继承自**：BlockMmad 基础模板（特化实现）
 
@@ -172,7 +172,8 @@ __aicore__ inline void operator()(
     TensorBias& gmBias,          // Bias GM Tensor
     TensorC& gmC,                // C 矩阵 GM Tensor
     TupleShape& blockShape,      // Block 形状
-    __gm__ uint64_t* gmScalePtr = nullptr)  // Scale GM 指针（可选）
+    __gm__ uint64_t* gmScalePtr = nullptr,  // Scale GM 指针（可选）
+    uint64_t splitKIdx = 0)                 // split-K 段索引（可选）
 ```
 功能：执行单个 block 的矩阵乘计算。
 参数说明：
@@ -184,16 +185,18 @@ __aicore__ inline void operator()(
 | gmC | TensorC | C 矩阵输出 Tensor（已 Slice 到当前 block） |
 | blockShape | TupleShape | Block 形状 `(m, n, k, batch)` |
 | gmScalePtr | `__gm__ uint64_t*` | Scale GM 指针（可选，默认 nullptr） |
+| splitKIdx | uint64_t | split-K 段索引：0 为首段（清零 L0C、累加 Bias），splitKNum-1 为末段（触发 fixpipe 搬出）；单段时传默认值 0 |
 
-执行流程：
+执行流程（l0cdb 使能时，段内结构）：
 1. **K 轴外层循环**：按 kL1 切分
 2. **搬运 A/B/Bias 到 L1**：根据 l1Stages 决定缓冲数量；slice 非连续 A 使用原有
    `CopySliceGM2L1`；仅当策略显式指定 `NON_CONTIGUOUS_TYPE_BATCHED_B` 时，batch Layout B 构造与二维 BL1
    共用地址的 batch 视图，并调用一次标准 batched `CopyGM2L1` 沿 N 拼接；默认策略和普通二维 B 保持原连续搬运
-3. **K 轴内层循环**：按 baseK 切分
-4. **搬运 A/B 到 L0**：双缓冲模式
-5. **Mmad 计算**：首次迭代时加载 Bias
-6. **结果搬出**：L0C → GM（通过 Fixpipe）
+3. **M/N 段双循环**：L1 tile 按 baseM×baseN 切分为 mL0Iter×nL0Iter 段，段间 L0C 半区乒乓
+4. **K 轴内层循环**：每段按 baseK 切分
+5. **搬运 A/B 到 L0**：双缓冲模式；Bias 按段 N 偏移切片加载
+6. **Mmad 计算**：每段独立半区累积，Bias 仅首拍累加；split-K 场景首段清零 L0C、末段统一搬出
+7. **结果搬出**：每段 L0C → GM（通过 Fixpipe），末段完成后更新乒乓相位
 
 ## 事件同步
 
@@ -289,13 +292,15 @@ K 轴外层循环：按 kL1 切分
     ↓
 搬运 A、B、Bias 到 L1（多缓冲）
     ↓
-K 轴内层循环：按 baseK 切分
+M/N 段双循环：L1 tile 按 baseM×baseN 切分，段间 L0C 半区乒乓
     ↓
-搬运 A、B 到 L0（双缓冲）
+K 轴内层循环：每段按 baseK 切分
     ↓
-Mmad 计算：C += A × B + Bias（首次迭代）
+搬运 A、B 到 L0（双缓冲）；Bias 按段 N 偏移切片
     ↓
-结果搬出：L0C → GM（Fixpipe）
+Mmad 计算：每段独立半区累积，Bias 仅首拍累加；split-K 首段清零 L0C
+    ↓
+结果搬出：每段 L0C → GM（Fixpipe），末段更新乒乓相位
 ```
 
 ## 性能优化建议
