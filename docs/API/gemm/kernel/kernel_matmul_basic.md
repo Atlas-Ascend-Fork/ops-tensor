@@ -26,8 +26,9 @@ if ASCEND_IS_AIV {
 不支持 workspace，无法存储中间结果，适用于完整 tile 计算场景。
 
 ### 非连续输入
-默认路径不支持带 stride 的非连续输入（仅支持连续 ND/NZ layout）。
+默认路径使用连续ND/NZ layout；非连续输入由`DispatchPolicy::NON_CONTIGUOUS_TYPE`选择。
 当 `DispatchPolicy` 的 `NonContiguousType_` 设置为 `NON_CONTIGUOUS_TYPE_SLICE` 时，支持 A 矩阵 ND slice 非连续输入；该路径通过 `NDSliceLayoutPtn` 构造三维 GM layout，并使用 `CopySliceGM2L1` 完成 A 矩阵 GM->L1 搬运。
+A的batch轴换位复用`PERM_X1`；`B_TRANSPOSE`、`AB_TRANSPOSE`分别表示B换位、A和B同时换位。MBN输出按输入布局显式选择`C_TRANSPOSE`、`AC_TRANSPOSE`、`BC_TRANSPOSE`或`ABC_TRANSPOSE`，不使用位标志组合。逻辑GM stride分别为A `(K,B*K,1)`、NBK B `(K,1,B*K)`、KBN B `(N,B*N,1)`；内轴转置由LayoutA/LayoutB独立表示。
 
 ## 特殊静态常量
 
@@ -35,7 +36,8 @@ if ASCEND_IS_AIV {
 |------|------|
 | TRANS_A | A 矩阵是否转置 |
 | TRANS_B | B 矩阵是否转置 |
-| NON_CONTIGUOUS_TYPE | 非连续类型：0=连续路径，`NoContiguousType::NON_CONTIGUOUS_TYPE_SLICE`=A 矩阵 ND slice 非连续路径 |
+| TRANS_BATCH_A/B/C | 根据非连续类型枚举判断对应矩阵是否batch换轴；C为true时输出MBN，否则输出BMN |
+| NON_CONTIGUOUS_TYPE | 输入与输出的布局组合枚举，见`NoContiguousType` |
 | IS_A_FULL_LOAD | 是否 A 全载模式（FullLoadMode_ == A_FULL_LOAD_MODE） |
 | C0_SIZE_fp16 | Cube 单元大小（FP16 场景，16） |
 | C0_SIZE_fp32 | Cube 单元大小（FP32 场景，8） |
@@ -61,9 +63,14 @@ struct Params {
 | n | int64_t | N 轴尺寸 | 1024 |
 | k | int64_t | K 轴尺寸 | 512 |
 | batch | int64_t | Batch 数量（0 或 1 为单 batch） | 1 |
+| splitB | int64_t | MBN输出的batch切分因子，普通MatMul不传入此项 | 1 |
+
+`LayoutC`保持原ND格式。TBMM根据perm和stride确定输入布局，结合`permY`选择对应的输入输出组合枚举。Kernel分别判断输入和输出的batch换轴，并结合`LayoutA/LayoutB`的矩阵内轴转置属性构造GM布局。`ProblemShape=(M,N,K,B,splitB)`只携带规模及切分信息；MBN按`(B/splitB)*N`计算行stride，拆分后输出为`(S,M,(B/S)*N)`。
 
 #### BlockMmad 参数
 详见 [BlockMmadMatmulBasic Params](../block/block_mmad_matmul_basic.md#params-参数结构)
+
+INT8输出沿用BlockMmad的scale量化，按原batch及列偏移加载scale。
 
 #### BlockScheduler 参数
 详见 [BlockSchedulerMatmulBasic Params](../block/block_scheduler_matmul_basic.md#params-参数结构)

@@ -19,7 +19,7 @@
  *   A (standard):     [batch, m, k]  (row-major)
  *   A (trans_batch_a): [m, batch, k]  (transposed batch dimension)
  *   B:                 [batch, k, n]  (row-major)
- *   C:                 [m, batch, n]  (always transposed batch)
+ *   C:                 [m, batch, n] by default, or [batch, m, n] with bmnOutput
  */
 
 #ifndef K_MAX_SHAPE_DIM
@@ -40,7 +40,7 @@
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_mmad_matmul_basic.h"
 #include "blaze/gemm/block/block_scheduler_matmul_basic.h"
-#include "blaze/gemm/kernel/kernel_tbmm_basic.h"
+#include "blaze/gemm/kernel/kernel_matmul_basic.h"
 #include "blaze/gemm/kernel/kernel_universal.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/utils/common_utils.h"
@@ -80,6 +80,8 @@ struct CliArgs {
     bool transBatchA = false;
     std::string dtype = "float16";
     bool isHf32 = false;
+    bool bmnOutput = false;
+    bool hasBias = false;
 };
 
 static bool ParseBool(const char* s)
@@ -92,7 +94,8 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
 {
     if (argc < 5) {
         std::cerr << "Error: Missing required arguments.\n";
-        std::cerr << "Usage: " << argv[0] << " <m> <k> <n> <batch> [transBatchA] [dtype] [isHf32]\n";
+        std::cerr << "Usage: " << argv[0] << " <m> <k> <n> <batch> [transBatchA] [dtype]"
+                  << " [isHf32] [bmnOutput] [hasBias]\n";
         return false;
     }
 
@@ -109,6 +112,13 @@ static bool ParseCliArgs(int argc, const char** argv, CliArgs& args)
     }
     if (argc >= 8) {
         args.isHf32 = ParseBool(argv[7]);
+    }
+
+    if (argc >= 9) {
+        args.bmnOutput = ParseBool(argv[8]);
+    }
+    if (argc >= 10) {
+        args.hasBias = ParseBool(argv[9]);
     }
 
     if (args.m <= 0 || args.k <= 0 || args.n <= 0 || args.batch <= 0) {
@@ -148,9 +158,9 @@ __global__ __aicore__ void tbmm_basic_kernel(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR c
     using LayoutA = asc::te::nd_ext_layout_ptn;
     using LayoutB = asc::te::nd_ext_layout_ptn;
     using LayoutC = asc::te::nd_ext_layout_ptn;
-    using LayoutBias = asc::te::nd_ext_layout_ptn;
+    using LayoutBias = LayoutC;
 
-    using DispatchPolicy = Blaze::Gemm::MatmulMultiBlockBasic<0, 0, Blaze::Gemm::KernelMmadMultiBlockTBMM,
+    using DispatchPolicy = Blaze::Gemm::MatmulMultiBlockBasic<0, 0, Blaze::Gemm::KernelMmadMultiBlockBasic,
                                                               NON_CONTIGUOUS_TYPE>;
     using BlockMmad = Blaze::Gemm::Block::BlockMmad<DispatchPolicy, A_TYPE, LayoutA, B_TYPE, LayoutB, C_TYPE, LayoutC,
                                                     BIAS_TYPE, LayoutBias>;
@@ -180,16 +190,26 @@ namespace {
 
 template <class A_TYPE, class B_TYPE, class C_TYPE, class BIAS_TYPE, bool TransBatchA>
 void LaunchKernel(int64_t m, int64_t n, int64_t k, int64_t batch, uint8_t* dA, uint8_t* dB, uint8_t* dC, uint8_t* dBias,
-                  uint8_t* dWorkSpace, const TilingConfig& cfg, int64_t blockNum, aclrtStream stream, bool isHf32)
+                  uint8_t* dWorkSpace, const TilingConfig& cfg, int64_t blockNum, aclrtStream stream, bool isHf32,
+                  bool bmnOutput)
 {
     constexpr uint64_t NON_CONTIGUOUS_TYPE = TransBatchA ?
                                                  static_cast<uint64_t>(
                                                      Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_PERM_X1) :
                                                  0ULL;
 
-    tbmm_basic_kernel<A_TYPE, B_TYPE, C_TYPE, BIAS_TYPE, NON_CONTIGUOUS_TYPE>
-        <<<blockNum, 0, stream>>>(dA, dB, dC, dBias, dWorkSpace, m, n, k, batch, 1, cfg.mL1, cfg.nL1, cfg.kL1,
-                                  cfg.baseM, cfg.baseN, cfg.baseK, isHf32);
+    if (bmnOutput) {
+        tbmm_basic_kernel<A_TYPE, B_TYPE, C_TYPE, BIAS_TYPE, NON_CONTIGUOUS_TYPE>
+            <<<blockNum, 0, stream>>>(dA, dB, dC, dBias, dWorkSpace, m, n, k, batch, 1, cfg.mL1, cfg.nL1, cfg.kL1,
+                                      cfg.baseM, cfg.baseN, cfg.baseK, isHf32);
+    } else {
+        constexpr auto nonContiguousType = TransBatchA ?
+                                               Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE :
+                                               Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_C_TRANSPOSE;
+        tbmm_basic_kernel<A_TYPE, B_TYPE, C_TYPE, BIAS_TYPE, static_cast<uint64_t>(nonContiguousType)>
+            <<<blockNum, 0, stream>>>(dA, dB, dC, dBias, dWorkSpace, m, n, k, batch, 1, cfg.mL1, cfg.nL1, cfg.kL1,
+                                      cfg.baseM, cfg.baseN, cfg.baseK, isHf32);
+    }
 }
 
 } // namespace
@@ -218,7 +238,7 @@ static void Run(const CliArgs& args)
     // A size depends on layout (total elements are the same: batch * m * k)
     size_t sizeA = static_cast<size_t>(args.batch) * args.m * args.k * dtypeSize;
     size_t sizeB = static_cast<size_t>(args.batch) * args.k * args.n * dtypeSize;
-    // C is stored as [m, batch, n]
+    // BMN and MBN output layouts have the same element count.
     size_t sizeC = static_cast<size_t>(args.m) * args.batch * args.n * dtypeSize;
 
     size_t workspaceSize = blockNum * tilingCfg.baseM * tilingCfg.baseN * sizeof(float) + RPC_WORKSPACE_PADDING;
@@ -248,8 +268,17 @@ static void Run(const CliArgs& args)
         return;
     }
 
-    // Bias is not supported (BlockEpilogueEmpty — bias is never applied)
     uint8_t* deviceBias = nullptr;
+    if (args.hasBias) {
+        size_t sizeBias = static_cast<size_t>(args.n) * sizeof(float);
+        std::vector<float> hostBias(args.n);
+        if (!ReadFile(inputDir + "/input_bias.bin", hostBias.data(), sizeBias)) {
+            std::cerr << "Failed to read bias" << std::endl;
+            return;
+        }
+        ACL_CHECK(aclrtMalloc(reinterpret_cast<void**>(&deviceBias), sizeBias, ACL_MEM_MALLOC_HUGE_FIRST));
+        ACL_CHECK(aclrtMemcpy(deviceBias, sizeBias, hostBias.data(), sizeBias, ACL_MEMCPY_HOST_TO_DEVICE));
+    }
 
     // Allocate device buffers
     uint8_t* deviceA{nullptr};
@@ -281,7 +310,7 @@ static void Run(const CliArgs& args)
               << std::endl;
     std::cout << "  BlockNum   : " << blockNum << std::endl;
     std::cout << "  Workspace  : " << (workspaceSize / 1024) << " KB" << std::endl;
-    std::cout << "  C layout   : [m, batch, n] (transposed batch)" << std::endl;
+    std::cout << "  C layout   : " << (args.bmnOutput ? "[batch, m, n]" : "[m, batch, n]") << std::endl;
     std::cout << "  A layout   : " << (args.transBatchA ? "[m, batch, k] (transposed batch)" : "[batch, m, k]")
               << std::endl;
     std::cout << "============================================================" << std::endl;
@@ -290,31 +319,31 @@ static void Run(const CliArgs& args)
         if (args.transBatchA) {
             LaunchKernel<float, float, float, float, true>(args.m, args.n, args.k, args.batch, deviceA, deviceB,
                                                            deviceC, deviceBias, deviceWorkspace, tilingCfg, blockNum,
-                                                           stream, args.isHf32);
+                                                           stream, args.isHf32, args.bmnOutput);
         } else {
             LaunchKernel<float, float, float, float, false>(args.m, args.n, args.k, args.batch, deviceA, deviceB,
                                                             deviceC, deviceBias, deviceWorkspace, tilingCfg, blockNum,
-                                                            stream, args.isHf32);
+                                                            stream, args.isHf32, args.bmnOutput);
         }
     } else if (args.dtype == "bfloat16") {
         if (args.transBatchA) {
-            LaunchKernel<bfloat16_t, bfloat16_t, bfloat16_t, bfloat16_t, true>(
+            LaunchKernel<bfloat16_t, bfloat16_t, bfloat16_t, float, true>(
                 args.m, args.n, args.k, args.batch, deviceA, deviceB, deviceC, deviceBias, deviceWorkspace, tilingCfg,
-                blockNum, stream, args.isHf32);
+                blockNum, stream, args.isHf32, args.bmnOutput);
         } else {
-            LaunchKernel<bfloat16_t, bfloat16_t, bfloat16_t, bfloat16_t, false>(
+            LaunchKernel<bfloat16_t, bfloat16_t, bfloat16_t, float, false>(
                 args.m, args.n, args.k, args.batch, deviceA, deviceB, deviceC, deviceBias, deviceWorkspace, tilingCfg,
-                blockNum, stream, args.isHf32);
+                blockNum, stream, args.isHf32, args.bmnOutput);
         }
     } else {
         if (args.transBatchA) {
-            LaunchKernel<half, half, half, half, true>(args.m, args.n, args.k, args.batch, deviceA, deviceB, deviceC,
-                                                       deviceBias, deviceWorkspace, tilingCfg, blockNum, stream,
-                                                       args.isHf32);
-        } else {
-            LaunchKernel<half, half, half, half, false>(args.m, args.n, args.k, args.batch, deviceA, deviceB, deviceC,
+            LaunchKernel<half, half, half, float, true>(args.m, args.n, args.k, args.batch, deviceA, deviceB, deviceC,
                                                         deviceBias, deviceWorkspace, tilingCfg, blockNum, stream,
-                                                        args.isHf32);
+                                                        args.isHf32, args.bmnOutput);
+        } else {
+            LaunchKernel<half, half, half, float, false>(args.m, args.n, args.k, args.batch, deviceA, deviceB, deviceC,
+                                                         deviceBias, deviceWorkspace, tilingCfg, blockNum, stream,
+                                                         args.isHf32, args.bmnOutput);
         }
     }
 
@@ -330,6 +359,9 @@ static void Run(const CliArgs& args)
     }
 
     // Cleanup
+    if (deviceBias != nullptr) {
+        ACL_CHECK(aclrtFree(deviceBias));
+    }
     ACL_CHECK(aclrtFree(deviceA));
     ACL_CHECK(aclrtFree(deviceB));
     ACL_CHECK(aclrtFree(deviceC));

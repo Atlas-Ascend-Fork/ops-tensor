@@ -19,7 +19,7 @@ IterBatch MatMul Kernel，支持 ON_THE_FLY（仅 AIC）和 ND_FIXPIPE_1_2（AIC
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| problemShape | ProblemShape | 问题规模 `(m, n, k, batch)`，A/B/C 共用 batch 维 |
+| problemShape | ProblemShape | 问题规模 `(m, n, k, batch)`，BMM与TBMM共用，A/B/C的batch维一致 |
 | mmadParams | BlockMmadParams | GM 地址（a/b/c/bias，bias 为 nullptr 表示无 bias）与 m/n/k、baseM/baseN/baseK、iterBatchL1/iterBatchL0 |
 | epilogueParams | BlockEpilogueParams | 仅 ND_FIXPIPE_1_2 需要设置 `cGmAddr`（ON_THE_FLY 使用 BlockEpilogueEmpty，无需设置） |
 | schedulerParams | BlockSchedulerParams | 见 [BlockSchedulerMatmulIterBatch Params](../block/block_scheduler_matmul_iterbatch.md#params-参数结构)，含 isHf32/l2CacheDisable |
@@ -30,4 +30,7 @@ IterBatch MatMul Kernel，支持 ON_THE_FLY（仅 AIC）和 ND_FIXPIPE_1_2（AIC
 - A/B/C batch 维一致；bias 广播至所有 batch
 - 输出模式：ON_THE_FLY（AIC_ONLY）/ ND_FIXPIPE_1_2（MIX_AIC_1_2）
 - 多核调度：`tileNum = CeilDiv(batch, iterBatchL1)`，每个核从自身 `blockIdx` 起以 `blockNum` 为步长处理 tile，尾组 batch 为余数
-- B 非连续 innerBatch 暂不支持
+- TBMM的iterbatch准入和tiling计算继承BMM，补充MBK A布局；支持ND的普通矩阵内轴转置、MBK A、B单非连续和AB双非连续，NZ由basic承接。
+- `NonContiguousType`复用NONE、PERM_X1、AB_TRANSPOSE和B_TRANSPOSE选择输入布局；LayoutA/LayoutB独立表示矩阵内轴转置。BMN使用输入类型，MBN显式选择`C/AC/BC/ABC_TRANSPOSE`；TBMM的scale/batch拆分沿用basic路径，不进入iterbatch。
+- A的MBK布局GM逻辑stride为`(K,B*K,1)`；B的GM逻辑stride：NBK为`(K,1,B*K)`，KBN为`(N,B*N,1)`。
+- L1/L0 batch数、基础块和Fixpipe选择沿用BMM；TBMM只补充非连续B的batch边界适配。

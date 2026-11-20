@@ -172,9 +172,17 @@ enum class QuantMode : uint32_t {
 };
 
 enum class NoContiguousType : uint64_t {
+    NON_CONTIGUOUS_TYPE_NONE = 0UL,
     NON_CONTIGUOUS_TYPE_SLICE = 1UL,
     NON_CONTIGUOUS_TYPE_PERM_X1 = 2UL,
     NON_CONTIGUOUS_TYPE_BATCHED_B = 3UL,
+    NON_CONTIGUOUS_TYPE_AB_TRANSPOSE = 4UL,
+    NON_CONTIGUOUS_TYPE_B_TRANSPOSE = 5UL,
+    // Explicit input/output layout combinations; these values are not bit flags.
+    NON_CONTIGUOUS_TYPE_C_TRANSPOSE = 6UL,
+    NON_CONTIGUOUS_TYPE_AC_TRANSPOSE = 7UL,
+    NON_CONTIGUOUS_TYPE_BC_TRANSPOSE = 8UL,
+    NON_CONTIGUOUS_TYPE_ABC_TRANSPOSE = 9UL,
 };
 
 template <typename...>

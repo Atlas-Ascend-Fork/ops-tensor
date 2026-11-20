@@ -45,7 +45,7 @@ public:
     __aicore__ inline void Init(const Params& params);
     __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
     __aicore__ inline void operator()(int64_t offsetC, uint64_t baseM, uint64_t baseN, uint64_t curIterBatchL1,
-                                      uint64_t mainIterBatchL0);
+                                      uint64_t mainIterBatchL0, uint64_t innerBatch = 1);
 
 private:
     uint64_t m_{0};
@@ -83,8 +83,11 @@ template <typename DataTypeOut_, typename DataTypeIn_>
 __aicore__ inline void BlockEpilogueIterbatch<DataTypeOut_, DataTypeIn_>::operator()(int64_t offsetC, uint64_t baseM,
                                                                                      uint64_t baseN,
                                                                                      uint64_t curIterBatchL1,
-                                                                                     uint64_t mainIterBatchL0)
+                                                                                     uint64_t mainIterBatchL0,
+                                                                                     uint64_t innerBatch)
 {
+    const uint64_t rowStride = innerBatch * n_;
+    const uint64_t batchStride = innerBatch == 1 ? m_ * n_ : n_;
     uint64_t mL0Cnt = Gemm::CeilDiv(m_, baseM);
     uint64_t nL0Cnt = Gemm::CeilDiv(n_, baseN);
     uint64_t stepIterBatchL1L0 = Gemm::CeilDiv(curIterBatchL1, mainIterBatchL0);
@@ -97,23 +100,26 @@ __aicore__ inline void BlockEpilogueIterbatch<DataTypeOut_, DataTypeIn_>::operat
                 // Each sub-block consumes only the tiles routed into its own UB window (tile parity).
                 if ((l0CEventId_ & 0x1) == subBlockIdx_) {
                     uint64_t curML0 = (iterML0 == mL0Cnt - 1) ? (m_ - (mL0Cnt - 1) * baseM) : baseM;
-                    uint64_t offsetCGMOfCopyOut = iter1 * mainIterBatchL0 * m_ * n_ + iterML0 * baseM * n_ +
-                                                  iterNL0 * baseN;
-                    // Compact frames: UB row pitch is the fixpipe frame width (alignNL0), GM row pitch is n_.
-                    uint64_t rows = curIterBatchL0 * curML0;
+                    // BMN copies all frames together; MBN writes one batch at a time.
+                    const uint64_t copyBatch = innerBatch == 1 ? curIterBatchL0 : 1UL;
+                    uint64_t rows = copyBatch * curML0;
                     uint64_t alignNL0 = Gemm::CeilAlign(curNL0, Gemm::BLOCK_CUBE);
-                    auto ubOut = asc::te::make_tensor(
-                        asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(0),
-                        Gemm::MakeNDExtLayout<DataTypeIn>(static_cast<int64_t>(rows), static_cast<int64_t>(curNL0),
-                                                          static_cast<int64_t>(alignNL0)));
-                    auto gmOut = asc::te::make_tensor(
-                        asc::te::make_mem_ptr<asc::te::location::gm>(cGmAddr_ + static_cast<uint64_t>(offsetC) +
-                                                                     offsetCGMOfCopyOut),
-                        Gemm::MakeNDExtLayout<DataTypeOut>(static_cast<int64_t>(rows), static_cast<int64_t>(curNL0),
-                                                           static_cast<int64_t>(n_)));
                     auto copyUB2GM = asc::te::make_copy(asc::te::copy_ub_to_gm{});
                     Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(0x0);
-                    asc::te::copy(copyUB2GM, gmOut, ubOut);
+                    for (uint64_t batchIdx = 0; batchIdx < curIterBatchL0; batchIdx += copyBatch) {
+                        uint64_t offsetCGMOfCopyOut = (iter1 * mainIterBatchL0 + batchIdx) * batchStride +
+                                                      iterML0 * baseM * rowStride + iterNL0 * baseN;
+                        auto ubOut = asc::te::make_tensor(
+                            asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(batchIdx * curML0 * alignNL0),
+                            Gemm::MakeNDExtLayout<DataTypeIn>(static_cast<int64_t>(rows), static_cast<int64_t>(curNL0),
+                                                              static_cast<int64_t>(alignNL0)));
+                        auto gmOut = asc::te::make_tensor(
+                            asc::te::make_mem_ptr<asc::te::location::gm>(cGmAddr_ + static_cast<uint64_t>(offsetC) +
+                                                                         offsetCGMOfCopyOut),
+                            Gemm::MakeNDExtLayout<DataTypeOut>(static_cast<int64_t>(rows), static_cast<int64_t>(curNL0),
+                                                               static_cast<int64_t>(rowStride)));
+                        asc::te::copy(copyUB2GM, gmOut, ubOut);
+                    }
                     // Suppress the release after this sub-block's last tile so every set/wait pair closes exactly.
                     if (l0CEventId_ + SYNC_OFFSET < totalTiles_) {
                         Gemm::Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(SYNC_OFFSET);

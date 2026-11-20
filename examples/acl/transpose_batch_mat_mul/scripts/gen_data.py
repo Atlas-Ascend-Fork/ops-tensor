@@ -41,9 +41,11 @@ class GemmGenConfig:
     batch: int
     trans_batch_a: bool
     dtype: torch.dtype
+    bmn_output: bool = False
+    has_bias: bool = False
 
 
-def write_artifacts(base_dir, a_data, b_data, out, dtype):
+def write_artifacts(base_dir, a_data, b_data, out, dtype, bias=None):
     input_dir = os.path.join(base_dir, "input")
     output_dir = os.path.join(base_dir, "output")
     os.makedirs(input_dir, exist_ok=True)
@@ -53,6 +55,8 @@ def write_artifacts(base_dir, a_data, b_data, out, dtype):
     a_data.view(vt).numpy().tofile(os.path.join(input_dir, "input_a.bin"))
     b_data.view(vt).numpy().tofile(os.path.join(input_dir, "input_b.bin"))
     out.view(vt).numpy().tofile(os.path.join(output_dir, "cpu_output.bin"))
+    if bias is not None:
+        bias.numpy().tofile(os.path.join(input_dir, "input_bias.bin"))
 
 
 def gen_golden_data(cfg: GemmGenConfig):
@@ -65,10 +69,16 @@ def gen_golden_data(cfg: GemmGenConfig):
         np.random.uniform(lo, hi, (cfg.batch, cfg.k, cfg.n)).astype(np.float32)
     ).to(cfg.dtype)
 
-    out_logical = torch.matmul(a_logical.float(), b.float()).to(cfg.dtype)
+    bias = torch.arange(cfg.n, dtype=torch.float32) / 8 if cfg.has_bias else None
+    out_logical = torch.matmul(a_logical.float(), b.float())
+    if bias is not None:
+        out_logical += bias
+    out_logical = out_logical.to(cfg.dtype)
 
-    # C is always stored in transposed-batch layout: [m, batch, n]
-    out_stored = out_logical.transpose(0, 1).contiguous()
+    # Keep MBN by default; BMN writes the logical batch dimension first.
+    out_stored = (
+        out_logical if cfg.bmn_output else out_logical.transpose(0, 1).contiguous()
+    )
 
     # A storage layout depends on trans_batch_a
     if cfg.trans_batch_a:
@@ -76,14 +86,16 @@ def gen_golden_data(cfg: GemmGenConfig):
     else:
         a_stored = a_logical  # [batch, m, k]
 
-    write_artifacts(os.getcwd(), a_stored, b, out_stored, cfg.dtype)
+    write_artifacts(os.getcwd(), a_stored, b, out_stored, cfg.dtype, bias)
 
     print("Data generated successfully!")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (5, 6, 7):
-        print("Usage: python3 gen_data.py m k n batch [trans_batch_a] [dtype]")
+    if len(sys.argv) not in range(5, 10):
+        print(
+            "Usage: python3 gen_data.py m k n batch [trans_batch_a] [dtype] [bmn_output] [bias]"
+        )
         sys.exit(1)
 
     m = int(sys.argv[1])
@@ -112,6 +124,8 @@ if __name__ == "__main__":
         batch=batch,
         trans_batch_a=trans_batch_a,
         dtype=DATA_TYPE,
+        bmn_output=len(sys.argv) >= 8 and sys.argv[7].lower() == "true",
+        has_bias=len(sys.argv) >= 9 and sys.argv[8].lower() == "true",
     )
 
     gen_golden_data(cfg)

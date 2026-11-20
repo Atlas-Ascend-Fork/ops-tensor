@@ -2,7 +2,7 @@
 > [代码位置](../../../../include/blaze/epilogue/block/block_epilogue_iterbatch.h)
 
 ## 功能说明
-IterBatch ND_FIXPIPE_1_2 模式的 AIV 侧后处理 Block。从 AIC 经多帧 fixpipe 写入 UB 的批量矩阵乘结果中，按奇偶门控消费路由到自身 UB 窗口的 tile，一次搬出整个 tile 并以 ND 格式输出到 GM（自动跳过 batch 帧间和行尾的 padding）。
+IterBatch ND_FIXPIPE_1_2 模式的 AIV 侧后处理 Block。从 AIC 经多帧 fixpipe 写入 UB 的批量矩阵乘结果中，按奇偶门控消费路由到自身 UB 窗口的 tile，按ND格式输出到GM（自动跳过行尾padding）。BMN保持整tile批量搬出；MBN按batch帧搬出，复用相同同步协议。可选`innerBatch`指定MBN输出组内的batch数（未拆分时为B，拆分时为B/S），默认1保持原BMN行为。
 
 ## 同步协议
 

@@ -15,7 +15,7 @@ struct MatmulIterBatch {
     using ScheduleType = KernelIterBatch;
     static constexpr MatMulL0C2Out FIXP_OPT = FixpOpt_;
     static constexpr uint64_t FUSED_OP_TYPE = FusedOpType_;          // 预留，暂无消费者
-    static constexpr uint64_t NON_CONTIGUOUS_TYPE = NonContiguousType_;  // 预留，暂无消费者
+    static constexpr uint64_t NON_CONTIGUOUS_TYPE = NonContiguousType_;  // kernel 构造 GM 非连续布局
 };
 ```
 
@@ -37,4 +37,4 @@ L0C ──(ON_THE_FLY: 多帧 fixpipe→GM / ND_FIXPIPE_1_2: 多帧 fixpipe→UB
 
 - **L1→L0 批量拷贝**：batch 轴折叠为单条多帧 load_data（`copy_l1_to_l0a/l0b`，`batchCnt == 1` 退化为单帧），无逐 batch 回退分支。折叠拷贝要求源数据在 L1 中连续：多 batch 进 L0（`iterBatchL0 > 1`）时 base 块须覆盖全对齐 m/n/k；M/N/K 需要分块时 `iterBatchL0` 必须为 1。此约束由 host tiling 保证。
 - **L0C 多帧**：`iterBatchL0` 个 batch 的结果以 NZ(batch, m, n) 帧布局驻留 L0C，一次 fixpipe 全部搬出。
-- **B 非连续 innerBatch**：暂不支持。
+- **非连续布局**：MBK A、NBK/KBN B 由 kernel 描述 GM stride，block 通过现有多 batch copy 搬入连续的 L1 帧。

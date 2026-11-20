@@ -13,6 +13,7 @@
  * \brief TransposeBatchMatMul Kernel UT测试用例
  */
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -72,6 +73,85 @@ protected:
     GM_ADDR workspaceGM;
     GM_ADDR tilingGM;
     GM_ADDR scaleGM;
+
+    template <typename T>
+    T* Allocate(size_t count, GM_ADDR& buffer)
+    {
+        if (buffer != nullptr) {
+            AscendC::GmFree(buffer);
+        }
+        buffer = reinterpret_cast<GM_ADDR>(AscendC::GmAlloc(count * sizeof(T)));
+        if (buffer != nullptr) {
+            std::memset(buffer, 0, count * sizeof(T));
+        }
+        return reinterpret_cast<T*>(buffer);
+    }
+
+    template <typename T, typename BiasT, bool IterBatch, uint64_t NonContiguousType, bool TransA, bool TransB,
+              bool WeightNz = false, bool SplitK = false,
+              Blaze::Gemm::MatMulL0C2Out L0C2OUT_MODEL = Blaze::Gemm::MatMulL0C2Out::ON_THE_FLY>
+    void RunLayoutCase(bool hasBias = true, bool splitL0 = false, bool hf32 = false, uint64_t batchSplitFactor = 1)
+    {
+        TbmmBasicTilingData cfg;
+        cfg.m = 17;
+        cfg.n = 16;
+        cfg.k = 32;
+        cfg.batch = 7;
+        cfg.baseM = 32;
+        cfg.baseN = 16;
+        cfg.baseK = 32;
+        cfg.iterBatchL1 = 3;
+        cfg.iterBatchL0 = 2;
+        cfg.l1BufferNum = 2;
+        cfg.isHf32 = hf32;
+        cfg.batchSplitFactor = batchSplitFactor;
+        if constexpr (L0C2OUT_MODEL == Blaze::Gemm::MatMulL0C2Out::ND_FIXPIPE_1_2) {
+            cfg.n = 129;
+            cfg.baseN = 144;
+        }
+        if (batchSplitFactor > 1) {
+            cfg.batch = 6;
+            const auto innerBatch = cfg.batch / batchSplitFactor;
+            while (innerBatch % cfg.iterBatchL1 != 0) {
+                --cfg.iterBatchL1;
+            }
+            cfg.iterBatchL0 = std::min(cfg.iterBatchL0, cfg.iterBatchL1);
+        }
+        if (splitL0) {
+            cfg.baseM = 16;
+            cfg.baseK = 16;
+            cfg.iterBatchL0 = 1;
+        }
+        const auto batch = cfg.batch;
+        const auto m = cfg.m;
+        const auto n = cfg.n;
+        const auto k = cfg.k;
+        auto* a = Allocate<T>(batch * m * k, aGM);
+        auto* b = Allocate<T>(batch * k * n, bGM);
+        auto* c = Allocate<T>(batch * m * n, cGM);
+        auto* bias = hasBias ? Allocate<BiasT>(n, biasGM) : nullptr;
+        ASSERT_NE(a, nullptr);
+        ASSERT_NE(b, nullptr);
+        ASSERT_NE(c, nullptr);
+        if (hasBias) {
+            ASSERT_NE(bias, nullptr);
+        }
+        cfg.mL1 = cfg.baseM;
+        cfg.nL1 = cfg.baseN;
+        cfg.kL1 = cfg.baseK;
+        cfg.innerBatch = cfg.batch;
+        auto* tiling = Allocate<TbmmBasicTilingData>(1, tilingGM);
+        ASSERT_NE(tiling, nullptr);
+        std::memcpy(tiling, &cfg, sizeof(cfg));
+
+        constexpr auto opType = IterBatch ? OP_TYPE_TBMM_ITER_BATCH :
+                                            (SplitK ? OP_TYPE_TBMM_BASIC_SPLIT_K : OP_TYPE_TBMM_BASIC);
+        AscendC::SetKernelMode(KernelMode::MIX_MODE);
+        auto kernelFunc = transpose_batch_mat_mul_kernel_entry<opType, T, T, T, BiasT, NonContiguousType, TransA,
+                                                               TransB, WeightNz, L0C2OUT_MODEL>;
+        ASSERT_TRUE(KERNEL_RUN_KF(kernelFunc, 1, aGM, bGM, biasGM, cGM, workspaceGM, tilingGM, scaleGM))
+            << "Kernel execution failed: one or more cores exited with non-zero status";
+    }
 };
 
 constexpr size_t WORKSPACE_TILE_SIZE = 256UL * 256 * 4;
@@ -236,7 +316,7 @@ TEST_F(TbmmTest, Test_FP16_TransBatchA)
 
     auto kernelFunc = transpose_batch_mat_mul_kernel_entry<
         OP_TYPE_TBMM_TRANS_BATCH_A, half, half, half, half,
-        static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_PERM_X1)>;
+        static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE)>;
     ASSERT_TRUE(KERNEL_RUN_KF(kernelFunc, blockNum, aGM, bGM, biasGM, cGM, workspaceGM, tilingGM, nullptr))
         << "Kernel execution failed: one or more cores exited with non-zero status";
 }
@@ -578,4 +658,170 @@ TEST_F(TbmmTest, Test_FP16_BatchSplitFactor)
     auto kernelFunc = transpose_batch_mat_mul_kernel_entry<OP_TYPE_TBMM_BASIC, half, half, half, half>;
     ASSERT_TRUE(KERNEL_RUN_KF(kernelFunc, blockNum, aGM, bGM, biasGM, cGM, workspaceGM, tilingGM, nullptr))
         << "Kernel execution failed: one or more cores exited with non-zero status";
+}
+
+TEST_F(TbmmTest, Test_MbkBknBasic)
+{
+    RunLayoutCase<half, float, false, static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_PERM_X1),
+                  false, false, false>();
+}
+
+TEST_F(TbmmTest, Test_MbkNbkBasic)
+{
+    RunLayoutCase<bfloat16_t, float, false,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AB_TRANSPOSE), false, true,
+                  false>();
+}
+
+TEST_F(TbmmTest, Test_BkmNbkBasic)
+{
+    RunLayoutCase<half, float, false,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), true, true,
+                  false>();
+}
+
+TEST_F(TbmmTest, Test_BkmNbkIterBatch)
+{
+    RunLayoutCase<half, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), true, true,
+                  false>();
+}
+
+TEST_F(TbmmTest, Test_BkmKbnBasic)
+{
+    RunLayoutCase<half, float, false,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), true, false,
+                  false>();
+}
+
+TEST_F(TbmmTest, Test_BkmKbnIterBatch)
+{
+    RunLayoutCase<half, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), true, false,
+                  false>();
+}
+
+TEST_F(TbmmTest, Test_BkmZnBasic)
+{
+    RunLayoutCase<bfloat16_t, float, false,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_NONE), true, true, true>();
+}
+
+TEST_F(TbmmTest, Test_MbkNzBasic)
+{
+    RunLayoutCase<bfloat16_t, float, false,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_PERM_X1), false, false,
+                  true>();
+}
+
+TEST_F(TbmmTest, Test_IterBatchNoBiasAndL0Split)
+{
+    RunLayoutCase<half, half, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), false, true>(
+        false, true);
+}
+
+TEST_F(TbmmTest, Test_Fp32KeepDtype)
+{
+    RunLayoutCase<float, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), true, false>();
+}
+
+TEST_F(TbmmTest, Test_Fp32Hf32)
+{
+    RunLayoutCase<float, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), true, true>(
+        true, false, true);
+}
+
+TEST_F(TbmmTest, Test_MbnBf16WithFp32Bias)
+{
+    RunLayoutCase<bfloat16_t, float, false,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE), false,
+                  false>();
+}
+
+TEST_F(TbmmTest, Test_BatchSplitWithoutBias)
+{
+    for (uint64_t split : {2UL, 3UL}) {
+        RunLayoutCase<bfloat16_t, float, false,
+                      static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE), false,
+                      false>(false, false, false, split);
+    }
+}
+
+TEST_F(TbmmTest, Test_MbnSplitKWithFp32Bias)
+{
+    RunLayoutCase<bfloat16_t, float, false,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE), false, false,
+                  false, true>();
+}
+
+TEST_F(TbmmTest, Test_BmnBkmNbkSplitKWithFp32Bias)
+{
+    RunLayoutCase<float, float, false,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), true, true,
+                  false, true>();
+}
+
+TEST_F(TbmmTest, Test_BmnMbkKbnSplitKWithFp32Bias)
+{
+    RunLayoutCase<float, float, false,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AB_TRANSPOSE), false, false,
+                  false, true>();
+}
+
+TEST_F(TbmmTest, Test_BkmNbkIterBatchFixpipe)
+{
+    RunLayoutCase<half, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), true, true,
+                  false, false, Blaze::Gemm::MatMulL0C2Out::ND_FIXPIPE_1_2>(false, true);
+}
+
+TEST_F(TbmmTest, Test_BkmKbnIterBatchFixpipe)
+{
+    RunLayoutCase<bfloat16_t, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE), true, false,
+                  false, false, Blaze::Gemm::MatMulL0C2Out::ND_FIXPIPE_1_2>();
+}
+
+TEST_F(TbmmTest, Test_MbnIterBatchNoBias)
+{
+    RunLayoutCase<half, half, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_C_TRANSPOSE), false, false>(
+        false, true);
+}
+
+TEST_F(TbmmTest, Test_MbnIterBatchNdFixpipe)
+{
+    RunLayoutCase<bfloat16_t, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_C_TRANSPOSE), false, true,
+                  false, false, Blaze::Gemm::MatMulL0C2Out::ND_FIXPIPE_1_2>();
+}
+
+TEST_F(TbmmTest, Test_MbkBknIterBatch)
+{
+    RunLayoutCase<half, float, true, static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_PERM_X1),
+                  false, false>();
+}
+
+TEST_F(TbmmTest, Test_MbkNbkIterBatch)
+{
+    RunLayoutCase<bfloat16_t, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AB_TRANSPOSE), false,
+                  true>();
+}
+
+TEST_F(TbmmTest, Test_MbkKbnIterBatchFixpipe)
+{
+    RunLayoutCase<bfloat16_t, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AB_TRANSPOSE), false, false,
+                  false, false, Blaze::Gemm::MatMulL0C2Out::ND_FIXPIPE_1_2>();
+}
+
+TEST_F(TbmmTest, Test_MbkMbnIterBatchFixpipe)
+{
+    RunLayoutCase<half, float, true,
+                  static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE), false, true,
+                  false, false, Blaze::Gemm::MatMulL0C2Out::ND_FIXPIPE_1_2>();
 }

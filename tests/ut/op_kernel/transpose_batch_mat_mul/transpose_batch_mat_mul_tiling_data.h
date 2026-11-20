@@ -54,5 +54,7 @@ struct TbmmBasicTilingData {
     uint32_t sliceM = 1;
     uint32_t srcNdStride = 1;
     uint32_t innerBatch = 1;
+    uint32_t iterBatchL1 = 1;
+    uint32_t iterBatchL0 = 1;
 };
 #pragma pack(pop)

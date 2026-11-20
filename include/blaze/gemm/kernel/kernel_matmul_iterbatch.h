@@ -83,9 +83,9 @@ public:
             return;
         }
         Blaze::Gemm::SetHF32(params.schedulerParams.isHf32);
-        auto layoutA = MakeLayoutA{}(b_, m_, k_);
-        auto layoutB = MakeLayoutB{}(b_, k_, n_);
-        auto layoutC = MakeLayoutC{}(b_, m_, n_);
+        auto layoutA = MakeLayoutAGm();
+        auto layoutB = MakeLayoutBGm();
+        auto layoutC = MakeLayoutCGm();
         auto layoutBias = MakeLayoutBias{}(1L, n_);
         auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aGmAddr_), layoutA);
         auto gmB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(bGmAddr_), layoutB);
@@ -109,8 +109,7 @@ public:
             epilogueParams.totalTiles = totalTiles;
             epilogueOp.Init(epilogueParams);
         }
-        BlockMmadParams mmadParams = params.mmadParams;
-        blockMmadOp.Init(mmadParams);
+        blockMmadOp.Init(params.mmadParams);
         uint64_t firstIterBatchL1 = static_cast<uint64_t>(asc::te::get<MNK_B>(bs.GetBlockShape(curBlockIdx)));
         auto gmCurA = gmA.slice(
             asc::te::make_coord(asc::te::get<MNK_B>(bs.GetBlockCoord(curBlockIdx)), asc::te::make_coord(0, 0)),
@@ -120,14 +119,14 @@ public:
             asc::te::make_shape(firstIterBatchL1, asc::te::make_shape(k_, n_)));
         for (int64_t blockIdx = curBlockIdx; blockIdx < blockNums; blockIdx += blockNum) {
             uint64_t curIterBatchL1 = static_cast<uint64_t>(asc::te::get<MNK_B>(bs.GetBlockShape(blockIdx)));
+            const auto batch = static_cast<uint64_t>(asc::te::get<MNK_B>(bs.GetBlockCoord(blockIdx)));
             bool isFinalRound = blockIdx + blockNum >= blockNums;
             if ASCEND_IS_NOT_AIV {
                 int64_t nextIdx = isFinalRound ? blockIdx : blockIdx + blockNum;
                 bool isPreLoadRound = blockIdx == curBlockIdx;
                 uint64_t nextIterBatchL1 = static_cast<uint64_t>(asc::te::get<MNK_B>(bs.GetBlockShape(nextIdx)));
-                auto cCur = gmC.slice(
-                    asc::te::make_coord(asc::te::get<MNK_B>(bs.GetBlockCoord(blockIdx)), asc::te::make_coord(0, 0)),
-                    asc::te::make_shape(curIterBatchL1, asc::te::make_shape(m_, n_)));
+                auto cCur = gmC.slice(asc::te::make_coord(batch, asc::te::make_coord(0, 0)),
+                                      asc::te::make_shape(curIterBatchL1, asc::te::make_shape(m_, n_)));
                 auto gmNextA = gmA.slice(
                     asc::te::make_coord(asc::te::get<MNK_B>(bs.GetBlockCoord(nextIdx)), asc::te::make_coord(0, 0)),
                     asc::te::make_shape(nextIterBatchL1, asc::te::make_shape(m_, k_)));
@@ -139,8 +138,14 @@ public:
             }
             if constexpr (BlockMmad::IS_MIX) {
                 if ASCEND_IS_AIV {
-                    epilogueOp(asc::te::get<MNK_B>(bs.GetBlockCoord(blockIdx)) * m_ * n_, params.schedulerParams.baseM,
-                               params.schedulerParams.baseN, curIterBatchL1, params.schedulerParams.iterBatchL0);
+                    const uint64_t offsetC = TRANS_BATCH_C ? batch * n_ : batch * m_ * n_;
+                    if constexpr (TRANS_BATCH_C) {
+                        epilogueOp(offsetC, params.schedulerParams.baseM, params.schedulerParams.baseN, curIterBatchL1,
+                                   params.schedulerParams.iterBatchL0, b_);
+                    } else {
+                        epilogueOp(offsetC, params.schedulerParams.baseM, params.schedulerParams.baseN, curIterBatchL1,
+                                   params.schedulerParams.iterBatchL0);
+                    }
                 }
             }
         }
@@ -148,6 +153,56 @@ public:
     }
 
 private:
+    __aicore__ inline auto MakeLayoutAGm()
+    {
+        if constexpr (TRANS_BATCH_A) {
+            // MBK: logical (B,M,K) strides are (K,B*K,1).
+            return asc::te::make_pattern_layout<LayoutA, asc::te::layout_trait_default<AType>>(
+                asc::te::make_shape(b_, asc::te::make_shape(asc::te::make_shape(asc::te::_1{}, m_),
+                                                            asc::te::make_shape(asc::te::_1{}, k_))),
+                asc::te::make_stride(k_, asc::te::make_stride(asc::te::make_stride(asc::te::_0{}, b_ * k_),
+                                                              asc::te::make_stride(asc::te::_0{}, asc::te::_1{}))));
+        } else {
+            return MakeLayoutA{}(b_, m_, k_);
+        }
+    }
+
+    __aicore__ inline auto MakeLayoutBGm()
+    {
+        if constexpr (TRANS_BATCH_B) {
+            auto shape = asc::te::make_shape(b_, asc::te::make_shape(asc::te::make_shape(asc::te::_1{}, k_),
+                                                                     asc::te::make_shape(asc::te::_1{}, n_)));
+            if constexpr (TRANS_B) {
+                // NBK: logical (B,K,N) strides are (K,1,B*K).
+                auto matrixStride = asc::te::make_stride(asc::te::make_stride(asc::te::_0{}, asc::te::_1{}),
+                                                         asc::te::make_stride(asc::te::_0{}, b_ * k_));
+                return asc::te::make_pattern_layout<LayoutB, asc::te::layout_trait_default<BType>>(
+                    shape, asc::te::make_stride(k_, matrixStride));
+            } else {
+                // KBN: logical (B,K,N) strides are (N,B*N,1).
+                auto matrixStride = asc::te::make_stride(asc::te::make_stride(asc::te::_0{}, b_ * n_),
+                                                         asc::te::make_stride(asc::te::_0{}, asc::te::_1{}));
+                return asc::te::make_pattern_layout<LayoutB, asc::te::layout_trait_default<BType>>(
+                    shape, asc::te::make_stride(n_, matrixStride));
+            }
+        } else {
+            return MakeLayoutB{}(b_, k_, n_);
+        }
+    }
+
+    __aicore__ inline auto MakeLayoutCGm()
+    {
+        if constexpr (TRANS_BATCH_C) {
+            return asc::te::make_pattern_layout<LayoutC, asc::te::layout_trait_default<CType>>(
+                asc::te::make_shape(b_, asc::te::make_shape(asc::te::make_shape(asc::te::_1{}, m_),
+                                                            asc::te::make_shape(asc::te::_1{}, n_))),
+                asc::te::make_stride(n_, asc::te::make_stride(asc::te::make_stride(asc::te::_0{}, b_ * n_),
+                                                              asc::te::make_stride(asc::te::_0{}, asc::te::_1{}))));
+        } else {
+            return MakeLayoutC{}(b_, m_, n_);
+        }
+    }
+
     __aicore__ inline void Init(Params const& params)
     {
         m_ = static_cast<uint64_t>(asc::te::get<MNK_M>(params.problemShape));
@@ -173,6 +228,35 @@ private:
         }
     }
 
+private:
+    static constexpr bool TRANS_B = BlockMmad::TRANS_B;
+    static constexpr uint64_t NON_CONTIGUOUS_TYPE = BlockMmad::NON_CONTIGUOUS_TYPE;
+    static constexpr bool
+        TRANS_BATCH_A = NON_CONTIGUOUS_TYPE == static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_PERM_X1) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_AB_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_ABC_TRANSPOSE);
+    static constexpr bool
+        TRANS_BATCH_B = NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_AB_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_BC_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_ABC_TRANSPOSE);
+    static constexpr bool
+        TRANS_BATCH_C = NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_C_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_BC_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_ABC_TRANSPOSE);
     uint64_t m_{1};
     uint64_t n_{1};
     uint64_t k_{1};

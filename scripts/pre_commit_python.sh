@@ -12,8 +12,8 @@
 ##############################################################################
 # ops-tensor — pre-commit 本地钩子的 Python 启动器
 #
-# 优先使用 python3；若当前环境没有 python3（例如仅提供 python 别名），
-# 退化为 python 执行，避免钩子因解释器名缺失而直接失败。
+# 优先使用 python3；若命令缺失或不可用（例如 WindowsApps 占位别名），
+# 退化为 python 执行。只接受 Python 3.7 及以上版本。
 #
 # 用法：bash scripts/pre_commit_python.sh <python_script> [args...]
 ##############################################################################
@@ -21,10 +21,11 @@
 set -uo pipefail
 
 for python_cmd in python3 python; do
-    if command -v "${python_cmd}" >/dev/null 2>&1; then
+    if command -v "${python_cmd}" >/dev/null 2>&1 &&
+        "${python_cmd}" -c 'import sys; sys.exit(sys.version_info < (3, 7))' >/dev/null 2>&1; then
         exec "${python_cmd}" "$@"
     fi
 done
 
-echo "[pre-commit] ERROR: 未找到 python3 或 python，请先安装 Python 3.7 及以上版本。" >&2
+echo "[pre-commit] ERROR: 未找到可用的 Python 3.7 及以上版本。" >&2
 exit 2

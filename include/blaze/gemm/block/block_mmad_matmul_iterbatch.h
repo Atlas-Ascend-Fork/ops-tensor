@@ -36,9 +36,9 @@ namespace Gemm {
 namespace Block {
 
 template <class AType_, class LayoutA_, class BType_, class LayoutB_, class CType_, class LayoutC_, class BiasType_,
-          class LayoutBias_, MatMulL0C2Out FixpOpt_>
-class BlockMmad<MatmulIterBatch<FixpOpt_>, AType_, LayoutA_, BType_, LayoutB_, CType_, LayoutC_, BiasType_,
-                LayoutBias_> {
+          class LayoutBias_, MatMulL0C2Out FixpOpt_, uint64_t FusedOpType_, uint64_t NonContiguousType_>
+class BlockMmad<MatmulIterBatch<FixpOpt_, FusedOpType_, NonContiguousType_>, AType_, LayoutA_, BType_, LayoutB_, CType_,
+                LayoutC_, BiasType_, LayoutBias_> {
 public:
     using AType = AType_;
     using BType = BType_;
@@ -48,7 +48,10 @@ public:
     using LayoutB = LayoutB_;
     using LayoutC = LayoutC_;
     using LayoutBias = LayoutBias_;
-    using DispatchPolicy = MatmulIterBatch<FixpOpt_>;
+    using DispatchPolicy = MatmulIterBatch<FixpOpt_, FusedOpType_, NonContiguousType_>;
+    static constexpr uint64_t NON_CONTIGUOUS_TYPE = DispatchPolicy::NON_CONTIGUOUS_TYPE;
+    static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
+    static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool IS_MIX = (FixpOpt_ != MatMulL0C2Out::ON_THE_FLY);
     static constexpr uint16_t AIC_SYNC_AIV_MODE_4 = 4;
     // 1:2 flag scheme: ready = slot * FLAG_ID_MAX, release = SYNC_OFFSET.
@@ -71,8 +74,6 @@ public:
     };
 
 private:
-    static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
-    static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr uint64_t BUFFER_NUM = 2;
 
 public:

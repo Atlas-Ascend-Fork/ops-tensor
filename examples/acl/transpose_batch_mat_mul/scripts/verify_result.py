@@ -95,14 +95,14 @@ def _print_large_tensor_summary(
     )
     over_tol = ratio_mask.sum().item()
 
-    print(f"\n[verify] shape=({cfg.m}, {cfg.batch}, {cfg.n}), elements={numel}")
+    print(f"\n[verify] shape={tuple(golden_tensor.shape)}, elements={numel}")
     print(f"  rel_err: max={rel_err.max().item():.6e}")
     print(
         f"  count({_ratio_label(cfg.dtype_str, cfg.ratio_tol)}): {over_tol} / {numel}"
     )
 
 
-def verify_result(m, batch, n, dtype_str, is_hf32=False):
+def verify_result(m, batch, n, dtype_str, is_hf32=False, bmn_output=False):
     cfg = DTYPE_CONFIG.get(dtype_str, DTYPE_CONFIG["float16"])
     np_dtype = cfg["np_dtype"]
     torch_dtype = cfg["torch_dtype"]
@@ -114,9 +114,9 @@ def verify_result(m, batch, n, dtype_str, is_hf32=False):
     if output.size != golden.size:
         raise ValueError("npu output size != cpu output size")
 
-    # C is stored in transposed-batch layout: [m, batch, n]
-    npu_output_tensor = torch.from_numpy(output).view(torch_dtype).reshape(m, batch, n)
-    golden_tensor = torch.from_numpy(golden).view(torch_dtype).reshape(m, batch, n)
+    output_shape = (batch, m, n) if bmn_output else (m, batch, n)
+    npu_output_tensor = torch.from_numpy(output).view(torch_dtype).reshape(output_shape)
+    golden_tensor = torch.from_numpy(golden).view(torch_dtype).reshape(output_shape)
 
     numel = m * batch * n
     if numel <= FULL_TENSOR_PRINT_MAX_ELEMENTS:
@@ -176,6 +176,7 @@ if __name__ == "__main__":
         "dtype", nargs="?", default="float16", help="Data type (default: float16)"
     )
     parser.add_argument("--hf32", action="store_true", help="Enable HF32")
+    parser.add_argument("--bmn", action="store_true", help="Use BMN output layout")
     args = parser.parse_args()
 
     m = args.m
@@ -184,7 +185,9 @@ if __name__ == "__main__":
     dtype_str = args.dtype
 
     try:
-        res = verify_result(m, batch, n, dtype_str, is_hf32=args.hf32)
+        res = verify_result(
+            m, batch, n, dtype_str, is_hf32=args.hf32, bmn_output=args.bmn
+        )
         if not res:
             cfg = DTYPE_CONFIG.get(dtype_str, DTYPE_CONFIG["float16"])
             ratio_tol = 1e-3 if args.hf32 else cfg["ratio_tol"]

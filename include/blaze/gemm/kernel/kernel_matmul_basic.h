@@ -86,9 +86,9 @@ public:
         Blaze::Gemm::SetHF32(params.schParams.isHf32);
 
         BlockMmad blockMmad;
-        if constexpr (AscendC::Std::is_same_v<
-                          MatmulMultiBlockBasicSplitK<0, 1, Blaze::Gemm::KernelMmadMultiBlockBasic, 0>,
-                          typename BlockMmad_::DispatchPolicy>) {
+        if constexpr (AscendC::Std::is_same_v<MatmulMultiBlockBasicSplitK<0, 1, Blaze::Gemm::KernelMmadMultiBlockBasic,
+                                                                          BlockMmad::NON_CONTIGUOUS_TYPE>,
+                                              typename BlockMmad_::DispatchPolicy>) {
             params.mmadParams.k = k_;
         }
         blockMmad.Init(params.mmadParams);
@@ -110,6 +110,10 @@ private:
             // 连续场景下rowStride表示k或1, 非连续场景下表示m轴的stride
             uint64_t rowStride = params.mmadParams.rowStride == 0 ? k_ : params.mmadParams.rowStride;
             uint64_t batchStride = m_ * rowStride;
+            if constexpr (TRANS_BATCH_A) {
+                rowStride = batch_ * k_;
+                batchStride = k_;
+            }
             return asc::te::make_pattern_layout<LayoutA, asc::te::layout_trait_default<>>(
                 asc::te::make_shape(aBatch, asc::te::make_shape(asc::te::make_shape(asc::te::_1{}, m_),
                                                                 asc::te::make_shape(asc::te::_1{}, k_))),
@@ -121,14 +125,52 @@ private:
         }
     }
 
+    __aicore__ inline auto MakeLayoutBGm()
+    {
+        if constexpr (TRANS_BATCH_B && !IsWeightNz<LayoutB>::value) {
+            auto shape = asc::te::make_shape(batch_, asc::te::make_shape(asc::te::make_shape(asc::te::_1{}, k_),
+                                                                         asc::te::make_shape(asc::te::_1{}, n_)));
+            if constexpr (TRANS_B) {
+                // NBK: logical (B,K,N) strides are (K,1,B*K).
+                auto matrixStride = asc::te::make_stride(asc::te::make_stride(asc::te::_0{}, asc::te::_1{}),
+                                                         asc::te::make_stride(asc::te::_0{}, batch_ * k_));
+                return asc::te::make_pattern_layout<LayoutB, asc::te::layout_trait_default<BType>>(
+                    shape, asc::te::make_stride(k_, matrixStride));
+            } else {
+                // KBN: logical (B,K,N) strides are (N,B*N,1).
+                auto matrixStride = asc::te::make_stride(asc::te::make_stride(asc::te::_0{}, batch_ * n_),
+                                                         asc::te::make_stride(asc::te::_0{}, asc::te::_1{}));
+                return asc::te::make_pattern_layout<LayoutB, asc::te::layout_trait_default<BType>>(
+                    shape, asc::te::make_stride(n_, matrixStride));
+            }
+        } else {
+            return MakeLayoutB{}(batch_, k_, n_);
+        }
+    }
+
+    __aicore__ inline auto MakeLayoutCGm(uint64_t innerBatch)
+    {
+        if constexpr (TRANS_BATCH_C) {
+            return asc::te::make_pattern_layout<
+                asc::te::nd_layout_ptn, asc::te::layout_trait<CType, AscendC::Std::Int<asc::te::c0_element<CType>>>>(
+                asc::te::make_shape(batch_ / innerBatch, innerBatch, asc::te::make_shape(m_, n_)),
+                asc::te::make_stride(m_ * innerBatch * n_, n_, asc::te::make_stride(innerBatch * n_, asc::te::_1{})));
+        } else {
+            return MakeLayoutC{}(batch_, m_, n_);
+        }
+    }
+
     __aicore__ inline void MatmulProcess(Params const& params, BlockMmad& blockMmad, BlockScheduler& bs,
                                          int64_t curBlockIdx, int64_t coreNums, int64_t totalBlockNums)
     {
         auto layoutA = MakeLayoutAGm(params);
-        auto layoutB = MakeLayoutB{}(batch_, k_, n_); // ND layout for B
-        auto layoutC = MakeLayoutC{}(batch_, m_, n_); // ND layout for C
-        auto layoutBias = MakeLayoutBias{}(1L, n_);   // ND layout for Bias
-        // A,B,C Gm Tensor
+        auto layoutB = MakeLayoutBGm();
+        uint64_t innerBatch = batch_;
+        if constexpr (TRANS_BATCH_C) {
+            innerBatch /= static_cast<uint64_t>(asc::te::get<MNK_SplitB>(params.problemShape));
+        }
+        auto layoutC = MakeLayoutCGm(innerBatch);
+        auto layoutBias = MakeLayoutBias{}(1L, n_);
         auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aGmAddr_), layoutA);
         auto gmB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(bGmAddr_), layoutB);
         auto gmC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(cGmAddr_), layoutC);
@@ -162,11 +204,37 @@ private:
             auto subTensorB = gmB.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(0L, coordN)),
                                         asc::te::make_shape(1L, asc::te::make_shape(shapeK, shapeN)));
             auto gmBlockB = asc::te::squeeze<0>(subTensorB);
-            auto subTensorC = gmC.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(coordM, coordN)),
-                                        asc::te::make_shape(1L, asc::te::make_shape(shapeM, shapeN)));
-            auto gmBlockC = asc::te::squeeze<0>(subTensorC);
             auto gmBlockBias = gmBias.slice(asc::te::make_coord(0L, coordN), asc::te::make_shape(1L, shapeN));
-            blockMmad(gmBlockA, gmBlockB, gmBlockBias, gmBlockC, blockShape);
+
+            if constexpr (TRANS_BATCH_C) {
+                auto outerBatchIdx = curBatchIdx_ / innerBatch;
+                auto innerBatchIdx = curBatchIdx_ % innerBatch;
+                auto splitBatchSubTensorC = gmC.slice(
+                    asc::te::make_coord(outerBatchIdx, innerBatchIdx, asc::te::make_coord(coordM, coordN)),
+                    asc::te::make_shape(asc::te::_1{}, asc::te::_1{}, asc::te::make_shape(shapeM, shapeN)));
+                auto splitBatchGmBlockC = asc::te::squeeze<0, 1>(splitBatchSubTensorC);
+
+                __gm__ uint64_t* gmScalePtr = nullptr;
+                if (params.mmadParams.scaleGmAddr != nullptr) {
+                    gmScalePtr = reinterpret_cast<__gm__ uint64_t*>(params.mmadParams.scaleGmAddr) + curBatchIdx_ * n_ +
+                                 coordN;
+                }
+                blockMmad(gmBlockA, gmBlockB, gmBlockBias, splitBatchGmBlockC, blockShape, gmScalePtr);
+            } else {
+                auto subTensorC = gmC.slice(asc::te::make_coord(curBatchIdx_, asc::te::make_coord(coordM, coordN)),
+                                            asc::te::make_shape(1L, asc::te::make_shape(shapeM, shapeN)));
+                auto gmBlockC = asc::te::squeeze<0>(subTensorC);
+                if constexpr (AscendC::Std::is_same_v<CType, signed char>) {
+                    __gm__ uint64_t* gmScalePtr = nullptr;
+                    if (params.mmadParams.scaleGmAddr != nullptr) {
+                        gmScalePtr = reinterpret_cast<__gm__ uint64_t*>(params.mmadParams.scaleGmAddr) +
+                                     curBatchIdx_ * n_ + coordN;
+                    }
+                    blockMmad(gmBlockA, gmBlockB, gmBlockBias, gmBlockC, blockShape, gmScalePtr);
+                } else {
+                    blockMmad(gmBlockA, gmBlockB, gmBlockBias, gmBlockC, blockShape);
+                }
+            }
         }
     }
 
@@ -246,6 +314,32 @@ private:
     static constexpr bool TRANS_A = BlockMmad::TRANS_A;
     static constexpr bool TRANS_B = BlockMmad::TRANS_B;
     static constexpr uint64_t NON_CONTIGUOUS_TYPE = BlockMmad::NON_CONTIGUOUS_TYPE;
+    static constexpr bool
+        TRANS_BATCH_A = NON_CONTIGUOUS_TYPE == static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_PERM_X1) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_AB_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_ABC_TRANSPOSE);
+    static constexpr bool
+        TRANS_BATCH_B = NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_AB_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_B_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_BC_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_ABC_TRANSPOSE);
+    static constexpr bool
+        TRANS_BATCH_C = NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_C_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_AC_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_BC_TRANSPOSE) ||
+                        NON_CONTIGUOUS_TYPE ==
+                            static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_ABC_TRANSPOSE);
     static constexpr bool IS_A_FULL_LOAD = BlockMmad::DispatchPolicy::FULL_LOAD_MODE == A_FULL_LOAD_MODE;
     __gm__ AType* aGmAddr_;
     __gm__ BType* bGmAddr_;
