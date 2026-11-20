@@ -36,11 +36,19 @@ ActivationQuant 标签保持原融合核语义，不对最后一组启用 tail s
 ### Dtype / Format 静态校验
 Kernel 编译期通过 `static_assert` 校验模板组合：
 
-- 默认覆盖模式下，`AType` / `BType` 仅支持同 bit-width 的 MXFP8 组合（`fp8_e4m3fn_t`、`fp8_e5m2_t`）或 MXFP4 组合（`fp4x2_e2m1_t`、`fp4x2_e1m2_t`）。
-- `CType` 支持 `half`、`bfloat16_t`、`float`；`BiasType` 仅支持 `float`。
+- 默认覆盖模式下，`AType` / `BType` 支持同位宽的 MXFP8 组合（`fp8_e4m3fn_t`、`fp8_e5m2_t`）、MXFP4 组合（`fp4x2_e2m1_t`、`fp4x2_e1m2_t`），以及 `AType=fp8_e4m3fn_t`、`BType=fp4x2_e2m1_t` 的 MXA8W4 组合。
+- `CType` 支持 `half`、`bfloat16_t`、`float`；同位宽 MXFP8/MXFP4 组合及原地累加模式的 `BiasType` 为 `float`，覆盖模式 MXA8W4 组合的 `BiasType` 支持 `half`、`bfloat16_t`、`float`。
 - `LayoutA` 仅支持 `nd_ext_layout_ptn`、`dn_ext_layout_ptn`。
 - `LayoutB` 仅支持 `nd_ext_layout_ptn`、`dn_ext_layout_ptn`、`nz_layout_ptn`、`zn_layout_ptn`。
 - `LayoutC` / `LayoutBias` 支持 ND 类布局，不支持 `nz_layout_ptn`、`zn_layout_ptn`。
+
+原生 MXA8W4 覆盖路径仅支持 9201/9202 架构，并要求以下布局：
+
+- `LayoutA` 为 `nd_ext_layout_ptn`，对应非转置 ND A。
+- `LayoutB` 为 `zn_layout_ptn`，对应转置 FRACTAL_NZ B。
+- `LayoutScaleB` 为 `scaleb_dn_layout_ptn`，对应 DN E8M0 ScaleB。
+
+NZ 权重的组间偏移按 B 的位宽与 C0 计算，FP4 按每字节两个元素换算地址偏移。
 
 ### 原地累加模式
 
@@ -167,6 +175,9 @@ struct GMMTiling {
 | `singleW` | `1` 表示权重/权重 scale 是单个连续 Tensor；`0` 表示按 TensorList 逐 group 解引用 |
 
 `kAL1/kBL1/scaleKAL1/scaleKBL1` 需满足 BlockMmad 的 L1 参数约束：`kAL1` 与 `kBL1` 的较大值作为外层 K 窗口，较大值需为较小值的整数倍；tiling 需传入一致的 `scaleKAL1` 和 `scaleKBL1`。普通覆盖模式要求该值不小于外层窗口且为其整数倍，并直接用作 `scaleKL1`；原地累加模式按前述规则对齐共享窗口。
+
+A/B、ScaleA/ScaleB 和 bias 的 L1 缓冲区需满足容量要求，且各区域互不重叠。
+当单个 tile 占用完整 L0C 容量时，`dbL0C` 应设置为 `1`，使用单缓冲。
 
 ### Params
 ```cpp

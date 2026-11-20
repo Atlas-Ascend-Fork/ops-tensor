@@ -68,6 +68,11 @@ constexpr uint32_t A_L2_CACHE_DISABLE = 1U;
 constexpr uint32_t B_L2_CACHE_DISABLE = 2U;
 constexpr uint32_t ALL_L2_CACHE_DISABLE = 3U;
 constexpr uint64_t MXFP_DIVISOR_SIZE = 64UL;
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+constexpr uint64_t MX_MMAD_K_ALIGNMENT = 2UL;
+#else
+constexpr uint64_t MX_MMAD_K_ALIGNMENT = 64UL;
+#endif
 constexpr uint64_t MXFP_MULTI_BASE_SIZE = 2UL;
 constexpr uint64_t BLOCK_CUBE = 16UL;
 /*!
@@ -203,9 +208,15 @@ __aicore__ inline constexpr bool IsHif4()
 }
 
 template <typename T>
+__aicore__ inline constexpr bool IsFp4E2M1()
+{
+    return AscendC::IsSameType<T, fp4x2_e2m1_t>::value;
+}
+
+template <typename T>
 __aicore__ inline constexpr bool IsFp4()
 {
-    return AscendC::IsSameType<T, fp4x2_e2m1_t>::value || AscendC::IsSameType<T, fp4x2_e1m2_t>::value || IsHif4<T>();
+    return IsFp4E2M1<T>() || AscendC::IsSameType<T, fp4x2_e1m2_t>::value || IsHif4<T>();
 }
 
 #if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
@@ -217,9 +228,15 @@ using MxScaleType = AscendC::fp8_e8m0_t;
 #endif
 
 template <typename T>
+__aicore__ inline constexpr bool IsFp8E4M3FN()
+{
+    return AscendC::IsSameType<T, fp8_e4m3fn_t>::value;
+}
+
+template <typename T>
 __aicore__ inline constexpr bool IsFp8()
 {
-    return AscendC::IsSameType<T, fp8_e4m3fn_t>::value || AscendC::IsSameType<T, fp8_e5m2_t>::value;
+    return IsFp8E4M3FN<T>() || AscendC::IsSameType<T, fp8_e5m2_t>::value;
 }
 
 template <typename AType, typename BType>
@@ -249,6 +266,16 @@ __aicore__ inline constexpr T CeilDiv(T a, T b)
         return a;
     }
     return (a + b - 1) / b;
+}
+
+template <typename T>
+__aicore__ inline constexpr uint64_t ElementsToBytes(uint64_t elementCount)
+{
+    if constexpr (IsFp4<T>() || AscendC::IsSameType<T, int4x2_t>::value) {
+        constexpr uint64_t elementsPerByte = 2;
+        return elementCount / elementsPerByte + elementCount % elementsPerByte;
+    }
+    return elementCount * sizeof(T);
 }
 
 template <typename T>

@@ -16,10 +16,17 @@ import numpy as np
 import ml_dtypes
 
 
+OUTPUT_DTYPES = {
+    "float16": np.float16,
+    "bfloat16": ml_dtypes.bfloat16,
+    "float32": np.float32,
+}
+
+
 def verify(golden_path, actual_path, m, n, dtype, atol, rtol):
     if m <= 0 or n <= 0 or not np.isfinite([atol, rtol]).all() or min(atol, rtol) < 0:
         raise ValueError("invalid dimensions or tolerances")
-    storage_dtype = {"float16": np.float16, "bfloat16": ml_dtypes.bfloat16}[dtype]
+    storage_dtype = OUTPUT_DTYPES[dtype]
     size = m * n * np.dtype(storage_dtype).itemsize
     for path in (golden_path, actual_path):
         if Path(path).stat().st_size != size:
@@ -52,7 +59,7 @@ def main():
     p.add_argument("actual")
     p.add_argument("--m", type=int, required=True)
     p.add_argument("--n", type=int, required=True)
-    p.add_argument("--dtype", choices=("float16", "bfloat16"), required=True)
+    p.add_argument("--dtype", choices=tuple(OUTPUT_DTYPES), required=True)
     p.add_argument("--atol", type=float, required=True)
     p.add_argument("--rtol", type=float, required=True)
     args = p.parse_args()

@@ -76,10 +76,11 @@ public:
                   "QGMM MX atomic add requires an empty epilogue.");
     static constexpr bool IS_MIXED_INPUT = AscendC::Std::is_same_v<AType, fp8_e4m3fn_t> &&
                                            (AscendC::Std::is_same_v<BType, fp4x2_e2m1_t> || IsHif4<BType>());
+    static constexpr bool IS_MX_A8W4 = BlockMmad::IS_MX_A8W4;
     using ScaleBType = MxScaleType<BType>;
     static_assert((IsFp4<AType>() && !IsHif4<AType>() && IsFp4<BType>() && !IsHif4<BType>()) ||
-                      (IsFp8<AType>() && IsFp8<BType>()) || (ENABLE_INPLACE_ADD && IS_MIXED_INPUT),
-                  "QGMM MX requires same-width inputs or FP8 E4M3 x FP4/HIF4 inplace add.");
+                      (IsFp8<AType>() && IsFp8<BType>()) || (ENABLE_INPLACE_ADD && IS_MIXED_INPUT) || IS_MX_A8W4,
+                  "QGMM MX requires same-width inputs, ND A / ZN B / DN scaleB MXA8W4, or FP8 x FP4/HIF4 inplace add.");
     static_assert(!ENABLE_INPLACE_ADD || (IS_MIXED_INPUT && AscendC::Std::is_same_v<CType, float> &&
                                           AscendC::Std::is_same_v<LayoutA, asc::te::dn_ext_layout_ptn> &&
                                           AscendC::Std::is_same_v<LayoutB, asc::te::nd_ext_layout_ptn> &&
@@ -87,7 +88,9 @@ public:
                   "QGMM MX inplace add requires FP8 x FP4/HIF4, DN A, ND B/C, FP32 C.");
     static_assert(AscendC::Std::is_one_of_v<CType, half, bfloat16_t, float>,
                   "QGMM MX only supports half/bfloat16_t/float CType.");
-    static_assert(AscendC::Std::is_same_v<BiasType, float>, "QGMM MX only supports float BiasType.");
+    static_assert(AscendC::Std::is_same_v<BiasType, float> ||
+                      (IS_MX_A8W4 && AscendC::Std::is_one_of_v<BiasType, half, bfloat16_t>),
+                  "QGMM MX requires float bias; MXA8W4 also supports half/bfloat16 bias via L1-to-BT.");
     static_assert(AscendC::Std::is_one_of_v<LayoutA, asc::te::nd_ext_layout_ptn, asc::te::dn_ext_layout_ptn>,
                   "QGMM MX only supports ND/DN LayoutA.");
     static_assert(AscendC::Std::is_one_of_v<LayoutB, asc::te::nd_ext_layout_ptn, asc::te::dn_ext_layout_ptn,
@@ -96,6 +99,7 @@ public:
     static_assert(!AscendC::Std::is_one_of_v<LayoutC, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn> &&
                       !AscendC::Std::is_one_of_v<LayoutBias, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn>,
                   "QGMM MX does not support NZ/ZN LayoutC or LayoutBias.");
+
     static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool WEIGHT_NZ = IsWeightNz<LayoutB>::value;
@@ -163,7 +167,7 @@ private:
         } else if constexpr (!TRANS_A) {
             constexpr uint32_t mTailAlign = 1;
             constexpr uint32_t nTailAlign = TRANS_B ? static_cast<uint32_t>(BLOCK_CUBE) :
-                                                      static_cast<uint32_t>(C0_SIZE);
+                                                      static_cast<uint32_t>(C0_SIZE_B);
             scheduler.SetTailAlign(mTailAlign, nTailAlign);
         } else {
             constexpr uint32_t mTailAlign = static_cast<uint32_t>(Block::INNER_AXIS_MIN_SPLIT_VAL);
@@ -304,10 +308,10 @@ private:
             } else {
                 if constexpr (TRANS_B) {
                     perGroupBOffset_ = static_cast<int64_t>(
-                        Align16(gmmParams.n) * (IsFp4<AType>() ? Align64(gmmParams.k) : Align32(gmmParams.k)));
+                        Align16(gmmParams.n) * (IsFp4<BType>() ? Align64(gmmParams.k) : Align32(gmmParams.k)));
                 } else {
                     perGroupBOffset_ = static_cast<int64_t>(
-                        (IsFp4<AType>() ? Align64(gmmParams.n) : Align32(gmmParams.n)) * Align16(gmmParams.k));
+                        (IsFp4<BType>() ? Align64(gmmParams.n) : Align32(gmmParams.n)) * Align16(gmmParams.k));
                 }
             }
         }

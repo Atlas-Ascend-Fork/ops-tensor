@@ -61,6 +61,8 @@ public:
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool IS_FP4_A = IsFp4<AType>();
     static constexpr bool IS_FP4_B = IsFp4<BType>();
+    static constexpr bool IS_MX_A8W4 = IsFp8E4M3FN<AType>() && IsFp4E2M1<BType>() && IsNdExtLayout<LayoutA>() &&
+                                       IsZnLayout<LayoutB>() && IsScaleBDnLayout<LayoutScaleB>();
     using ScaleBType = MxScaleType<BType>;
     using ScaleBLayoutC0 = AscendC::Std::conditional_t<IsHif4<BType>(), asc::te::c0_element_half,
                                                        AscendC::Std::Int<SCALE_C0>>;
@@ -147,10 +149,9 @@ public:
 
         scaleKL1Span_ = CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
         const uint64_t aMAlign = (IS_FP4_A && TRANS_A) ? CeilAlign(baseM_, C0_SIZE_A) : baseM_;
-        aL1OneBuffer_ = (aMAlign * CeilAlign(kAL1_, MXFP_DIVISOR_SIZE)) >> (IS_FP4_A ? 1UL : 0UL);
-        bL1OneBuffer_ = (baseN_ * CeilAlign(kBL1_, MXFP_DIVISOR_SIZE)) >> (IS_FP4_B ? 1UL : 0UL);
-        concatBL1OneBuffer_ = (baseN_ * CONCAT_N_FACTOR * CeilAlign(kBL1_, MXFP_DIVISOR_SIZE)) >>
-                              (IS_FP4_B ? 1UL : 0UL);
+        aL1OneBuffer_ = ElementsToBytes<AType>(aMAlign * CeilAlign(kAL1_, MXFP_DIVISOR_SIZE));
+        bL1OneBuffer_ = ElementsToBytes<BType>(baseN_ * CeilAlign(kBL1_, MXFP_DIVISOR_SIZE));
+        concatBL1OneBuffer_ = ElementsToBytes<BType>(baseN_ * CONCAT_N_FACTOR * CeilAlign(kBL1_, MXFP_DIVISOR_SIZE));
         scaleAL1OneBuffer_ = baseM_ * scaleKL1Span_;
         scaleBL1OneBuffer_ = baseN_ * GetScaleBSpan(scaleKL1_) * sizeof(ScaleBType);
         if (isBias_) {
@@ -400,6 +401,37 @@ private:
 
     __aicore__ inline bool NeedBias(uint64_t absKOffset) const { return isBias_ && absKOffset == 0; }
 
+    __aicore__ inline void UpdatePreAllocation(uint64_t curM, uint64_t curN)
+    {
+        if constexpr (!IS_MX_A8W4) {
+            enablePreAllocation_ = false;
+            return;
+        }
+        const uint64_t aBytes = ElementsToBytes<AType>(curM * Min(k_, kAL1_));
+        const uint64_t bBytes = ElementsToBytes<BType>(curN * Min(k_, kBL1_));
+        // Reuse the empirical thresholds from the A6 WeightQuantASWMxKernel::EnablePreAlloc in ops-transformer.
+        // For large transfers and long K, later MTE2 requests compete with the current tile for outstanding slots.
+        // For short K, issuing the next tile's transfers early keeps MTE2 busy between tiles.
+        constexpr uint64_t LARGE_TRANSFER_BYTES = 128UL * 1024UL;
+        constexpr uint64_t SHORT_K_LIMIT = 1024UL;
+        enablePreAllocation_ = aBytes + bBytes < LARGE_TRANSFER_BYTES || k_ <= SHORT_K_LIMIT;
+    }
+
+    template <typename TensorDst, typename TensorSrc>
+    __aicore__ inline void CopyGmToL1WithPreAllocation(const TensorDst& dst, const TensorSrc& src)
+    {
+        if constexpr (IS_MX_A8W4) {
+            if (enablePreAllocation_) {
+                auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{},
+                                                    Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
+                asc::te::copy(copyGM2L1, dst, src);
+                return;
+            }
+        }
+        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+        asc::te::copy(copyGM2L1, dst, src);
+    }
+
     template <typename TensorScaleA, typename TensorScaleB>
     __aicore__ inline auto CopyScalesInL1(const TensorScaleA& gmScaleA, const TensorScaleB& gmScaleB, uint64_t curM,
                                           uint64_t curN, uint64_t kL1Offset, uint64_t scaleL1BufId)
@@ -422,14 +454,13 @@ private:
             if (kL1Offset + curScaleKL1 > k_) {
                 curScaleKL1 = k_ - kL1Offset;
             }
-            auto copyScaleGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
             auto gmBlockScaleA = gmScaleA.slice(asc::te::make_coord(0, GetScaleOffset(kL1Offset)),
                                                 asc::te::make_shape(curM, GetScaleSpan(curScaleKL1)));
-            asc::te::copy(copyScaleGM2L1, tensorScaleAL1, gmBlockScaleA);
+            CopyGmToL1WithPreAllocation(tensorScaleAL1, gmBlockScaleA);
 
             auto gmBlockScaleB = gmScaleB.slice(asc::te::make_coord(GetScaleBOffset(kL1Offset), 0),
                                                 asc::te::make_shape(GetScaleBSpan(curScaleKL1), curN));
-            asc::te::copy(copyScaleGM2L1, tensorScaleBL1, gmBlockScaleB);
+            CopyGmToL1WithPreAllocation(tensorScaleBL1, gmBlockScaleB);
         }
         return ScalePair<decltype(tensorScaleAL1), decltype(tensorScaleBL1)>{tensorScaleAL1, tensorScaleBL1};
     }
@@ -525,7 +556,6 @@ private:
     __aicore__ inline auto CopyAInL1(const TensorA& gmA, uint64_t curM, uint64_t curGmAKL1, uint64_t aL1BufId,
                                      uint64_t kL1Offset)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
         uint64_t l1K = curGmAKL1;
         if constexpr (NEED_A_SET_L1_K_ZERO) {
             l1K = CeilAlign(curGmAKL1, MXFP_DIVISOR_SIZE);
@@ -537,7 +567,7 @@ private:
         if constexpr (NEED_A_SET_L1_K_ZERO) {
             Blaze::Gemm::Tile::PadMxKAL1::PadZero(tensorAL1, gmBlockA);
         }
-        asc::te::copy(copyGM2L1, tensorAL1, gmBlockA);
+        CopyGmToL1WithPreAllocation(tensorAL1, gmBlockA);
         return tensorAL1;
     }
 
@@ -545,7 +575,6 @@ private:
     __aicore__ inline auto CopyBInL1(const TensorB& gmB, uint64_t curN, uint64_t curGmBKL1, uint64_t bL1BufId,
                                      uint64_t kL1Offset)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
         uint64_t l1K = curGmBKL1;
         if constexpr (NEED_B_SET_L1_K_ZERO) {
             l1K = CeilAlign(curGmBKL1, MXFP_DIVISOR_SIZE);
@@ -557,7 +586,7 @@ private:
         if constexpr (NEED_B_SET_L1_K_ZERO) {
             Blaze::Gemm::Tile::PadMxKBL1::PadZero(tensorBL1, gmBlockB);
         }
-        asc::te::copy(copyGM2L1, tensorBL1, gmBlockB);
+        CopyGmToL1WithPreAllocation(tensorBL1, gmBlockB);
         return tensorBL1;
     }
 
@@ -625,8 +654,7 @@ private:
         auto tensorBiasL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(l1BufferBiasOffset_[biasBufId]), layoutBiasL1);
         if (isBias_ && needCopyBias) {
-            auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
-            asc::te::copy(copyGM2L1, tensorBiasL1, gmBias);
+            CopyGmToL1WithPreAllocation(tensorBiasL1, gmBias);
         }
         return tensorBiasL1;
     }
@@ -714,7 +742,7 @@ private:
 
             asc::te::mmad_params mmadParams;
             mmadParams.m = static_cast<uint16_t>(curM);
-            mmadParams.k = static_cast<uint16_t>(CeilAlign(curKL0, MXFP_DIVISOR_SIZE));
+            mmadParams.k = static_cast<uint16_t>(CeilAlign(curKL0, MX_MMAD_K_ALIGNMENT));
             mmadParams.n = static_cast<uint16_t>(curN);
             mmadParams.unit_flag = (absKOffset + curKL0 >= k_) ? asc::te::unit_flag_mode::enable_update :
                                                                  asc::te::unit_flag_mode::enable_keep;
@@ -744,6 +772,7 @@ private:
         // Current output tile shape.
         uint64_t curM = asc::te::get<MNK_M>(blockShape);
         uint64_t curN = asc::te::get<MNK_N>(blockShape);
+        UpdatePreAllocation(curM, curN);
         const uint64_t halfL0CSize = AscendC::TOTAL_L0C_SIZE / DOUBLE_BUFFER_COUNT;
         uint64_t l0cOffset = (l0cPingPong_ & 1UL) * halfL0CSize;
         uint64_t l0cLayoutM = curM;
@@ -978,6 +1007,8 @@ private:
                                       TensorScaleB gmScaleBLeft, TensorScaleB gmScaleBRight, TensorUbC& ubC,
                                       const BlockShape& singleShape)
     {
+        // Concat uses its own copy operations; keep its existing allocation behavior.
+        enablePreAllocation_ = false;
         uint64_t curM = asc::te::get<MNK_M>(singleShape);
         uint64_t curN = asc::te::get<MNK_N>(singleShape);
         const uint64_t concatN = curN * CONCAT_N_FACTOR;
@@ -1035,6 +1066,7 @@ private:
     bool orderAL1BL1_{false};
     bool isBias_{false};
     bool enableL0cPingPong_{false};
+    bool enablePreAllocation_{false};
 };
 
 } // namespace Block

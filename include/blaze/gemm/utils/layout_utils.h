@@ -97,6 +97,24 @@ struct IsScaleNz {
     static constexpr bool value = GetScaleNzValue<LayoutPattern>();
 };
 
+template <typename LayoutPattern>
+__aicore__ inline constexpr bool IsNdExtLayout()
+{
+    return AscendC::Std::is_same_v<LayoutPattern, asc::te::nd_ext_layout_ptn>;
+}
+
+template <typename LayoutPattern>
+__aicore__ inline constexpr bool IsZnLayout()
+{
+    return AscendC::Std::is_same_v<LayoutPattern, asc::te::zn_layout_ptn>;
+}
+
+template <typename LayoutPattern>
+__aicore__ inline constexpr bool IsScaleBDnLayout()
+{
+    return AscendC::Std::is_same_v<LayoutPattern, asc::te::scaleb_dn_layout_ptn>;
+}
+
 // HiF4 scale packs two adjacent positions per element: ScaleA along M in the DN layout and ScaleB along N
 // in the ND layout. All other scale layouts (including ScaleNZ) keep the logical position.
 template <bool IsHif4Type, typename LayoutScale>

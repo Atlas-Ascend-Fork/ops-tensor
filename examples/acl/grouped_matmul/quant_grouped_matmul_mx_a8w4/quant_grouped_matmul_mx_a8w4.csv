@@ -1,0 +1,7 @@
+caseName,groups,m,n,k,biasDtype,listType,groupList,dbL0C,cores,outputDtype,seed,atol,rtol
+length_no_bias,2,25,32,64,none,1,16;9,1,1,float32,1,0.0001,0.00001
+offset_empty_half_bias,3,12,80,128,float16,0,3;3;12,1,1,float32,2,0.0001,0.00001
+length_bfloat16_bias,2,17,16,512,bfloat16,1,7;10,2,1,float32,3,0.0001,0.00001
+offset_float_bias,2,16,80,128,float32,0,1;16,2,1,float32,4,0.0001,0.00001
+short_k_tail,1,16,32,258,none,1,16,1,1,float32,5,0.0001,0.00001
+multi_core_multi_k_window,3,83,144,1024,float32,1,33;0;50,2,4,float32,6,0.0001,0.00001

@@ -20,8 +20,31 @@ MX 量化 Grouped Matmul 的 Block 组件，基于 Tensor API 实现，仅支持
 - `fp8_e5m2_t`
 - `fp8_e4m3fn_t`
 
+A/B 支持同位宽的 MXFP4 或 MXFP8 组合，以及 `AType=fp8_e4m3fn_t`、`BType=fp4x2_e2m1_t` 的 MXA8W4 组合。
+其中，ND A / ZN B / DN ScaleB 的原生 MXA8W4 覆盖路径仅支持 9201/9202 架构。
+
+MXA8W4 的 A/B 按各自数据类型执行 MX Mmad，L1 缓冲区大小和 L1/L0 的 C0 分别按A/B 类型计算；
+FP8 的 C0 为 32，FP4 为 64。Bias 支持 `half`、`bfloat16_t`、`float`，
+其中 `half`、`bfloat16_t` 在从 L1 搬入 BiasTable 时转换为 `float`。
+
 ### Scale 类型
 ScaleA 和 ScaleB 固定使用 `fp8_e8m0_t`。
+
+### MTE2 预分配
+
+ND A / ZN B 的 MXA8W4 路径中，A、B、ScaleA、ScaleB 和 bias 从 GM 搬入 L1 时，根据当前 tile 的 A/B
+搬运量和 K 维大小选择 MTE2 预分配模式：
+
+```cpp
+aBytes = curM * min(K, kAL1)
+bBytes = curN * min(K, kBL1) / 2
+enable = (aBytes + bBytes < 128 KiB) || (K <= 1024)
+```
+
+`curM`、`curN` 为当前 tile 的 M/N 维大小，`K` 为当前 group 的 K 维大小；
+`aBytes`、`bBytes` 分别为 A/B 单轮搬运的字节数。
+`enable` 为 `true` 时，使用 `Tile::CopyGM2L1TraitPreAllocation` 启用预分配；
+为 `false` 时使用默认搬运模式。同位宽 MXFP8/MXFP4、DN A / ND B InplaceAdd 和 SwiGLU 拼接路径使用默认搬运模式。
 
 ### 计算模式
 仅支持 AIC 模式，不支持 AIV 计算。
@@ -52,7 +75,8 @@ L0C 结果写到双 AIV 可见的 UB，供融合 Epilogue 消费。
 |------|------|
 | `TRANS_A` | A 是否转置 |
 | `TRANS_B` | B 是否转置 |
-| `C0_SIZE` | 数据 C0 对齐大小，FP4 为 64，FP8 为 32 |
+| `C0_SIZE_A` / `C0_SIZE_B` | A/B 各自的 C0 对齐大小，FP4 为 64，FP8 为 32 |
+| `IS_MX_A8W4` | 当 A 为 ND 布局的 FP8 E4M3、B 为 ZN 布局的 FP4 E2M1，且 ScaleB 为 DN 布局时取 `true` |
 | `SCALE_C0` | Scale 布局的 C0 对齐大小，固定为 2 |
 | `SCALE_BUFFER_NUM` | Scale 双缓冲数量 |
 | `HALF_L0_SIZE` | L0A/L0B 半缓冲大小 |
