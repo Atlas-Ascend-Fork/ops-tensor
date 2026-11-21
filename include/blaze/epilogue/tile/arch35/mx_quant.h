@@ -435,7 +435,6 @@ private:
         AscendC::Reg::StoreUnAlignPost(maxExpAddr, unalign, 0);
     }
 
-    // Rotate-quant lineage: per-group absMax, limit = absMax * alpha (bf16);
     // maxExp receives the exponent field of limit (useExp=true, OCP) or its
     // full codepoint (useExp=false, cuBLAS); limitTensor receives limit.
     static __simd_vf__ inline void MaxExpClampedVf(MxMaxExpClampedVfParams params)

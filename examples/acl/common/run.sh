@@ -25,15 +25,15 @@ set -euo pipefail
 # common/ 只服务 acl/ 下的 C++ 样例，因此随 acl/ 一起组织；torch/ 下的
 # Python 样例独立运行，不经本脚本
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ACL_EXAMPLES_DIR="$(dirname "${SCRIPT_DIR}")"
-EXAMPLES_DIR="$(dirname "${ACL_EXAMPLES_DIR}")"
-REPO_ROOT="$(dirname "${EXAMPLES_DIR}")"
-BUILD_DIR="${EXAMPLES_DIR}/build"
-PARALLEL_LOG_DIR="${BUILD_DIR}/logs"
-BUILD_STATUS_FILE="${PARALLEL_LOG_DIR}/build_status.txt"
-RUN_LOG_DIR="${PARALLEL_LOG_DIR}/run"
-RUN_STATUS_FILE="${PARALLEL_LOG_DIR}/run_status.txt"
-RUN_CASE_PY="${SCRIPT_DIR}/run_case.py"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+EXAMPLES_DIR="${REPO_ROOT}/examples"
+ACL_EXAMPLES_DIR="${REPO_ROOT}/examples/acl"
+BUILD_DIR="${REPO_ROOT}/examples/build"
+PARALLEL_LOG_DIR="${REPO_ROOT}/examples/build/logs"
+BUILD_STATUS_FILE="${REPO_ROOT}/examples/build/logs/build_status.txt"
+RUN_LOG_DIR="${REPO_ROOT}/examples/build/logs/run"
+RUN_STATUS_FILE="${REPO_ROOT}/examples/build/logs/run_status.txt"
+RUN_CASE_PY="${REPO_ROOT}/examples/acl/common/run_case.py"
 
 # ── Color Definitions ────────────────────────────────────────────────────────
 RED='\033[0;31m'
