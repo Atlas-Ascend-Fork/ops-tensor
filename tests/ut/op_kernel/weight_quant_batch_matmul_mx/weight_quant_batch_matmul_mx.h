@@ -59,6 +59,7 @@ __aicore__ inline void Run(GM_ADDR aGm, GM_ADDR bGm, GM_ADDR biasGm, GM_ADDR sca
         {bGm, biasGm, tiling.kBubSize, tiling.nBubSize},
         {tiling.baseM, tiling.baseN, tiling.mTailTile, tiling.nTailTile, tiling.mBaseTailSplitCnt,
          tiling.nBaseTailSplitCnt, tiling.mTailMain, tiling.nTailMain}};
+    params.mmadParams.ubBufferNum = tiling.l1BufferNum;
     Kernel kernel;
     kernel(params);
 }

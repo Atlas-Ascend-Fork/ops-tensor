@@ -87,9 +87,11 @@ public:
     using LayoutBias = LayoutBias_;
     using DispatchPolicy = WeightQuantMxPolicy<ScheduleType_, KSchedule_, ScaleBSource_, Output_>;
     static constexpr bool DEFERRED_UB = Output_ == WeightPrologueMxOutput::DEFERRED_UB;
+    static constexpr bool IS_MATMUL = AscendC::Std::is_same_v<DispatchPolicy, MatmulWithWeightQuantMx>;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using L1TileShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using L0TileShape = asc::te::shape<int64_t, int64_t, int64_t>;
+    static constexpr uint32_t SCALE_K_INDEX = 3U;
 
     static_assert(IsFp4<BType>(), "Weight Quant MX expects packed FP4 B");
     static_assert(sizeof(AType) == 1, "Weight Quant MX expects 8-bit A");
@@ -105,7 +107,19 @@ public:
                       AscendC::Std::is_same_v<DispatchPolicy, GroupedMatmulFinalizeRoutingWithWeightQuantMx>,
                   "MX weight prologue requires a paired QBMM, GMM or deferred-UB scheduling policy");
 
-    struct Params {
+    struct MatmulParams {
+        GM_ADDR aGmAddr{nullptr};
+        GM_ADDR scaleAGmAddr{nullptr};
+        GM_ADDR scaleBGmAddr{nullptr};
+        GM_ADDR cGmAddr{nullptr};
+        L1TileShape l1TileShape{};
+        L0TileShape l0TileShape{};
+        uint64_t l1BufferNum{0};
+        bool hasBias{false};
+        uint64_t ubBufferNum{0};
+    };
+
+    struct GroupedMatmulParams {
         GM_ADDR aGmAddr{nullptr};
         GM_ADDR scaleAGmAddr{nullptr};
         GM_ADDR scaleBGmAddr{nullptr};
@@ -126,11 +140,27 @@ public:
         uint16_t readyFlag{6};
         uint16_t freeFlag{8};
         bool seedWeightCredits{true};
-        bool disableWeightL2{false};
-        uint64_t problemM{0};
     };
 
-    __aicore__ inline explicit BlockMmad(const Params& params) { Init(params); }
+    using Params = AscendC::Std::conditional_t<AscendC::Std::is_same_v<DispatchPolicy, MatmulWithWeightQuantMx>,
+                                               MatmulParams, GroupedMatmulParams>;
+
+    __aicore__ inline BlockMmad(const GroupedMatmulParams& params) { Init(params); }
+
+    __aicore__ inline BlockMmad(const MatmulParams& params)
+        : params_(params),
+          l1Storage_(static_cast<uint64_t>(asc::te::get<MNK_M>(params.l1TileShape)),
+                     static_cast<uint64_t>(asc::te::get<MNK_N>(params.l1TileShape)),
+                     static_cast<uint64_t>(asc::te::get<MNK_K>(params.l1TileShape)),
+                     static_cast<uint64_t>(asc::te::get<SCALE_K_INDEX>(params.l1TileShape)), params.l1BufferNum,
+                     params.hasBias)
+    {
+        InitBufferSlots();
+        for (uint16_t index = 0; index < params.l1BufferNum; ++index) {
+            ReleaseWeightBufferToVector(index);
+        }
+        AscendC::SetMMLayoutTransform(true);
+    }
 
     __aicore__ inline ~BlockMmad()
     {
@@ -177,6 +207,11 @@ public:
 
     static constexpr uint64_t MX_GROUP_SIZE = MXFP_DIVISOR_SIZE / MXFP_MULTI_BASE_SIZE;
 
+    __aicore__ inline static uint64_t NextBufferId(uint64_t bufferId, uint64_t bufferNum)
+    {
+        return bufferId + 1U == bufferNum ? 0U : bufferId + 1U;
+    }
+
     struct SyncProtocol {
         static constexpr uint16_t MODE = Sync::SYNC_MODE_INTRA;
         static constexpr uint16_t AIV_READY_FLAG = 6U;
@@ -186,6 +221,14 @@ public:
 
     class WeightL1Storage {
     public:
+        __aicore__ inline WeightL1Storage() = default;
+
+        __aicore__ inline WeightL1Storage(uint64_t baseN, uint64_t kL1Size, uint64_t bufferNum, bool hasBias,
+                                          uint64_t bufferBytes = 0)
+        {
+            Init(baseN, kL1Size, bufferNum, hasBias, bufferBytes);
+        }
+
         __aicore__ inline void Init(uint64_t baseN, uint64_t kL1Size, uint64_t bufferNum, bool hasBias,
                                     uint64_t bufferBytes = 0)
         {
@@ -376,6 +419,14 @@ private:
 
     class L1Storage {
     public:
+        __aicore__ inline L1Storage() = default;
+
+        __aicore__ inline L1Storage(uint64_t baseM, uint64_t baseN, uint64_t kL1Size, uint64_t scaleKL1Size,
+                                    uint64_t bufferNum, bool hasBias, uint64_t aBytes = 0, uint64_t bBytes = 0)
+        {
+            Init(baseM, baseN, kL1Size, scaleKL1Size, bufferNum, hasBias, aBytes, bBytes);
+        }
+
         __aicore__ inline void Init(uint64_t baseM, uint64_t baseN, uint64_t kL1Size, uint64_t scaleKL1Size,
                                     uint64_t bufferNum, bool hasBias, uint64_t aBytes = 0, uint64_t bBytes = 0)
         {
@@ -437,7 +488,7 @@ private:
             return weightStorage_.MakeBiasTensor(bufferId, nSize);
         }
 
-        __aicore__ inline void SetOffsets(const Params& params)
+        __aicore__ inline void SetOffsets(const GroupedMatmulParams& params)
         {
             for (uint64_t i = 0; i < params.l1BufferNum; ++i) {
                 weightStorage_.SetOffsets(i, params.weightOffsets[i], params.biasOffsets[i]);
@@ -465,16 +516,19 @@ private:
     };
 
 private:
-    static constexpr uint64_t CACHE_LINE_BYTES = 128UL;
+    // Tensor API atoms carry no runtime state. Class constants avoid rebuilding descriptors in K loops.
+    static constexpr auto COPY_GM_TO_L1_ATOM = asc::te::make_copy(asc::te::copy_gm_to_l1{});
+    static constexpr auto COPY_L1_TO_L0A_ATOM = asc::te::make_copy(asc::te::copy_l1_to_l0a{});
+    static constexpr auto COPY_L1_TO_L0B_ATOM = asc::te::make_copy(asc::te::copy_l1_to_l0b{});
+    static constexpr auto COPY_L1_TO_L0SCALE_A_ATOM = asc::te::make_copy(asc::te::copy_l1_to_l0scalea{});
+    static constexpr auto COPY_L1_TO_L0SCALE_B_ATOM = asc::te::make_copy(asc::te::copy_l1_to_l0scaleb{});
+    static constexpr auto COPY_L1_TO_BT_ATOM = asc::te::make_copy(asc::te::copy_l1_to_biastable{});
+    static constexpr auto COPY_L0C_TO_UB_ATOM = asc::te::make_copy(asc::te::copy_l0c_to_ub{},
+                                                                   Tile::CopyL0C2UBTraitMixSplitM{});
+    static constexpr auto COPY_L0C_TO_GM_ATOM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
 
-    __aicore__ inline static bool IsScaleCacheLineAligned(uint64_t innerSize)
+    __aicore__ inline void Init(const GroupedMatmulParams& params)
     {
-        return innerSize % CACHE_LINE_BYTES == 0UL;
-    }
-
-    __aicore__ inline void Init(const Params& params)
-    {
-        constexpr uint32_t SCALE_K_INDEX = 3;
         uint64_t l1BaseM = static_cast<uint64_t>(asc::te::get<MNK_M>(params.l1TileShape));
         uint64_t l1BaseN = static_cast<uint64_t>(asc::te::get<MNK_N>(params.l1TileShape));
         kL1Size_ = static_cast<uint64_t>(asc::te::get<MNK_K>(params.l1TileShape));
@@ -490,13 +544,11 @@ private:
         }
         readyFlag_ = params.readyFlag;
         freeFlag_ = params.freeFlag;
-        disableWeightL2_ = params.disableWeightL2;
-        problemM_ = params.problemM;
         kAL1Size_ = kL1Size_;
-        InitBufferSlots(l1BaseN);
+        InitBufferSlots();
         if (params.seedWeightCredits) {
             for (uint16_t index = 0; index < l1BufferNum_; ++index) {
-                ReleaseWeightBufferToVector();
+                ReleaseWeightBufferToVector(index);
             }
         }
         AscendC::SetMMLayoutTransform(true);
@@ -510,16 +562,22 @@ private:
         kSize_ = static_cast<uint64_t>(asc::te::get_total_column_shape(layoutA));
         mL1Len_ = static_cast<uint64_t>(asc::te::get_total_row_shape(layoutC));
         nL1Len_ = static_cast<uint64_t>(asc::te::get_total_column_shape(layoutC));
-        kTileCount_ = CeilDiv(kSize_, kL1Size_);
+        nL1LenAligned_ = Align16(nL1Len_);
+        if constexpr (IS_MATMUL) {
+            kTileCount_ = CeilDiv(kSize_, static_cast<uint64_t>(asc::te::get<MNK_K>(params_.l1TileShape)));
+        } else {
+            kTileCount_ = CeilDiv(kSize_, kL1Size_);
+        }
     }
 
     template <typename TensorA, typename TensorScaleA, typename TensorScaleB, typename TensorC>
     __aicore__ inline void ProcessBlock(const TensorA& tensorA, const TensorScaleA& tensorScaleA,
                                         const TensorScaleB& tensorScaleB, const TensorC& tensorC)
     {
+        const bool splitNForK256 = CanSplitNForK256();
         auto layoutL0C = asc::te::make_frame_layout<asc::te::nz_layout_ptn, AscendC::Std::Int<BLOCK_CUBE>>(mL1Len_,
                                                                                                            nL1Len_);
-        const BufferSlot l0cSlot{bufferManager_.GetL0CSlot(0U).Addr(), L0C_BUFFER_ID};
+        const auto& l0cSlot = l0cSlot_;
         auto tensorL0C = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0c, float>(l0cSlot.Addr()),
                                               layoutL0C);
 
@@ -528,30 +586,41 @@ private:
         int64_t aWindowStart = 0;
         int64_t aWindowLen = 0;
         uint64_t scaleWindowCols = 0;
+        uint64_t scaleWindowOffset = 0;
+        int64_t kL1Offset = 0;
+        uint64_t kL1Size = kL1Size_;
+        uint64_t kAL1Size = kAL1Size_;
+        uint64_t scaleKL1Size = scaleKL1Size_;
+        uint64_t l1BufferNum = l1BufferNum_;
+        if constexpr (IS_MATMUL) {
+            kL1Size = static_cast<uint64_t>(asc::te::get<MNK_K>(params_.l1TileShape));
+            kAL1Size = kL1Size;
+            scaleKL1Size = static_cast<uint64_t>(asc::te::get<SCALE_K_INDEX>(params_.l1TileShape));
+            l1BufferNum = params_.l1BufferNum;
+        }
         for (uint64_t kLoopIdx = 0; kLoopIdx < kTileCount_; ++kLoopIdx) {
             uint64_t l1BufIdx = l1BufIdx_;
             uint64_t scaleBufIdx = scaleBufIdx_;
-            int64_t kL1Offset = static_cast<int64_t>(kLoopIdx) * static_cast<int64_t>(kL1Size_);
-            int64_t kL1Len = Min(static_cast<int64_t>(kSize_) - kL1Offset, static_cast<int64_t>(kL1Size_));
+            int64_t kL1Len = Min(static_cast<int64_t>(kSize_) - kL1Offset, static_cast<int64_t>(kL1Size));
             uint64_t kL1LenAligned = Align64(kL1Len);
             int64_t scaleKOffset = kL1Offset / static_cast<int64_t>(MX_GROUP_SIZE);
             // A and B advance independently: an A load may serve several converted-B stages.
-            if (kL1Offset % static_cast<int64_t>(kAL1Size_) == 0) {
+            if (kL1Offset % static_cast<int64_t>(kAL1Size) == 0) {
                 aWindowStart = kL1Offset;
-                aWindowLen = Min(static_cast<int64_t>(kSize_) - aWindowStart, static_cast<int64_t>(kAL1Size_));
+                aWindowLen = Min(static_cast<int64_t>(kSize_) - aWindowStart, static_cast<int64_t>(kAL1Size));
             }
             auto tensorAL1 = l1Storage_.MakeATensor(aL1BufIdx_, mL1Len_, Align64(aWindowLen));
-            auto tensorBL1 = l1Storage_.MakeWeightTensor(l1BufIdx, 0, 0, Align16(nL1Len_), nL1Len_, kL1LenAligned);
+            auto tensorBL1 = l1Storage_.MakeWeightTensor(l1BufIdx, 0, 0, nL1LenAligned_, nL1Len_, kL1LenAligned);
 
             if (scaleWindowIter == 0) {
-                scaleWindowCols = CalcScaleWindowCols(kL1Offset);
+                scaleWindowCols = CalcScaleWindowCols(kL1Offset, scaleKL1Size);
             }
             auto tensorScaleAL1 = l1Storage_.MakeScaleATensor(scaleBufIdx, mL1Len_, scaleWindowCols);
             auto tensorScaleBL1 = l1Storage_.MakeScaleBTensor(scaleBufIdx, scaleWindowCols, nL1Len_);
             auto tensorBiasL1 = l1Storage_.MakeBiasTensor(l1BufIdx, nL1Len_);
-            const auto& l1DataSlot = bufferManager_.GetL1ASlot(aL1BufIdx_);
-            const auto& scaleASlot = bufferManager_.GetL1BSlot(SCALE_A_SLOT_BASE + scaleBufIdx);
-            const auto& scaleBSlot = bufferManager_.GetL1BSlot(SCALE_B_SLOT_BASE + scaleBufIdx);
+            const auto& l1DataSlot = aSlots_[aL1BufIdx_];
+            const auto& scaleASlot = scaleASlots_[scaleBufIdx];
+            const auto& scaleBSlot = scaleBSlots_[scaleBufIdx];
             if (scaleWindowIter == 0) {
                 auto scaleALock = scaleASlot.LockMte2();
                 auto scaleBLock = scaleBSlot.LockMte2();
@@ -562,22 +631,42 @@ private:
                 auto l1DataLock = l1DataSlot.LockMte2();
                 CopyAGmToL1(tensorA, tensorAL1, aWindowStart, aWindowLen);
             }
-            const BufferSlot weightSlot{0, static_cast<uint8_t>(WEIGHT_BUFFER_ID_BASE + l1BufIdx)};
+            const auto& weightSlot = weightSlots_[l1BufIdx];
             {
                 auto weightLock = weightSlot.LockMte2();
                 ClearConvertedWeightL1Tail(tensorBL1, kL1Len);
             }
-            WaitConvertedWeightReady();
-            IterateMatmul(kLoopIdx, tensorL0C, tensorAL1, tensorBL1, tensorScaleAL1, tensorScaleBL1, tensorBiasL1,
-                          kL1Len, kL1Offset - aWindowStart, scaleWindowIter * kL1Size_, l1DataSlot, scaleASlot,
-                          scaleBSlot, weightSlot, l0cSlot);
-            bool releaseScaleBuffer = ((scaleWindowIter + 1U) * kL1Size_ >= scaleKL1Size_) ||
+            if (splitNForK256) {
+                IterateNFragmentsK256(kLoopIdx, tensorL0C, tensorAL1, tensorBL1, tensorScaleAL1, tensorScaleBL1,
+                                      kL1Offset - aWindowStart, scaleWindowOffset, l1DataSlot, scaleASlot, scaleBSlot,
+                                      weightSlot, l0cSlot);
+            } else {
+                WaitConvertedWeightReady(l1BufIdx);
+                IterateMatmul(kLoopIdx, tensorL0C, tensorAL1, tensorBL1, tensorScaleAL1, tensorScaleBL1, tensorBiasL1,
+                              kL1Len, kL1Offset - aWindowStart, scaleWindowOffset, l1DataSlot, scaleASlot, scaleBSlot,
+                              weightSlot, l0cSlot);
+            }
+            bool releaseScaleBuffer = ((scaleWindowIter + 1U) * kL1Size >= scaleKL1Size) ||
                                       (kLoopIdx + 1U == kTileCount_);
             if (kL1Offset + kL1Len >= aWindowStart + aWindowLen) {
-                aL1BufIdx_ = (aL1BufIdx_ + 1U) & l1BufferMask_;
+                if constexpr (IS_MATMUL) {
+                    aL1BufIdx_ = NextBufferId(aL1BufIdx_, l1BufferNum);
+                } else {
+                    aL1BufIdx_ = (aL1BufIdx_ + 1U) & l1BufferMask_;
+                }
             }
-            PostProcess(releaseScaleBuffer, l1BufIdx);
+            ReleaseWeightBufferToVector(l1BufIdx);
+            if constexpr (IS_MATMUL) {
+                l1BufIdx_ = NextBufferId(l1BufIdx, l1BufferNum);
+            } else {
+                l1BufIdx_ = (l1BufIdx + 1U) & l1BufferMask_;
+            }
+            if (releaseScaleBuffer) {
+                scaleBufIdx_ ^= 1U;
+            }
             scaleWindowIter = releaseScaleBuffer ? 0U : scaleWindowIter + 1U;
+            scaleWindowOffset = releaseScaleBuffer ? 0U : scaleWindowOffset + kL1Size;
+            kL1Offset += static_cast<int64_t>(kL1Size);
         }
         if constexpr (AscendC::Std::is_same_v<DispatchPolicy, GroupedMatmulFinalizeRoutingWithWeightQuantMx>) {
             // The next two weight strips are staged before AIV releases its W8/output arena.
@@ -586,31 +675,42 @@ private:
         CopyCL0c2Gm(tensorC, tensorL0C, l0cSlot);
     }
 
-    __aicore__ inline void InitBufferSlots(uint64_t baseN)
+    __aicore__ inline void InitBufferSlots()
     {
-        for (uint32_t index = 0; index < l1BufferNum_; ++index) {
-            uint8_t bufferId = BufferLayout::L1ADataBufferId(index);
+        uint64_t l1BufferNum = l1BufferNum_;
+        if constexpr (IS_MATMUL) {
+            l1BufferNum = params_.l1BufferNum;
+        }
+        for (uint32_t index = 0; index < l1BufferNum; ++index) {
             // A is protected independently so it can outlive an individual converted-B stage.
-            bufferManager_.InitAL1(index, l1Storage_.AOffset(index), bufferId);
+            aSlots_[index] = {l1Storage_.AOffset(index), static_cast<uint8_t>(index)};
+            weightSlots_[index] = {0UL, static_cast<uint8_t>(WEIGHT_BUFFER_ID_BASE + index)};
         }
         for (uint32_t index = 0; index < DOUBLE_BUFFER_COUNT; ++index) {
-            uint32_t scaleASlot = SCALE_A_SLOT_BASE + index;
-            uint32_t scaleBSlot = SCALE_B_SLOT_BASE + index;
-            bufferManager_.InitBL1(scaleASlot, l1Storage_.ScaleAOffset(index),
-                                   BufferLayout::L1BDataBufferId(scaleASlot));
-            bufferManager_.InitBL1(scaleBSlot, l1Storage_.ScaleBOffset(index),
-                                   BufferLayout::L1BDataBufferId(scaleBSlot));
+            scaleASlots_[index] = {l1Storage_.ScaleAOffset(index), static_cast<uint8_t>(SCALE_A_LOCK_ID_BASE + index)};
+            scaleBSlots_[index] = {l1Storage_.ScaleBOffset(index), static_cast<uint8_t>(SCALE_B_LOCK_ID_BASE + index)};
         }
-        bufferManager_.InitBT(Align16(baseN) * sizeof(float));
-        bufferManager_.InitL0();
-        bufferManager_.InitL0C();
+        btSlot_ = {0UL, BT_BUFFER_ID};
+        constexpr uint64_t L0_STAGE_SIZE = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT;
+        for (uint32_t index = 0; index < DOUBLE_BUFFER_COUNT; ++index) {
+            l0Slots_[index] = {L0_STAGE_SIZE * index, static_cast<uint8_t>(L0_BUFFER_ID_BASE + index)};
+        }
+        l0cSlot_ = {0UL, L0C_BUFFER_ID};
         // Explicit slot IDs reserve 8..11 for converted-weight tail fills.
         // BT=12, L0C=13, L0 ping/pong=14/15.
     }
 
-    __aicore__ inline void WaitConvertedWeightReady() { WaitWeightFlag(readyFlag_); }
+    __aicore__ inline void WaitConvertedWeightReady(uint64_t l1Stage)
+    {
+        const uint16_t flag = IS_MATMUL ? static_cast<uint16_t>(l1Stage) : readyFlag_;
+        WaitWeightFlag(flag);
+    }
 
-    __aicore__ inline void ReleaseWeightBufferToVector() { SetWeightFlag(freeFlag_); }
+    __aicore__ inline void ReleaseWeightBufferToVector(uint64_t l1Stage)
+    {
+        const uint16_t flag = IS_MATMUL ? static_cast<uint16_t>(l1Stage) : freeFlag_;
+        SetWeightFlag(flag);
+    }
 
     __aicore__ inline void WaitWeightFlag(uint16_t flag) const
     {
@@ -622,16 +722,145 @@ private:
         Sync::NotifyVector<SyncProtocol::MODE, PIPE_MTE1>(flag, true);
     }
 
-    __aicore__ inline uint64_t CalcScaleWindowCols(int64_t kL1Offset) const
+    __aicore__ inline uint64_t CalcScaleWindowCols(int64_t kL1Offset, uint64_t scaleKL1Size) const
     {
         int64_t totalScaleCols = static_cast<int64_t>(Align64(kSize_) / MX_GROUP_SIZE);
         int64_t scaleKOffset = kL1Offset / static_cast<int64_t>(MX_GROUP_SIZE);
         if (scaleKOffset >= totalScaleCols) {
             return 0UL;
         }
-        int64_t scaleWindowKLen = Min(static_cast<int64_t>(kSize_) - kL1Offset, static_cast<int64_t>(scaleKL1Size_));
+        int64_t scaleWindowKLen = Min(static_cast<int64_t>(kSize_) - kL1Offset, static_cast<int64_t>(scaleKL1Size));
         int64_t scaleWindowCols = static_cast<int64_t>(Align64(scaleWindowKLen) / MX_GROUP_SIZE);
         return Min(scaleWindowCols, totalScaleCols - scaleKOffset);
+    }
+
+    // K256 keeps one A/scale-A operand in L0A and feeds two half-L0B N fragments.
+    static constexpr uint64_t K256_N_SPLIT_BASE_K = 128UL;
+    static constexpr uint64_t K256_N_SPLIT_SIZE = 256UL;
+    static constexpr uint64_t K256_N_SPLIT_N = AscendC::TOTAL_L0B_SIZE / DOUBLE_BUFFER_COUNT / K256_N_SPLIT_SIZE /
+                                               sizeof(ConvertedBType);
+    static constexpr uint64_t K256_N_SPLIT_MAX_M = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT / K256_N_SPLIT_SIZE /
+                                                   sizeof(AType);
+
+    __aicore__ inline bool CanSplitNForK256() const
+    {
+        if constexpr (IS_MATMUL && IsWeightNz<LayoutB>::value) {
+            return !params_.hasBias && mL1Len_ <= K256_N_SPLIT_MAX_M && kL0Size_ == K256_N_SPLIT_BASE_K &&
+                   kL1Size_ == K256_N_SPLIT_SIZE && kSize_ % K256_N_SPLIT_SIZE == 0UL &&
+                   scaleKL1Size_ >= K256_N_SPLIT_SIZE && scaleKL1Size_ % K256_N_SPLIT_SIZE == 0UL && mL1Len_ != 0UL &&
+                   nL1Len_ == DOUBLE_BUFFER_COUNT * K256_N_SPLIT_N;
+        }
+        return false;
+    }
+
+    __aicore__ inline BufferSlot GetK256SplitBL0Slot(uint64_t index) const
+    {
+        constexpr uint8_t FIRST_K256_SPLIT_B_ID = 16U;
+        static_assert(FIRST_K256_SPLIT_B_ID > L0_BUFFER_ID_BASE + 1U);
+        return {(AscendC::TOTAL_L0B_SIZE / DOUBLE_BUFFER_COUNT) * index,
+                static_cast<uint8_t>(FIRST_K256_SPLIT_B_ID + index)};
+    }
+
+    template <typename TensorL0C, typename TensorAL1, typename TensorBL1, typename TensorScaleAL1,
+              typename TensorScaleBL1>
+    __aicore__ inline void IterateNFragmentsK256(uint64_t kLoopIdx, const TensorL0C& tensorL0C,
+                                                 const TensorAL1& tensorAL1, const TensorBL1& tensorBL1,
+                                                 const TensorScaleAL1& tensorScaleAL1,
+                                                 const TensorScaleBL1& tensorScaleBL1, uint64_t kOffsetInAWindow,
+                                                 uint64_t kOffsetInScaleWindow, const BufferSlot& l1DataSlot,
+                                                 const BufferSlot& scaleASlot, const BufferSlot& scaleBSlot,
+                                                 const BufferSlot& weightSlot, const BufferSlot& l0cSlot)
+    {
+        const auto& aSlot = l0Slots_[l0BufIdx_ & 1U];
+        constexpr uint64_t SCALE_COLS = K256_N_SPLIT_SIZE / MX_GROUP_SIZE;
+        const uint64_t scaleKOffset = kOffsetInScaleWindow / MX_GROUP_SIZE;
+        auto tensorAL0 = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l0a, AType>(aSlot.Addr()),
+            asc::te::make_frame_layout<asc::te::nz_layout_ptn, AscendC::Std::Int<asc::te::c0_element<AType>>>(
+                mL1Len_, K256_N_SPLIT_SIZE));
+        auto tensorScaleAL0 = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l0scalea, ScaleAType>(aSlot.Addr() >> 4),
+            asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<MXFP_MULTI_BASE_SIZE>>(mL1Len_,
+                                                                                                        SCALE_COLS));
+        CopyK256AOperands(tensorAL0, tensorScaleAL0, tensorAL1, tensorScaleAL1, kOffsetInAWindow, scaleKOffset,
+                          l1DataSlot, scaleASlot, aSlot);
+        WaitConvertedWeightReady(l1BufIdx_);
+        auto weightSource = weightSlot.LockMte1();
+        auto scaleBSource = scaleBSlot.LockMte1();
+        auto aRead = aSlot.LockM();
+        auto cRead = l0cSlot.LockM();
+        asc::te::mmad_params mmadParams;
+        mmadParams.m = static_cast<uint16_t>(mL1Len_);
+        mmadParams.k = static_cast<uint16_t>(K256_N_SPLIT_SIZE);
+        mmadParams.n = static_cast<uint16_t>(Align16(K256_N_SPLIT_N));
+        mmadParams.init_with_zero = kLoopIdx == 0UL;
+        mmadParams.unit_flag = kLoopIdx + 1UL == kTileCount_ ? asc::te::unit_flag_mode::enable_update :
+                                                               asc::te::unit_flag_mode::enable_keep;
+        const auto mmadAtom = asc::te::make_mmad(asc::te::mmad_operation{}, Blaze::Gemm::Tile::MmadTraitMX{})
+                                  .with(mmadParams);
+        for (uint64_t fragment = 0UL; fragment < DOUBLE_BUFFER_COUNT; ++fragment) {
+            ComputeK256NFragment(fragment, tensorL0C, tensorAL0, tensorBL1, tensorScaleBL1, scaleKOffset, mmadAtom);
+        }
+        l0BufIdx_ ^= 1U;
+    }
+
+    template <typename TensorAL0, typename TensorScaleAL0, typename TensorAL1, typename TensorScaleAL1>
+    __aicore__ inline void CopyK256AOperands(const TensorAL0& tensorAL0, const TensorScaleAL0& tensorScaleAL0,
+                                             const TensorAL1& tensorAL1, const TensorScaleAL1& tensorScaleAL1,
+                                             uint64_t kOffsetInAWindow, uint64_t scaleKOffset,
+                                             const BufferSlot& l1DataSlot, const BufferSlot& scaleASlot,
+                                             const BufferSlot& aSlot)
+    {
+        constexpr uint64_t SCALE_COLS = K256_N_SPLIT_SIZE / MX_GROUP_SIZE;
+        {
+            auto dataSource = l1DataSlot.LockMte1();
+            auto scaleSource = scaleASlot.LockMte1();
+            auto aWrite = aSlot.LockMte1();
+            auto tensorBlockAL1 = tensorAL1.slice(
+                asc::te::make_coord(int64_t{0}, static_cast<int64_t>(kOffsetInAWindow)),
+                asc::te::make_shape(static_cast<int64_t>(mL1Len_), int64_t{K256_N_SPLIT_SIZE}));
+            asc::te::copy(COPY_L1_TO_L0A_ATOM, tensorAL0, tensorBlockAL1);
+            auto tensorBlockScaleAL1 = tensorScaleAL1.slice(
+                asc::te::make_coord(int64_t{0}, static_cast<int64_t>(scaleKOffset)),
+                asc::te::make_shape(static_cast<int64_t>(mL1Len_), int64_t{SCALE_COLS}));
+            asc::te::copy(COPY_L1_TO_L0SCALE_A_ATOM, tensorScaleAL0, tensorBlockScaleAL1);
+        }
+    }
+
+    template <typename TensorL0C, typename TensorAL0, typename TensorBL1, typename TensorScaleBL1, typename MmadAtom>
+    __aicore__ inline void ComputeK256NFragment(uint64_t fragment, const TensorL0C& tensorL0C,
+                                                const TensorAL0& tensorAL0, const TensorBL1& tensorBL1,
+                                                const TensorScaleBL1& tensorScaleBL1, uint64_t scaleKOffset,
+                                                const MmadAtom& mmadAtom)
+    {
+        constexpr uint64_t SCALE_COLS = K256_N_SPLIT_SIZE / MX_GROUP_SIZE;
+        const uint64_t nOffset = fragment * K256_N_SPLIT_N;
+        const uint64_t nLength = Min(nL1Len_ - nOffset, K256_N_SPLIT_N);
+        const auto bSlot = GetK256SplitBL0Slot(fragment);
+        auto tensorBL0 = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l0b, ConvertedBType>(bSlot.Addr()),
+            asc::te::make_frame_layout<asc::te::zn_layout_ptn, AscendC::Std::Int<asc::te::c0_element<AType>>>(
+                K256_N_SPLIT_SIZE, nLength));
+        auto tensorScaleBL0 = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l0scaleb, ScaleBType>(bSlot.Addr() >> 4),
+            asc::te::make_frame_layout<asc::te::nn_layout_ptn, AscendC::Std::Int<MXFP_MULTI_BASE_SIZE>>(SCALE_COLS,
+                                                                                                        nLength));
+        {
+            auto bWrite = bSlot.LockMte1();
+            auto tensorBlockBL1 = tensorBL1.slice(
+                asc::te::make_coord(int64_t{0}, static_cast<int64_t>(nOffset)),
+                asc::te::make_shape(int64_t{K256_N_SPLIT_SIZE}, static_cast<int64_t>(nLength)));
+            asc::te::copy(COPY_L1_TO_L0B_ATOM, tensorBL0, tensorBlockBL1);
+            auto tensorBlockScaleBL1 = tensorScaleBL1.slice(
+                asc::te::make_coord(static_cast<int64_t>(scaleKOffset), static_cast<int64_t>(nOffset)),
+                asc::te::make_shape(int64_t{SCALE_COLS}, static_cast<int64_t>(nLength)));
+            asc::te::copy(COPY_L1_TO_L0SCALE_B_ATOM, tensorScaleBL0, tensorBlockScaleBL1);
+        }
+        auto cFragment = tensorL0C.slice(
+            asc::te::make_coord(int64_t{0}, static_cast<int64_t>(nOffset)),
+            asc::te::make_shape(static_cast<int64_t>(mL1Len_), static_cast<int64_t>(nLength)));
+        auto bRead = bSlot.LockM();
+        asc::te::mmad(mmadAtom, cFragment, tensorAL0, tensorBL0);
     }
 
 // Padding primitives below are device-only; host UT only parses the surrounding metadata.
@@ -640,10 +869,9 @@ private:
     __aicore__ inline void CopyAGmToL1(const TensorA& tensorA, const TensorAL1& tensorAL1, int64_t kL1Offset,
                                        int64_t kL1Len)
     {
-        auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
         auto gmBlockA = tensorA.slice(asc::te::make_coord(0, kL1Offset),
                                       asc::te::make_shape(static_cast<int64_t>(mL1Len_), kL1Len));
-        asc::te::copy(copyGM2L1, tensorAL1, gmBlockA);
+        asc::te::copy(COPY_GM_TO_L1_ATOM, tensorAL1, gmBlockA);
         Blaze::Gemm::Tile::PadMxKAL1::PadZero(tensorAL1, gmBlockA);
     }
 
@@ -670,21 +898,16 @@ private:
                                              const TensorScaleAL1& tensorScaleAL1, const TensorScaleBL1& tensorScaleBL1,
                                              int64_t scaleKOffset, uint64_t scaleWindowCols)
     {
-        auto copyScaleGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
         auto gmBlockScaleA = tensorScaleA.slice(
             asc::te::make_coord(0, scaleKOffset),
             asc::te::make_shape(static_cast<int64_t>(mL1Len_), static_cast<int64_t>(scaleWindowCols)));
-        asc::te::copy(copyScaleGM2L1, tensorScaleAL1, gmBlockScaleA);
+        asc::te::copy(COPY_GM_TO_L1_ATOM, tensorScaleAL1, gmBlockScaleA);
 
         if constexpr (DispatchPolicy::SCALE_B_SOURCE == WeightPrologueMxScaleBSource::AIC) {
             auto gmBlockScaleB = tensorScaleB.slice(
                 asc::te::make_coord(scaleKOffset, 0),
                 asc::te::make_shape(static_cast<int64_t>(scaleWindowCols), static_cast<int64_t>(nL1Len_)));
-            const bool disableScaleBL2 = disableWeightL2_ && mL1Len_ >= problemM_ &&
-                                         IsScaleCacheLineAligned(scaleWindowCols);
-            gmBlockScaleB.set_l2_cache_hint(disableScaleBL2 ? asc::te::cache_mode::disable :
-                                                              asc::te::cache_mode::normal);
-            asc::te::copy(copyScaleGM2L1, tensorScaleBL1, gmBlockScaleB);
+            asc::te::copy(COPY_GM_TO_L1_ATOM, tensorScaleBL1, gmBlockScaleB);
         }
     }
 
@@ -698,15 +921,24 @@ private:
                                          const BufferSlot& scaleBSlot, const BufferSlot& weightSlot,
                                          const BufferSlot& l0cSlot)
     {
-        uint64_t kL0Iter = CeilDiv(kL1Len, kL0Size_);
+        uint64_t kL0Size = kL0Size_;
+        bool hasBias = hasBias_;
+        if constexpr (IS_MATMUL) {
+            kL0Size = static_cast<uint64_t>(asc::te::get<MNK_K>(params_.l0TileShape));
+            hasBias = params_.hasBias;
+        }
+        uint64_t kL0Iter = CeilDiv(kL1Len, kL0Size);
+        const auto& btSlot = btSlot_;
+        auto layoutBt = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(static_cast<int64_t>(1),
+                                                                               static_cast<int64_t>(nL1LenAligned_));
+        auto tensorBt = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::bias, float>(btSlot.Addr()),
+                                             layoutBt);
+        uint64_t kL0Offset = 0;
         for (uint64_t kL0Idx = 0; kL0Idx < kL0Iter; ++kL0Idx) {
-            uint64_t kL0Offset = kL0Idx * kL0Size_;
-            uint64_t realL0K = Min(kL1Len - kL0Offset, kL0Size_);
+            uint64_t realL0K = Min(kL1Len - kL0Offset, kL0Size);
             uint64_t realL0KAligned = Align64(realL0K);
             uint64_t l0BufIdx = l0BufIdx_ & 1U;
-            const BufferSlot l0Slot{bufferManager_.GetL0Slot(l0BufIdx).Addr(),
-                                    static_cast<uint8_t>(L0_BUFFER_ID_BASE + l0BufIdx)};
-            const BufferSlot btSlot{bufferManager_.GetBTSlot(0U).Addr(), BT_BUFFER_ID};
+            const auto& l0Slot = l0Slots_[l0BufIdx];
             uint64_t l0Offset = l0Slot.Addr();
 
             auto layoutAL0 = asc::te::make_frame_layout<asc::te::nz_layout_ptn,
@@ -719,32 +951,50 @@ private:
                                                                                                        nL1Len_);
             auto tensorBL0 = asc::te::make_tensor(
                 asc::te::make_mem_ptr<asc::te::location::l0b, ConvertedBType>(l0Offset), layoutBL0);
-            auto layoutBt = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
-                static_cast<int64_t>(1), static_cast<int64_t>(Align16(nL1Len_)));
-            auto tensorBt = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::bias, float>(btSlot.Addr()),
-                                                 layoutBt);
-            bool needBias = hasBias_ && kLoopIdx == 0U && kL0Idx == 0U;
+            const bool needBias = hasBias && kLoopIdx == 0U && kL0Idx == 0U;
             {
                 auto l1DataLock = l1DataSlot.LockMte1();
                 auto scaleALock = scaleASlot.LockMte1();
                 auto scaleBLock = scaleBSlot.LockMte1();
                 auto l0Lock = l0Slot.LockMte1();
-                CopyAL1ToL0(tensorAL0, tensorAL1, kOffsetInAWindow + kL0Offset, realL0KAligned);
+                auto tensorBlockAL1 = tensorAL1.slice(
+                    asc::te::make_coord(0, static_cast<int64_t>(kOffsetInAWindow + kL0Offset)),
+                    asc::te::make_shape(static_cast<int64_t>(mL1Len_), static_cast<int64_t>(realL0KAligned)));
+                asc::te::copy(COPY_L1_TO_L0A_ATOM, tensorAL0, tensorBlockAL1);
                 {
                     auto weightLock = weightSlot.LockMte1();
-                    CopyBL1ToL0(tensorBL0, tensorBL1, kL0Offset, realL0KAligned);
+                    auto tensorBlockBL1 = tensorBL1.slice(
+                        asc::te::make_coord(static_cast<int64_t>(kL0Offset), 0),
+                        asc::te::make_shape(static_cast<int64_t>(realL0KAligned), static_cast<int64_t>(nL1Len_)));
+                    asc::te::copy(COPY_L1_TO_L0B_ATOM, tensorBL0, tensorBlockBL1);
                 }
                 CopyScaleL1ToL0(tensorScaleAL1, tensorScaleBL1, kOffsetInScaleWindow + kL0Offset, realL0K, l0Offset);
                 if (needBias) {
                     auto btLock = btSlot.LockMte1();
-                    auto copyL12BT = asc::te::make_copy(asc::te::copy_l1_to_biastable{});
-                    asc::te::copy(copyL12BT, tensorBt, tensorBiasL1);
+                    asc::te::copy(COPY_L1_TO_BT_ATOM, tensorBt, tensorBiasL1);
                 }
             }
 
-            auto mmadParams = MakeMmadParams(kLoopIdx, kL0Idx, kL0Iter, realL0K, needBias);
-            ComputeMmad(mmadParams, tensorL0C, tensorAL0, tensorBL0, tensorBt, needBias, l0Slot, l0cSlot, btSlot);
+            asc::te::mmad_params mmadParams;
+            mmadParams.m = static_cast<uint16_t>(mL1Len_);
+            mmadParams.k = static_cast<uint16_t>(realL0KAligned);
+            mmadParams.n = static_cast<uint16_t>(nL1LenAligned_);
+            mmadParams.unit_flag = (kLoopIdx + 1U == kTileCount_ && kL0Idx + 1U == kL0Iter) ?
+                                       asc::te::unit_flag_mode::enable_update :
+                                       asc::te::unit_flag_mode::enable_keep;
+            mmadParams.init_with_zero = (kLoopIdx == 0U && kL0Idx == 0U && !needBias);
+            auto mmadAtom = asc::te::make_mmad(asc::te::mmad_operation{}, Blaze::Gemm::Tile::MmadTraitMX{})
+                                .with(mmadParams);
+            auto l0Lock = l0Slot.LockM();
+            auto l0cLock = l0cSlot.LockM();
+            if (needBias) {
+                auto btLock = btSlot.LockM();
+                asc::te::mmad(mmadAtom, tensorL0C, tensorAL0, tensorBL0, tensorBt);
+            } else {
+                asc::te::mmad(mmadAtom, tensorL0C, tensorAL0, tensorBL0);
+            }
             l0BufIdx_ ^= 1U;
+            kL0Offset += kL0Size;
         }
     }
 
@@ -817,20 +1067,6 @@ private:
         }
     }
 
-    __aicore__ inline asc::te::mmad_params MakeMmadParams(uint64_t kLoopIdx, uint64_t kL0Idx, uint64_t kL0Iter,
-                                                          uint64_t realL0K, bool needBias) const
-    {
-        asc::te::mmad_params mmadParams;
-        mmadParams.m = static_cast<uint16_t>(mL1Len_);
-        mmadParams.k = static_cast<uint16_t>(Align64(realL0K));
-        mmadParams.n = static_cast<uint16_t>(Align16(nL1Len_));
-        mmadParams.unit_flag = (kLoopIdx + 1U == kTileCount_ && kL0Idx + 1U == kL0Iter) ?
-                                   asc::te::unit_flag_mode::enable_update :
-                                   asc::te::unit_flag_mode::enable_keep;
-        mmadParams.init_with_zero = (kLoopIdx == 0U && kL0Idx == 0U && !needBias);
-        return mmadParams;
-    }
-
     __aicore__ inline asc::te::mmad_params DeferredMakeMmadParams(uint64_t kLoopIdx, uint64_t kL0Idx, uint64_t kL0Iter,
                                                                   uint64_t realL0K, bool needBias) const
     {
@@ -843,24 +1079,6 @@ private:
     }
 
     template <typename TensorL0C, typename TensorAL0, typename TensorBL0, typename TensorBt>
-    __aicore__ inline void ComputeMmad(const asc::te::mmad_params& mmadParams, const TensorL0C& tensorL0C,
-                                       const TensorAL0& tensorAL0, const TensorBL0& tensorBL0, const TensorBt& tensorBt,
-                                       bool needBias, const BufferSlot& l0Slot, const BufferSlot& l0cSlot,
-                                       const BufferSlot& btSlot)
-    {
-        auto mmadAtom = asc::te::make_mmad(asc::te::mmad_operation{}, Blaze::Gemm::Tile::MmadTraitMX{})
-                            .with(mmadParams);
-        auto l0Lock = l0Slot.LockM();
-        auto l0cLock = l0cSlot.LockM();
-        if (needBias) {
-            auto btLock = btSlot.LockM();
-            asc::te::mmad(mmadAtom, tensorL0C, tensorAL0, tensorBL0, tensorBt);
-        } else {
-            asc::te::mmad(mmadAtom, tensorL0C, tensorAL0, tensorBL0);
-        }
-    }
-
-    template <typename TensorL0C, typename TensorAL0, typename TensorBL0, typename TensorBt>
     __aicore__ inline void DeferredComputeMmad(const asc::te::mmad_params& mmadParams, const TensorL0C& tensorL0C,
                                                const TensorAL0& tensorAL0, const TensorBL0& tensorBL0,
                                                const TensorBt& tensorBt, bool needBias, const BufferSlot& l0Slot,
@@ -868,28 +1086,6 @@ private:
     {
         IssueMxMmad(mmadParams, tensorL0C, tensorAL0, tensorBL0);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID_M_TO_MTE1 + l0BufIdx_);
-    }
-
-    template <typename TensorAL0, typename TensorAL1>
-    __aicore__ inline void CopyAL1ToL0(const TensorAL0& tensorAL0, const TensorAL1& tensorAL1, uint64_t kL0Offset,
-                                       uint64_t realL0K)
-    {
-        auto copyL12L0A = asc::te::make_copy(asc::te::copy_l1_to_l0a{});
-        auto tensorBlockAL1 = tensorAL1.slice(
-            asc::te::make_coord(0, static_cast<int64_t>(kL0Offset)),
-            asc::te::make_shape(static_cast<int64_t>(mL1Len_), static_cast<int64_t>(realL0K)));
-        asc::te::copy(copyL12L0A, tensorAL0, tensorBlockAL1);
-    }
-
-    template <typename TensorBL0, typename TensorBL1>
-    __aicore__ inline void CopyBL1ToL0(const TensorBL0& tensorBL0, const TensorBL1& tensorBL1, uint64_t kL0Offset,
-                                       uint64_t realL0K)
-    {
-        auto copyL12L0B = asc::te::make_copy(asc::te::copy_l1_to_l0b{});
-        auto tensorBlockBL1 = tensorBL1.slice(
-            asc::te::make_coord(static_cast<int64_t>(kL0Offset), 0),
-            asc::te::make_shape(static_cast<int64_t>(realL0K), static_cast<int64_t>(nL1Len_)));
-        asc::te::copy(copyL12L0B, tensorBL0, tensorBlockBL1);
     }
 
     template <typename TensorScaleAL1, typename TensorScaleBL1>
@@ -902,53 +1098,39 @@ private:
                                                                                                   realL0ScaleCols);
         auto tensorScaleAL0 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l0scalea, ScaleAType>(l0Offset >> 4), layoutScaleAL0);
-        auto copyScaleA = asc::te::make_copy(asc::te::copy_l1_to_l0scalea{});
         uint64_t scaleKOffset = (kOffsetInScaleWindow / MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
         auto tensorBlockScaleAL1 = tensorScaleAL1.slice(
             asc::te::make_coord(0, static_cast<int64_t>(scaleKOffset)),
             asc::te::make_shape(static_cast<int64_t>(mL1Len_), static_cast<int64_t>(realL0ScaleCols)));
-        asc::te::copy(copyScaleA, tensorScaleAL0, tensorBlockScaleAL1);
+        asc::te::copy(COPY_L1_TO_L0SCALE_A_ATOM, tensorScaleAL0, tensorBlockScaleAL1);
 
         auto layoutScaleBL0 = asc::te::make_frame_layout<asc::te::nn_layout_ptn,
                                                          AscendC::Std::Int<MXFP_MULTI_BASE_SIZE>>(realL0ScaleCols,
                                                                                                   nL1Len_);
         auto tensorScaleBL0 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l0scaleb, ScaleBType>(l0Offset >> 4), layoutScaleBL0);
-        auto copyScaleB = asc::te::make_copy(asc::te::copy_l1_to_l0scaleb{});
         auto tensorBlockScaleBL1 = tensorScaleBL1.slice(
             asc::te::make_coord(static_cast<int64_t>(scaleKOffset), 0),
             asc::te::make_shape(static_cast<int64_t>(realL0ScaleCols), static_cast<int64_t>(nL1Len_)));
-        asc::te::copy(copyScaleB, tensorScaleBL0, tensorBlockScaleBL1);
+        asc::te::copy(COPY_L1_TO_L0SCALE_B_ATOM, tensorScaleBL0, tensorBlockScaleBL1);
     }
 
     template <typename TensorC, typename TensorL0C>
     __aicore__ inline void CopyCL0c2Gm(const TensorC& tensorC, const TensorL0C& tensorL0C, const BufferSlot& l0cSlot)
     {
         if constexpr (AscendC::Std::is_same_v<asc::te::get_mem_location<TensorC>, asc::te::location::ub>) {
-            auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Tile::CopyL0C2UBTraitMixSplitM{});
-            asc::te::copy(copyL0C2UB.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::enable_update}), tensorC,
-                          tensorL0C);
+            asc::te::copy(COPY_L0C_TO_UB_ATOM.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::enable_update}),
+                          tensorC, tensorL0C);
         } else {
             constexpr uint64_t FP32_64_AS_UINT64 = 0x42800000;
-            auto copyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
-            asc::te::copy(copyL0C2GM.with(asc::te::l0c_to_gm_params{asc::te::unit_flag_mode::enable_update}), tensorC,
-                          tensorL0C, FP32_64_AS_UINT64);
+            asc::te::copy(COPY_L0C_TO_GM_ATOM.with(asc::te::l0c_to_gm_params{asc::te::unit_flag_mode::enable_update}),
+                          tensorC, tensorL0C, FP32_64_AS_UINT64);
         }
     }
 
-    __aicore__ inline void PostProcess(bool releaseScaleBuffer, uint64_t l1BufIdx)
-    {
-        ReleaseWeightBufferToVector();
-        l1BufIdx_ = (l1BufIdx + 1U) & l1BufferMask_;
-        if (releaseScaleBuffer) {
-            scaleBufIdx_ ^= 1U;
-        }
-    }
-
-    using BufferLayout = BufferIdLayout<QUADRUPLE_BUFFER_COUNT, QUADRUPLE_BUFFER_COUNT, DOUBLE_BUFFER_COUNT>;
     static constexpr uint16_t FINALIZE_ROUTING_OUTPUT_FREE_FLAG = 3U;
-    static constexpr uint32_t SCALE_A_SLOT_BASE = 0U;
-    static constexpr uint32_t SCALE_B_SLOT_BASE = DOUBLE_BUFFER_COUNT;
+    static constexpr uint32_t SCALE_A_LOCK_ID_BASE = QUADRUPLE_BUFFER_COUNT;
+    static constexpr uint32_t SCALE_B_LOCK_ID_BASE = SCALE_A_LOCK_ID_BASE + DOUBLE_BUFFER_COUNT;
     // Disjoint local lock IDs: A 0..3, scales 4..7, B 8..11, BT 12, L0C 13, L0 14..15.
     static constexpr uint8_t WEIGHT_BUFFER_ID_BASE = 8;
     static constexpr uint8_t BT_BUFFER_ID = 12;
@@ -965,19 +1147,23 @@ private:
     uint64_t kL0Size_{0};
     uint64_t mL1Len_{0};
     uint64_t nL1Len_{0};
+    uint64_t nL1LenAligned_{0};
     uint64_t kTileCount_{0};
     uint64_t l1BufIdx_{0};
     uint64_t scaleBufIdx_{0};
     uint64_t l0BufIdx_{0};
+    AscendC::Std::conditional_t<IS_MATMUL, const MatmulParams&, AscendC::Std::tuple<>> params_;
     uint64_t l1BufferNum_{DOUBLE_BUFFER_COUNT};
     uint64_t l1BufferMask_{DOUBLE_BUFFER_COUNT - 1U};
     bool hasBias_{false};
-    bool disableWeightL2_{false};
-    uint64_t problemM_{0};
     AscendC::Std::conditional_t<DEFERRED_UB, AscendC::Std::tuple<>, L1Storage> l1Storage_;
-    AscendC::Std::conditional_t<DEFERRED_UB, AscendC::Std::tuple<>,
-                                BufferManager<QUADRUPLE_BUFFER_COUNT, QUADRUPLE_BUFFER_COUNT, DOUBLE_BUFFER_COUNT>>
-        bufferManager_;
+    BufferSlot aSlots_[QUADRUPLE_BUFFER_COUNT];
+    BufferSlot scaleASlots_[DOUBLE_BUFFER_COUNT];
+    BufferSlot scaleBSlots_[DOUBLE_BUFFER_COUNT];
+    BufferSlot weightSlots_[QUADRUPLE_BUFFER_COUNT];
+    BufferSlot btSlot_;
+    BufferSlot l0Slots_[DOUBLE_BUFFER_COUNT];
+    BufferSlot l0cSlot_;
 
 public:
     static_assert(!DEFERRED_UB ||
@@ -1027,11 +1213,10 @@ public:
             copyRows, halfN * SWIGLU_HALF_COUNT);
         auto accumulator = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l0c, float>(continuousL0cOffset_), layout);
-        auto copy = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Tile::CopyL0C2UBTraitMixSplitM{});
         // MMAD and FIX both check/update the L0C unit flags, as in the native GMM pipeline.
         // The next MMAD can proceed as soon as its L0C region is released.
-        asc::te::copy(copy.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::enable_update}), output,
-                      accumulator);
+        asc::te::copy(COPY_L0C_TO_UB_ATOM.with(asc::te::l0c_to_ub_params{asc::te::unit_flag_mode::enable_update}),
+                      output, accumulator);
         continuousL0cOffset_ += CeilAlign(rows, static_cast<uint64_t>(BLOCK_CUBE)) * halfN * SWIGLU_HALF_COUNT *
                                 sizeof(float);
     }
@@ -1119,12 +1304,6 @@ private:
      *    (32KB)     (32KB)
      */
     static constexpr uint64_t L0_BUF_OFFSET = 32UL * 1024UL;
-
-    // Tensor API atoms carry no runtime state. Keeping them as class constants avoids rebuilding the descriptors
-    // in every K iteration while preserving the same generated data-movement/MMAD operations.
-    static constexpr auto COPY_GM_TO_L1_ATOM = asc::te::make_copy(asc::te::copy_gm_to_l1{});
-    static constexpr auto COPY_L1_TO_L0A_ATOM = asc::te::make_copy(asc::te::copy_l1_to_l0a{});
-    static constexpr auto COPY_L1_TO_L0B_ATOM = asc::te::make_copy(asc::te::copy_l1_to_l0b{});
 };
 
 #define BLAZE_WQGMM_MX_MIX_MMAD_TEMPLATE_PARAM                                                                       \
