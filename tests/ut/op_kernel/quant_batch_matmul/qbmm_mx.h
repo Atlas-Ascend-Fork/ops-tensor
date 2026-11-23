@@ -216,11 +216,11 @@ __aicore__ inline void QBMML0CPingpongWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADD
 }
 
 template <typename AType, typename BType, typename CType, typename BiasType,
-          uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE>
+          uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE, bool TransA = false>
 __aicore__ inline void QBMMMxWithoutBatchWrapper(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM, GM_ADDR scaleGM,
                                                  GM_ADDR biasGM, GM_ADDR yGM, const QBMMV3TilingData& tilingData)
 {
-    using LayoutA = asc::te::nd_ext_layout_ptn;
+    using LayoutA = AscendC::Std::conditional_t<TransA, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
     using LayoutB = asc::te::nd_ext_layout_ptn;
     using LayoutC = asc::te::nd_ext_layout_ptn;
     using LayoutBias = asc::te::nd_ext_layout_ptn;
@@ -358,14 +358,14 @@ __global__ __aicore__ void qbmm_mx_l0c_pingpong_without_batch_a_full_load_kernel
         x1GM, x2GM, pertokenScaleGM, scaleGM, biasGM, yGM, *tilingData);
 }
 
-template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS>
+template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS, bool TransA = false>
 __global__ __aicore__ void qbmm_mx_without_batch_kernel_entry(GM_ADDR x1GM, GM_ADDR x2GM, GM_ADDR pertokenScaleGM,
                                                               GM_ADDR scaleGM, GM_ADDR biasGM, GM_ADDR yGM,
                                                               GM_ADDR tilingGM)
 {
     const auto* tilingData = reinterpret_cast<const QBMMV3TilingData*>(tilingGM);
-    QBMMUT::QBMMMxWithoutBatchWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS>(x1GM, x2GM, pertokenScaleGM, scaleGM,
-                                                                               biasGM, yGM, *tilingData);
+    QBMMUT::QBMMMxWithoutBatchWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, Blaze::Gemm::NONE_FULL_LOAD_MODE,
+                                      TransA>(x1GM, x2GM, pertokenScaleGM, scaleGM, biasGM, yGM, *tilingData);
 }
 
 template <class DTYPE_X1, class DTYPE_X2, class DTYPE_Y, class DTYPE_BIAS>

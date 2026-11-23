@@ -145,6 +145,7 @@ public:
         uint64_t baseM = asc::te::get<IDX_M_IDX>(l0TileShape);
         baseN_ = asc::te::get<IDX_N_IDX>(l0TileShape);
         baseK_ = asc::te::get<IDX_K_IDX>(l0TileShape);
+        kL1Iter_ = CeilDiv(k_, kL1_);
         constexpr uint64_t sizeShift = IsFp4<BType>() ? 1 : 0;
         uint64_t l1HalfBufNum = l1BufNum_ >> 1;
         uint64_t bL1OneBuffer = (baseN_ * Align64(kL1_)) >> sizeShift;
@@ -155,7 +156,6 @@ public:
         } else {
             InitAFullLoadL1BufferOffsets(baseM, l1HalfBufNum, bL1OneBuffer, scaleBL1OneBuffer, biasL1OneBuffer);
         }
-        kL1Iter_ = CeilDiv(k_, kL1_);
     }
 
     template <typename TensorA, typename TensorB, typename TensorScaleA, typename TensorScaleB, typename TensorBias,
@@ -173,6 +173,9 @@ public:
         } else {
             tileL1L0Param.curN = tileL1L0Param.curGmN;
         }
+        if constexpr (CAN_USE_DN2NZ_A || CAN_USE_DN2NZ_B) {
+            SelectDn2NzOperands(tileL1L0Param);
+        }
         constexpr uint64_t halfL0cSize = AscendC::TOTAL_L0C_SIZE >> 1;
         const uint64_t l0cOffset = (l0cPingPong_ & 1) * halfL0cSize;
         auto layoutL0C = asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<C0_SIZE_L0C>>{}(
@@ -181,15 +184,8 @@ public:
                                               layoutL0C);
         const bool isFirstSplitK = splitKIdx == 0;
         const bool isLastSplitK = splitKIdx == splitKNum_ - 1;
-        const uint64_t scaleKIter = CeilDiv(scaleKL1_, kL1_);
-        uint64_t scaleKIterIdx = 0;
-        const uint64_t scaleAKOffsetStride = MxScaleKLen<AType>(kL1_);
-        const uint64_t scaleBKOffsetStride = MxScaleKLen<BType>(kL1_);
-        for (uint64_t iter0 = 0; iter0 < kL1Iter_; ++iter0) {
-            ProcessL1Iteration(gmA, gmB, gmScaleA, gmScaleB, gmBias, tensorL0C, tileL1L0Param, iter0,
-                               scaleAKOffsetStride, scaleBKOffsetStride, scaleKIter, scaleKIterIdx, isFirstSplitK,
+        DispatchMmadByL1Layout(gmA, gmB, gmScaleA, gmScaleB, gmBias, tensorL0C, tileL1L0Param, isFirstSplitK,
                                isLastSplitK);
-        }
         if (isLastSplitK) {
             CopyL0CToOut(tensorOut, tensorL0C, tileL1L0Param);
             if (enableL0cPingPong_) {
@@ -199,11 +195,21 @@ public:
     }
 
 private:
+    static constexpr bool CAN_USE_DN2NZ_A = Blaze::Gemm::Tile::MxDn2NzTrait::SUPPORTED && !IsFp4<AType>() && TRANS_A;
+    static constexpr bool CAN_USE_DN2NZ_B = Blaze::Gemm::Tile::MxDn2NzTrait::SUPPORTED && !IsFp4<BType>() && !TRANS_B &&
+                                            !CONCAT_N && !WEIGHT_NZ;
+    // Estimated issue budget for A/B matrix and scale MTE1 copies in one KL1 window.
+    static constexpr uint64_t MTE1_ISSUE_BUDGET_PER_KL1 = 28UL;
+
+    template <bool Dn2NzMTE2TransA>
     using MakeLayoutAL1 = AscendC::Std::conditional_t<
-        TRANS_A, asc::te::frame_layout_format<asc::te::zn_layout_ptn, AscendC::Std::Int<asc::te::c0_element<AType>>>,
+        TRANS_A && !Dn2NzMTE2TransA,
+        asc::te::frame_layout_format<asc::te::zn_layout_ptn, AscendC::Std::Int<asc::te::c0_element<AType>>>,
         asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<asc::te::c0_element<AType>>>>;
+    template <bool Dn2NzMTE2TransB>
     using MakeLayoutBL1 = AscendC::Std::conditional_t<
-        TRANS_B, asc::te::frame_layout_format<asc::te::zn_layout_ptn, AscendC::Std::Int<asc::te::c0_element<BType>>>,
+        TRANS_B || Dn2NzMTE2TransB,
+        asc::te::frame_layout_format<asc::te::zn_layout_ptn, AscendC::Std::Int<asc::te::c0_element<BType>>>,
         asc::te::frame_layout_format<asc::te::nz_layout_ptn, AscendC::Std::Int<asc::te::c0_element<BType>>>>;
 
     struct TileL1L0Param {
@@ -322,8 +328,124 @@ private:
         }
     }
 
+    __aicore__ inline void SelectDn2NzOperands(const TileL1L0Param& tileL1L0Param)
+    {
+        // With K as the outer axis, the original L1 layout splits the MTE1 copy along K
+        // when M for A or N for B rounds up to an odd number of 16-element blocks.
+        // Count splits in the original layouts even when an operand cannot use DN2NZ.
+        const bool splitA = TRANS_A && ((Blaze::Gemm::CeilDiv(tileL1L0Param.curM, BLOCK_CUBE) & 1UL) != 0UL);
+        const bool splitB = !TRANS_B && !CONCAT_N && !WEIGHT_NZ &&
+                            ((Blaze::Gemm::CeilDiv(tileL1L0Param.curN, BLOCK_CUBE) & 1UL) != 0UL);
+        dn2NzMTE2TransA_ = CAN_USE_DN2NZ_A && splitA;
+        dn2NzMTE2TransB_ = CAN_USE_DN2NZ_B && splitB;
+
+        // Estimate the L1-to-L0 MTE1 command count for one configured KL1 window.
+        // Each L0 K tile has two scale copies, one for A and one for B. Its matrix
+        // copy takes one command per operand, or ceil(baseK / C0) for a split copy.
+        // Use the per-window limit of 28 commands to decide whether to change the L1 layouts.
+        const uint64_t l0Tiles = CeilDiv(kL1_, baseK_);
+        constexpr uint64_t c0SizeA = static_cast<uint64_t>(asc::te::c0_element<AType>);
+        constexpr uint64_t c0SizeB = static_cast<uint64_t>(asc::te::c0_element<BType>);
+        const uint64_t splitACopies = CeilDiv(baseK_, c0SizeA) * l0Tiles;
+        const uint64_t splitBCopies = CeilDiv(baseK_, c0SizeB) * l0Tiles;
+        const uint64_t scaleCopies = 2UL * l0Tiles;
+
+        if ((dn2NzMTE2TransA_ && !dn2NzMTE2TransB_) &&
+            scaleCopies + splitACopies + (splitB ? splitBCopies : l0Tiles) <= MTE1_ISSUE_BUDGET_PER_KL1) {
+            // Only A is a DN2NZ candidate. Keep both original layouts if the matrix and scale
+            // commands stay within the limit, including any split commands for B.
+            dn2NzMTE2TransA_ = false;
+            dn2NzMTE2TransB_ = false;
+        }
+
+        if ((!dn2NzMTE2TransA_ && dn2NzMTE2TransB_) &&
+            scaleCopies + l0Tiles + splitBCopies <= MTE1_ISSUE_BUDGET_PER_KL1) {
+            // In the supported type pairs, a DN2NZ candidate for B also implies a non-packed A.
+            // A therefore has an unsplit copy here. Keep both original layouts when A's copies,
+            // B's split copies, and both scale copies per L0 K tile stay within the limit.
+            dn2NzMTE2TransA_ = false;
+            dn2NzMTE2TransB_ = false;
+        }
+
+        if (dn2NzMTE2TransA_ && dn2NzMTE2TransB_) {
+            if (scaleCopies + splitACopies + splitBCopies <= MTE1_ISSUE_BUDGET_PER_KL1) {
+                // Both matrix copies split. Their combined command count plus the scale
+                // commands stays within the limit, so keep both original layouts.
+                dn2NzMTE2TransA_ = false;
+                dn2NzMTE2TransB_ = false;
+            } else {
+                if (tileL1L0Param.curM > tileL1L0Param.curN &&
+                    scaleCopies + l0Tiles + splitACopies <= MTE1_ISSUE_BUDGET_PER_KL1) {
+                    // M > N makes B the smaller operand for this K tile. Convert only B:
+                    // A still splits, but B takes one command per L0 K tile and the total fits.
+                    dn2NzMTE2TransA_ = false;
+                    dn2NzMTE2TransB_ = true;
+                } else if (scaleCopies + l0Tiles + splitBCopies <= MTE1_ISSUE_BUDGET_PER_KL1) {
+                    // Convert only A. A takes one command per L0 K tile, and its commands
+                    // plus B's split commands and the scale commands stay within the limit.
+                    dn2NzMTE2TransA_ = true;
+                    dn2NzMTE2TransB_ = false;
+                } else {
+                    // The checks above leave no single-operand choice. Convert both so
+                    // A and B each take one MTE1 command per L0 K tile.
+                    dn2NzMTE2TransA_ = true;
+                    dn2NzMTE2TransB_ = true;
+                }
+            }
+        }
+    }
+
     template <typename TensorA, typename TensorB, typename TensorScaleA, typename TensorScaleB, typename TensorBias,
               typename TensorL0C>
+    __aicore__ inline void DispatchMmadByL1Layout(TensorA const& gmA, TensorB const& gmB, TensorScaleA const& gmScaleA,
+                                                  TensorScaleB const& gmScaleB, TensorBias const& gmBias,
+                                                  TensorL0C& tensorL0C, TileL1L0Param& tileL1L0Param,
+                                                  bool isFirstSplitK, bool isLastSplitK)
+    {
+        if constexpr (CAN_USE_DN2NZ_A) {
+            if (dn2NzMTE2TransA_) {
+                if constexpr (CAN_USE_DN2NZ_B) {
+                    if (dn2NzMTE2TransB_) {
+                        IterateKL1<true, true>(gmA, gmB, gmScaleA, gmScaleB, gmBias, tensorL0C, tileL1L0Param,
+                                               isFirstSplitK, isLastSplitK);
+                        return;
+                    }
+                }
+                IterateKL1<true, false>(gmA, gmB, gmScaleA, gmScaleB, gmBias, tensorL0C, tileL1L0Param, isFirstSplitK,
+                                        isLastSplitK);
+                return;
+            }
+        }
+        if constexpr (CAN_USE_DN2NZ_B) {
+            if (dn2NzMTE2TransB_) {
+                IterateKL1<false, true>(gmA, gmB, gmScaleA, gmScaleB, gmBias, tensorL0C, tileL1L0Param, isFirstSplitK,
+                                        isLastSplitK);
+                return;
+            }
+        }
+        IterateKL1<false, false>(gmA, gmB, gmScaleA, gmScaleB, gmBias, tensorL0C, tileL1L0Param, isFirstSplitK,
+                                 isLastSplitK);
+    }
+
+    template <bool Dn2NzMTE2TransA, bool Dn2NzMTE2TransB, typename TensorA, typename TensorB, typename TensorScaleA,
+              typename TensorScaleB, typename TensorBias, typename TensorL0C>
+    __aicore__ inline void IterateKL1(TensorA const& gmA, TensorB const& gmB, TensorScaleA const& gmScaleA,
+                                      TensorScaleB const& gmScaleB, TensorBias const& gmBias, TensorL0C& tensorL0C,
+                                      TileL1L0Param& tileL1L0Param, bool isFirstSplitK, bool isLastSplitK)
+    {
+        const uint64_t scaleKIter = CeilDiv(scaleKL1_, kL1_);
+        uint64_t scaleKIterIdx = 0;
+        const uint64_t scaleAKOffsetStride = MxScaleKLen<AType>(kL1_);
+        const uint64_t scaleBKOffsetStride = MxScaleKLen<BType>(kL1_);
+        for (uint64_t iter0 = 0; iter0 < kL1Iter_; ++iter0) {
+            ProcessL1Iteration<Dn2NzMTE2TransA, Dn2NzMTE2TransB>(
+                gmA, gmB, gmScaleA, gmScaleB, gmBias, tensorL0C, tileL1L0Param, iter0, scaleAKOffsetStride,
+                scaleBKOffsetStride, scaleKIter, scaleKIterIdx, isFirstSplitK, isLastSplitK);
+        }
+    }
+
+    template <bool Dn2NzMTE2TransA, bool Dn2NzMTE2TransB, typename TensorA, typename TensorB, typename TensorScaleA,
+              typename TensorScaleB, typename TensorBias, typename TensorL0C>
     __aicore__ inline void ProcessL1Iteration(TensorA const& gmA, TensorB const& gmB, TensorScaleA const& gmScaleA,
                                               TensorScaleB const& gmScaleB, TensorBias const& gmBias,
                                               TensorL0C& tensorL0C, TileL1L0Param& tileL1L0Param, uint64_t iter0,
@@ -343,9 +465,9 @@ private:
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BufId);
         tileL1L0Param.curGmKL1 = (iter0 + 1 == kL1Iter_) ? (k_ - kL1Offset) : kL1_;
         tileL1L0Param.curPadKL1 = CeilAlign(tileL1L0Param.curGmKL1, K_ALIGN);
-        auto tensorAL1 = CopyAToL1(gmA, tileL1L0Param, l1BufId, kL1Offset);
+        auto tensorAL1 = CopyAToL1<Dn2NzMTE2TransA>(gmA, tileL1L0Param, l1BufId, kL1Offset);
         auto tensorBiasL1 = CopyBiasToL1(gmBias, tileL1L0Param, scaleL1BufId, iter0, isFirstSplitK);
-        auto tensorBL1 = CopyBToL1(gmB, tileL1L0Param, l1BufId, kL1Offset);
+        auto tensorBL1 = CopyBToL1<Dn2NzMTE2TransB>(gmB, tileL1L0Param, l1BufId, kL1Offset);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BufId);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BufId);
         const uint64_t scaleBKOffset = scaleKIterIdx * scaleBKOffsetStride;
@@ -461,14 +583,14 @@ private:
         }
     }
 
-    template <typename TensorA>
+    template <bool Dn2NzMTE2TransA, typename TensorA>
     __aicore__ inline auto CopyAToL1(TensorA const& gmA, const TileL1L0Param& tileL1L0Param, uint64_t l1BufId,
                                      uint64_t kL1Offset)
     {
         auto copyGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{}, Blaze::Gemm::Tile::CopyGM2L1TraitPreAllocation{});
         if constexpr (DispatchPolicy::FULL_LOAD_MODE == NONE_FULL_LOAD_MODE) {
             const uint64_t aL1Offset = l1BufferAOffset_[l1BufId];
-            auto layoutAL1 = MakeLayoutAL1{}(tileL1L0Param.curM, tileL1L0Param.curPadKL1);
+            auto layoutAL1 = MakeLayoutAL1<Dn2NzMTE2TransA>{}(tileL1L0Param.curM, tileL1L0Param.curPadKL1);
             auto gmBlockA = gmA.slice(asc::te::make_coord(0, kL1Offset),
                                       asc::te::make_shape(tileL1L0Param.curM, tileL1L0Param.curGmKL1));
             auto tensorAL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Offset),
@@ -480,7 +602,7 @@ private:
             return tensorAL1;
         } else {
             const uint64_t aL1Offset = l1BufferAOffset_[0];
-            auto layoutAL1 = MakeLayoutAL1{}(tileL1L0Param.curM, Align64(k_));
+            auto layoutAL1 = MakeLayoutAL1<Dn2NzMTE2TransA>{}(tileL1L0Param.curM, Align64(k_));
             auto tensorTotalAL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Offset),
                                                        layoutAL1);
             auto tensorAL1 = tensorTotalAL1.slice(asc::te::make_coord(0, kL1Offset),
@@ -526,12 +648,12 @@ private:
         return tensorBiasL1;
     }
 
-    template <typename TensorB>
+    template <bool Dn2NzMTE2TransB, typename TensorB>
     __aicore__ inline auto CopyBToL1(TensorB const& gmB, const TileL1L0Param& tileL1L0Param, uint64_t l1BufId,
                                      uint64_t kL1Offset)
     {
         const uint64_t bL1Offset = l1BufferBOffset_[l1BufId];
-        auto layoutBL1 = MakeLayoutBL1{}(tileL1L0Param.curPadKL1, tileL1L0Param.curN);
+        auto layoutBL1 = MakeLayoutBL1<Dn2NzMTE2TransB>{}(tileL1L0Param.curPadKL1, tileL1L0Param.curN);
         auto tensorBL1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, BType>(bL1Offset),
                                               layoutBL1);
         auto gmBlockB = gmB.slice(asc::te::make_coord(kL1Offset, 0),
@@ -748,6 +870,8 @@ private:
     uint64_t l0PingPong_{0};
     uint64_t l0cPingPong_{0};
     uint64_t splitKNum_{1};
+    bool dn2NzMTE2TransA_{false};
+    bool dn2NzMTE2TransB_{false};
 
     uint64_t l1BufferAOffset_[QUADRUPLE_BUFFER_COUNT] = {0UL};   // default 4 buffer
     uint64_t l1BufferBOffset_[QUADRUPLE_BUFFER_COUNT] = {0UL};   // default 4 buffer

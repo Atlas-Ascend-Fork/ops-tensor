@@ -20,6 +20,15 @@
 
 namespace Blaze::Gemm::Tile {
 
+// Controls adaptive A/B layout conversion during GM-to-L1 copies in QBMM MX.
+struct MxDn2NzTrait {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    static constexpr bool SUPPORTED = true;
+#else
+    static constexpr bool SUPPORTED = false;
+#endif
+};
+
 template <typename AType, typename LayoutA, typename BType, typename LayoutB>
 struct MxKZeroPaddingTrait {
 #if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))

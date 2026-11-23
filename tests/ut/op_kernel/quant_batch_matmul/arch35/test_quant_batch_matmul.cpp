@@ -907,9 +907,10 @@ void RunMxSmoke(const MxCaseCfg& cfg)
     ASSERT_TRUE(ok) << "QBMM MX kernel execution failed";
 }
 
-template <typename AType, typename BType, typename CType, typename BiasType,
-          uint64_t FullLoadMode = Blaze::Gemm::NONE_FULL_LOAD_MODE>
-void RunMxWithoutBatchSmoke(const MxCaseCfg& cfg)
+template <typename AType, typename BType, typename CType, typename BiasType>
+void RunMxWithoutBatchSmoke(const MxCaseCfg& cfg,
+                            decltype(&qbmm_mx_without_batch_kernel_entry<AType, BType, CType, BiasType>) kernelFunc =
+                                qbmm_mx_without_batch_kernel_entry<AType, BType, CType, BiasType>)
 {
     const size_t scaleKLen = GetMxScaleKLen(cfg.K);
     const size_t x1Size = GetMxInputSize<AType>(cfg.M * cfg.K);
@@ -947,10 +948,6 @@ void RunMxWithoutBatchSmoke(const MxCaseCfg& cfg)
 
     AscendC::SetKernelMode(KernelMode::MIX_MODE);
 
-    auto kernelFunc = qbmm_mx_without_batch_kernel_entry<AType, BType, CType, BiasType>;
-    if constexpr (FullLoadMode == Blaze::Gemm::A_FULL_LOAD_MODE) {
-        kernelFunc = qbmm_mx_without_batch_a_full_load_kernel_entry<AType, BType, CType, BiasType>;
-    }
     const bool ok = KERNEL_RUN_KF(kernelFunc, cfg.blockNum, x1GM.Get(), x2GM.Get(), pertokenScaleGM.Get(),
                                   scaleGM.Get(), biasGM.Get(), yGM.Get(), tilingGM.Get());
 
@@ -1450,7 +1447,8 @@ TEST_F(QBMMV3Test, Test_MX_FP8_WithoutBatchDoubleBuffer_AFullLoad)
 {
     using MxType = fp8_e4m3fn_t;
     MxCaseCfg cfg{64, 128, 128, 1, 64, 128, 64, 64, 64, 2, false};
-    RunMxWithoutBatchSmoke<MxType, MxType, float, float, Blaze::Gemm::A_FULL_LOAD_MODE>(cfg);
+    RunMxWithoutBatchSmoke<MxType, MxType, float, float>(
+        cfg, qbmm_mx_without_batch_a_full_load_kernel_entry<MxType, MxType, float, float>);
 }
 
 TEST_F(QBMMV3Test, Test_MX_FP8_WithoutBatchTripleBuffer)
@@ -1591,6 +1589,15 @@ TEST_F(QBMMV3Test, ExplicitMxSplitMBatchBias)
     CheckExplicitMxTile<fp8_e4m3fn_t, false, true>(64, 128, 128, 2, 2, true, true);
 }
 TEST_F(QBMMV3Test, ExplicitMxWithoutBatchBias) { CheckExplicitMxTile<fp8_e4m3fn_t>(128, 64, 128, 1, 1, true); }
+TEST(QbmmMxDn2NzTest, KeepsOriginalLayoutAboveMte1BudgetOnAscend950)
+{
+    static_assert(!Blaze::Gemm::Tile::MxDn2NzTrait::SUPPORTED);
+    using MxType = fp8_e4m3fn_t;
+    // Both operands split with these tail sizes, for 50 MTE1 copies in the original layouts.
+    const MxCaseCfg cfg{16, 16, 640, 1, 32, 32, 128, 640, 640, 2, false};
+    RunMxWithoutBatchSmoke<MxType, MxType, float, float>(
+        cfg, qbmm_mx_without_batch_kernel_entry<MxType, MxType, float, float, true>);
+}
 
 TEST_F(QBMMV3Test, Test_MX_FP8_L0CPingpong)
 {
