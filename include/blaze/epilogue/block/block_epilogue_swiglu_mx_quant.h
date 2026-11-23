@@ -91,6 +91,7 @@ constexpr AscendC::Reg::DivSpecificMode A8W4_MODE2_DIV_1ULP = {
  * BF16 output. It is opt-in
  *         so existing BF16 instantiations preserve their MX quant behavior.
  * \tparam EnableSmoothScale_ Enables expert smoothing and weight-prologue scale restoration for MX A8W4.
+ * \tparam A8W4V3Fast_ Selects the opt-in V3 A8W4 UB/pipeline specialization; default false preserves legacy behavior.
  */
 template <typename DataTypeOut_, typename DataTypeIn_ = float, typename DataTypeScale_ = fp8_e8m0_t,
           bool DirectBf16Output_ = false, bool EnableSmoothScale_ = false, bool A8W4V3Fast_ = false>
@@ -102,6 +103,10 @@ public:
     // Legacy APT also instantiates inactive FP4 combinations. Validate execution dtypes in the upper-layer route.
     static constexpr bool DIRECT_BF16_OUTPUT = DirectBf16Output_;
     static constexpr bool ENABLE_SMOOTH_SCALE = EnableSmoothScale_;
+    // Opt-in compile-time selection of the V3 A8W4 epilogue: dedicated UB layout,
+    // double-buffered output, smooth-scale prefetch, and fused SwiGLU/MX quant stages.
+    // "FAST" is the historical specialization name, not a per-shape speed guarantee.
+    // The default false keeps legacy instantiations on their existing implementation.
     static constexpr bool A8W4_V3_FAST = A8W4V3Fast_;
     static_assert(!A8W4_V3_FAST || (ENABLE_SMOOTH_SCALE && !DIRECT_BF16_OUTPUT),
                   "The V3 A8W4 fast path requires the MX expert-smoothing specialization.");

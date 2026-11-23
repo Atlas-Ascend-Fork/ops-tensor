@@ -19,6 +19,18 @@ Kernel 层拥有 group/block 调度、AIV Prologue、AIC MMAD 调用和同步生
 - 连续多 expert Weight 或每 expert 一个 Tensor 的 TensorList；
 - N 方向 main、first-tail、second-tail 三段调度。
 
+## MX Pipeline 策略约束
+
+`Blaze::Gemm::Kernel::MxPipeline::GmmWeightQuantMxKernel` 的 `PipelineStages_` 必须与
+`BlockMmad::DispatchPolicy`、`BlockPrologue::DispatchPolicy` 对应同一个
+`MxWeightPipelineConfig`，否则编译期报错，避免生产者和消费者采用不同的缓冲布局与同步协议。
+
+`MxPipelineMode` 与模式派发语义定义在 `blaze/gemm/policy/dispatch_policy.h` 中的
+`MxWeightPipelinePolicy`；物理缓冲布局和搬运配置仍由 Block 层的
+`MxWeightPipelineConfig` 管理。原有 Config 名称、模式编号和默认路径保持不变。
+
+调用方通过 `Params` 和 `operator()` 进入 Kernel；不再提供未使用的 `RunSssUnfolded` 入口。
+
 ## 公共接口
 
 ~~~cpp

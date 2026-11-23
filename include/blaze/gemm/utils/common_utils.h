@@ -75,25 +75,6 @@ constexpr uint64_t MX_MMAD_K_ALIGNMENT = 64UL;
 #endif
 constexpr uint64_t MXFP_MULTI_BASE_SIZE = 2UL;
 constexpr uint64_t BLOCK_CUBE = 16UL;
-/*!
- * \brief Shared physical L1 partition for the grouped MX weight-prologue producer and consumers.
- */
-struct MxWeightQuantGmmL1Layout {
-    static constexpr uint64_t KIB = 1024UL;
-    static constexpr uint64_t SCALE_AL1_OFFSET = 64UL * KIB;
-    static constexpr uint64_t SCALE_BL1_OFFSET = 96UL * KIB;
-    static constexpr uint64_t A_L1_OFFSET = 128UL * KIB;
-    static constexpr uint64_t L1_BUF_OFFSET = 384UL * KIB;
-    static constexpr uint64_t A_L1_BUF_OFFSET = 128UL * KIB;
-    static constexpr uint64_t A_L1_SINGLE_BUF_SIZE = 128UL * KIB;
-    static constexpr uint64_t B_L1_SINGLE_BUF_SIZE = 64UL * KIB;
-    static constexpr uint64_t BIAS_L1_SINGLE_BUF_SIZE = 4UL * KIB;
-    static constexpr uint64_t WEIGHT_OFFSETS[DOUBLE_BUFFER_COUNT] = {0, L1_BUF_OFFSET};
-    static constexpr uint64_t BIAS_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {64 * KIB, 380 * KIB};
-    static constexpr uint64_t SCALE_B_OFFSETS[DOUBLE_BUFFER_COUNT] = {SCALE_BL1_OFFSET,
-                                                                      SCALE_BL1_OFFSET + L1_BUF_OFFSET};
-    static constexpr uint64_t SCALE_K_WINDOW = 4096UL;
-};
 
 constexpr uint32_t FINAL_ACCUMULATION = 3;
 constexpr uint32_t NON_FINAL_ACCUMULATION = 2;
@@ -397,41 +378,6 @@ __aicore__ inline uint64_t GetCurrentBlockIdx()
         return AscendC::GetBlockIdx() / AscendC::GetTaskRation();
     }
     return AscendC::GetBlockIdx();
-}
-
-/*!
- * \brief Select MX weight-prologue K blocking without changing the caller's capacity model.
- */
-template <typename AType, uint64_t FullWidth = 0>
-__aicore__ inline void CalcWeightQuantMxKBlock(uint64_t rows, uint64_t columns, uint64_t modelBytes,
-                                               uint64_t actualBytes, uint64_t reuseFactor, uint64_t& ka, uint64_t& kb,
-                                               uint64_t& k0)
-{
-    constexpr uint64_t LARGE_K = 512UL;
-    constexpr uint64_t MEDIUM_K = 256UL;
-    constexpr uint64_t SMALL_K = 128UL;
-    constexpr uint64_t SMALL_TILE_LIMIT = 128UL;
-    if (rows == 0 || reuseFactor == 0) {
-        ka = 0;
-        kb = 0;
-        k0 = SMALL_K;
-        return;
-    }
-    const uint64_t mThreshold = modelBytes / sizeof(AType) / LARGE_K / BLOCK_CUBE * BLOCK_CUBE;
-    kb = rows <= mThreshold && columns <= SMALL_TILE_LIMIT ? LARGE_K : MEDIUM_K;
-    const uint64_t alignedRows = CeilAlign(rows, static_cast<uint64_t>(BLOCK_CUBE));
-    if constexpr (FullWidth != 0) {
-        reuseFactor = alignedRows >= FullWidth / reuseFactor && columns == FullWidth ? 1 : reuseFactor;
-    }
-    uint64_t depth = CeilDiv(columns, alignedRows * reuseFactor);
-    depth = depth == 0 ? 1 : depth;
-    const uint64_t modelDepth = (modelBytes / sizeof(AType)) / (alignedRows * kb);
-    const uint64_t actualDepth = (actualBytes / sizeof(AType)) / (alignedRows * kb);
-    uint64_t maxDepth = modelDepth < actualDepth ? modelDepth : actualDepth;
-    maxDepth = maxDepth == 0 ? 1 : maxDepth;
-    depth = depth < maxDepth ? depth : maxDepth;
-    ka = depth * kb;
-    k0 = rows <= SMALL_TILE_LIMIT && columns <= SMALL_TILE_LIMIT ? MEDIUM_K : SMALL_K;
 }
 
 } // namespace Gemm

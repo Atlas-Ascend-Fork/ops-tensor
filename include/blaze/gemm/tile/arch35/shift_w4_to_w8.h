@@ -86,15 +86,6 @@ public:
         }
     }
 
-    template <typename W, typename O>
-    __aicore__ inline static void ConvertContinuousPair(const W& left, const O& leftOutput, const W& right,
-                                                        const O& rightOutput)
-    {
-        ShiftW4ToW8 converter;
-        asc_vf_call<ShiftW4ToW8PairVf>(converter.MakeContinuousWeightParams(left, leftOutput),
-                                       converter.MakeContinuousWeightParams(right, rightOutput));
-    }
-
 private:
     __aicore__ inline ShiftW4ToW8() = default;
     using OutType = OutType_;
@@ -123,14 +114,6 @@ private:
         __ubuf__ OutType_* weight8BitPhyAddr;
         __ubuf__ OutType_* weight8BitPhyAddr1;
     };
-
-    template <typename W, typename O>
-    __aicore__ inline ShiftW4ToW8Params MakeContinuousWeightParams(const W& input, const O& output) const
-    {
-        auto params = MakeWeightParams(input, output);
-        params.loopKNum *= K32_SLABS_PER_K64;
-        return params;
-    }
 
     // Derive kernel-loop and stride parameters directly from tensor shape/stride metadata.
     template <typename Weight4BitTensorType, typename Weight8BitTensorType>
@@ -211,12 +194,6 @@ private:
 
     static __simd_vf__ inline void ShiftW4ToW8Vf(ShiftW4ToW8Params params) { ShiftW4ToW8Callee(params); }
 
-    static __simd_vf__ inline void ShiftW4ToW8PairVf(ShiftW4ToW8Params left, ShiftW4ToW8Params right)
-    {
-        ShiftW4ToW8ExtendedCallee(left);
-        ShiftW4ToW8ExtendedCallee(right);
-    }
-
     template <typename BiasType, bool ProcessBias>
     static __simd_vf__ inline void ShiftW4ToW8AndScaleBiasVf(
         ShiftW4ToW8Params weightParams, typename ScaleMxBias<BiasType>::ScaleMxBiasParams biasParams)
@@ -236,100 +213,6 @@ private:
         AscendC::Reg::ShiftLeft(shifted, packed, laneShift, active);
         AscendC::Reg::ShiftRight(rightShifted, shifted, rightShift, active);
         AscendC::Reg::And(decoded, rightShifted, mask, active);
-    }
-
-    static constexpr bool IS_E1M2 = AscendC::IsSameType<InType, fp4x2_e1m2_t>::value;
-    static constexpr uint32_t SHIFT_RIGHT_SIZE = IS_E1M2 ? 0x3U : 0x2U;
-    static constexpr uint32_t SHIFT_LEFT_SIZE = 0x4U;
-    static constexpr uint32_t AND_MASK = IS_E1M2 ? 0x8EU : 0x9CU;
-    static constexpr uint64_t FP4_VALUES_PER_BYTE = 2UL;
-    static constexpr uint64_t GATHER_WORD_BYTES = sizeof(uint16_t);
-    static constexpr uint64_t PACKED_K32_ROW_BYTES = C0_SIZE_B8 / FP4_VALUES_PER_BYTE;
-    static constexpr uint64_t PACKED_K64_ROW_BYTES = C0_SIZE_B4 / FP4_VALUES_PER_BYTE;
-    static constexpr uint64_t PACKED_K32_ROW_WORDS = PACKED_K32_ROW_BYTES / GATHER_WORD_BYTES;
-    static constexpr uint64_t PACKED_K64_ROW_WORDS = PACKED_K64_ROW_BYTES / GATHER_WORD_BYTES;
-    static constexpr uint64_t K32_SLABS_PER_K64 = C0_SIZE_B4 / C0_SIZE_B8;
-    static constexpr uint64_t N_ROWS_PER_VF = static_cast<uint64_t>(AscendC::VECTOR_REG_WIDTH) / C0_SIZE_B8;
-    static constexpr uint64_t INPUT_GROUP_WORDS = N_ROWS_PER_VF * PACKED_K64_ROW_WORDS;
-    static constexpr uint32_t GATHER_WORD_COUNT = static_cast<uint32_t>(AscendC::VECTOR_REG_WIDTH) /
-                                                  FP4_VALUES_PER_BYTE / GATHER_WORD_BYTES;
-    static constexpr uint16_t INDEX_GROUP_WORD_SHIFT = 3;
-    static_assert((1UL << INDEX_GROUP_WORD_SHIFT) == PACKED_K32_ROW_WORDS,
-                  "Gather index shift must match the packed K32 row size in uint16 words");
-
-    static __simd_callee__ inline void InitializeGather(AscendC::Reg::RegTensor<uint16_t>& gatherIndex,
-                                                        AscendC::Reg::RegTensor<uint16_t>& indexGroup,
-                                                        AscendC::Reg::RegTensor<int16_t>& indexShift,
-                                                        AscendC::Reg::MaskReg& gatherMask)
-    {
-        // 64 packed uint16 words (128 bytes) cover eight N rows of one K32 slab.
-        // i + ((i >> 3) << 3) skips the other K32 half of every physical K64 row.
-        uint32_t gatherWords = GATHER_WORD_COUNT;
-        gatherMask = AscendC::Reg::UpdateMask<uint16_t>(gatherWords);
-        AscendC::Reg::Arange(reinterpret_cast<AscendC::Reg::RegTensor<int16_t>&>(gatherIndex), static_cast<int16_t>(0));
-        AscendC::Reg::Duplicate(indexShift, static_cast<int16_t>(INDEX_GROUP_WORD_SHIFT), gatherMask);
-        AscendC::Reg::ShiftRight(indexGroup, gatherIndex, indexShift, gatherMask);
-        AscendC::Reg::ShiftLeft(indexGroup, indexGroup, indexShift, gatherMask);
-        AscendC::Reg::Add(gatherIndex, gatherIndex, indexGroup, gatherMask);
-    }
-
-    static __simd_callee__ inline void LoadPackedWeight(ShiftW4ToW8Params& params, uint16_t loopKIdx,
-                                                        uint16_t innerLoopIdx, AscendC::Reg::RegTensor<int8_t>& wLoad,
-                                                        AscendC::Reg::RegTensor<uint16_t>& gathered,
-                                                        AscendC::Reg::RegTensor<uint16_t>& activeGatherIndex,
-                                                        AscendC::Reg::RegTensor<uint8_t>& unused,
-                                                        AscendC::Reg::MaskReg& gatherMask)
-    {
-        // Pointer arithmetic is in uint16 words: K64 slab, then eight N rows.
-        auto src = reinterpret_cast<__ubuf__ uint16_t*>(params.weight4BitPhyAddr) +
-                   (loopKIdx / K32_SLABS_PER_K64) * params.nRealSizeAlign * PACKED_K64_ROW_WORDS +
-                   innerLoopIdx * INPUT_GROUP_WORDS;
-        AscendC::Reg::Gather(gathered, src, activeGatherIndex, gatherMask);
-        auto& packed = reinterpret_cast<AscendC::Reg::RegTensor<uint8_t>&>(gathered);
-        // Only the gathered low 128 bytes contribute to the first Interleave result.
-        AscendC::Reg::Interleave(reinterpret_cast<AscendC::Reg::RegTensor<uint8_t>&>(wLoad), unused, packed, packed);
-    }
-
-    static __simd_callee__ inline void DecodePackedWeight(
-        AscendC::Reg::RegTensor<int8_t>& wAnd, AscendC::Reg::RegTensor<int8_t>& wShl,
-        AscendC::Reg::RegTensor<int8_t>& wShr1, AscendC::Reg::RegTensor<int8_t>& wLoad,
-        AscendC::Reg::RegTensor<int8_t>& laneShift, AscendC::Reg::RegTensor<int8_t>& wShrReg,
-        AscendC::Reg::RegTensor<int8_t>& wAndReg, AscendC::Reg::RegTensor<int8_t>& wShr0,
-        AscendC::Reg::RegTensor<int8_t>& wShlReg, AscendC::Reg::RegTensor<int8_t>& wSel, AscendC::Reg::MaskReg& preg,
-        AscendC::Reg::MaskReg& pregVsel)
-    {
-        DecodeFastWeight(wAnd, wShl, wShr1, wLoad, laneShift, wShrReg, wAndReg, preg);
-    }
-
-    static __simd_callee__ inline void ConvertWeightLoops(
-        ShiftW4ToW8Params& params, AscendC::Reg::RegTensor<int8_t>& wShrReg, AscendC::Reg::RegTensor<int8_t>& wShlReg,
-        AscendC::Reg::RegTensor<int8_t>& wAndReg, AscendC::Reg::RegTensor<int8_t>& wLoad,
-        AscendC::Reg::RegTensor<int8_t>& wShl, AscendC::Reg::RegTensor<int8_t>& wShr0,
-        AscendC::Reg::RegTensor<int8_t>& wShr1, AscendC::Reg::RegTensor<int8_t>& wSel,
-        AscendC::Reg::RegTensor<int8_t>& wAnd, AscendC::Reg::RegTensor<int8_t>& laneShift,
-        AscendC::Reg::RegTensor<uint16_t>& gatherIndex, AscendC::Reg::RegTensor<uint16_t>& activeGatherIndex,
-        AscendC::Reg::RegTensor<uint16_t>& indexGroup, AscendC::Reg::RegTensor<uint16_t>& gathered,
-        AscendC::Reg::RegTensor<uint8_t>& unused, AscendC::Reg::MaskReg& preg, AscendC::Reg::MaskReg& pregVsel,
-        AscendC::Reg::MaskReg& gatherMask)
-    {
-        for (uint16_t loopKIdx = 0; loopKIdx < params.loopKNum; ++loopKIdx) {
-            // Keep Gather's UB pointer 32B aligned; select the odd K32 half through its word indices.
-            AscendC::Reg::Duplicate(
-                indexGroup, static_cast<uint16_t>((loopKIdx % K32_SLABS_PER_K64) * PACKED_K32_ROW_WORDS), gatherMask);
-            AscendC::Reg::Add(activeGatherIndex, gatherIndex, indexGroup, gatherMask);
-
-            for (uint16_t innerLoopIdx = 0; innerLoopIdx < params.innerLoopNum; ++innerLoopIdx) {
-                LoadPackedWeight(params, loopKIdx, innerLoopIdx, wLoad, gathered, activeGatherIndex, unused,
-                                 gatherMask);
-                DecodePackedWeight(wAnd, wShl, wShr1, wLoad, laneShift, wShrReg, wAndReg, wShr0, wShlReg, wSel, preg,
-                                   pregVsel);
-                AscendC::Reg::AddrReg aregWeightB8Out = AscendC::Reg::CreateAddrReg<uint8_t>(
-                    loopKIdx, params.loopKDstStride, innerLoopIdx, params.innerDstStride);
-                AscendC::Reg::StoreAlign<uint8_t, AscendC::Reg::StoreDist::DIST_NORM_B8>(
-                    (__ubuf__ uint8_t*&)params.weight8BitPhyAddr, (AscendC::Reg::RegTensor<uint8_t>&)wAnd,
-                    aregWeightB8Out, preg);
-            }
-        }
     }
 
     static __simd_callee__ inline void ShiftW4ToW8Callee(ShiftW4ToW8Params params)
@@ -378,40 +261,6 @@ private:
                     aregWeightB8Out, preg);
             }
         }
-    }
-
-    static __simd_callee__ inline void ShiftW4ToW8ExtendedCallee(ShiftW4ToW8Params params)
-    {
-        AscendC::Reg::RegTensor<int8_t> wShrReg;
-        AscendC::Reg::RegTensor<int8_t> wShlReg;
-        AscendC::Reg::RegTensor<int8_t> wAndReg;
-        AscendC::Reg::RegTensor<int8_t> wLoad;
-        AscendC::Reg::RegTensor<int8_t> wShl;
-        AscendC::Reg::RegTensor<int8_t> wShr0;
-        AscendC::Reg::RegTensor<int8_t> wShr1;
-        AscendC::Reg::RegTensor<int8_t> wSel;
-        AscendC::Reg::RegTensor<int8_t> wAnd;
-
-        AscendC::Reg::MaskReg preg = AscendC::Reg::CreateMask<uint8_t, AscendC::Reg::MaskPattern::ALL>();
-        AscendC::Reg::MaskReg pregVsel = AscendC::Reg::CreateMask<uint16_t, AscendC::Reg::MaskPattern::ALL>();
-
-        AscendC::Reg::Duplicate<int8_t, AscendC::Reg::MaskMergeMode::ZEROING>(wShrReg, SHIFT_RIGHT_SIZE, preg);
-        AscendC::Reg::Duplicate<int8_t, AscendC::Reg::MaskMergeMode::ZEROING>(wShlReg, SHIFT_LEFT_SIZE, preg);
-        AscendC::Reg::Duplicate<int8_t, AscendC::Reg::MaskMergeMode::ZEROING>(wAndReg, AND_MASK, preg);
-
-        AscendC::Reg::RegTensor<uint16_t> gatherIndex, activeGatherIndex, indexGroup, gathered;
-        AscendC::Reg::RegTensor<int16_t> indexShift;
-        AscendC::Reg::RegTensor<uint8_t> unused;
-        AscendC::Reg::MaskReg gatherMask;
-        InitializeGather(gatherIndex, indexGroup, indexShift, gatherMask);
-
-        AscendC::Reg::RegTensor<int8_t> laneShift;
-        AscendC::Reg::RegTensor<int8_t> zeroShift;
-        AscendC::Reg::Duplicate(zeroShift, static_cast<int8_t>(0), preg);
-        AscendC::Reg::Select(laneShift, wShlReg, zeroShift, pregVsel);
-
-        ConvertWeightLoops(params, wShrReg, wShlReg, wAndReg, wLoad, wShl, wShr0, wShr1, wSel, wAnd, laneShift,
-                           gatherIndex, activeGatherIndex, indexGroup, gathered, unused, preg, pregVsel, gatherMask);
     }
 
     static __simd_vf__ inline void ShiftW4DnToW8Vf(ShiftW4DnToW8Params params)
@@ -471,97 +320,3 @@ private:
 };
 
 } // namespace Blaze::Gemm::Tile
-
-// MX weight-prologue helpers share this existing weight-conversion implementation header.
-#if defined(__NPU_ARCH__) || defined(ASCENDC_CPU_DEBUG)
-namespace Blaze::Gemm::Tile {
-
-/*!
- * \brief Shared MX operand operations; buffer ownership and fences belong to the caller.
- */
-template <typename T, bool OperandB>
-__aicore__ inline auto MakeMxL0Operand(uint64_t offset, uint64_t rows, uint64_t columns)
-{
-    using Layout = AscendC::Std::conditional_t<OperandB, asc::te::zn_layout_ptn, asc::te::nz_layout_ptn>;
-    using Location = AscendC::Std::conditional_t<OperandB, asc::te::location::l0b, asc::te::location::l0a>;
-    auto layout = asc::te::make_frame_layout<Layout, AscendC::Std::Int<asc::te::c0_element<T>>>(rows, columns);
-    return asc::te::make_tensor(asc::te::make_mem_ptr<Location, T>(offset), layout);
-}
-
-template <typename Source, typename Destination, typename Copy, typename Row, typename Column, typename Rows,
-          typename Columns>
-__aicore__ inline void CopyMxOperandTile(const Copy& copy, const Destination& destination, const Source& source,
-                                         Row row, Column column, Rows rows, Columns columns)
-{
-    auto tile = source.slice(asc::te::make_coord(row, column), asc::te::make_shape(rows, columns));
-    asc::te::copy(copy, destination, tile);
-}
-
-__aicore__ inline auto MakeMxBiasTable(uint64_t offset, uint64_t columns)
-{
-    auto layout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(static_cast<int64_t>(1L),
-                                                                         static_cast<int64_t>(Align16(columns)));
-    return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::bias, float>(offset), layout);
-}
-
-template <typename Index = int64_t, typename SourceA, typename SourceB, typename DestinationA, typename DestinationB>
-__aicore__ inline void CopyMxScalesToL1(const SourceA& a, const SourceB& b, const DestinationA& outA,
-                                        const DestinationB& outB, uint64_t rows, uint64_t columns, uint64_t kOffset,
-                                        uint64_t kColumns, uint64_t nOffset = 0)
-{
-    constexpr uint64_t HALF_COUNT = 2UL;
-    auto copy = asc::te::make_copy(asc::te::copy_gm_to_l1{});
-    CopyMxOperandTile(copy, outA, a, 0, static_cast<Index>(kOffset), static_cast<Index>(rows),
-                      static_cast<Index>(kColumns));
-    const uint64_t partColumns = columns / HALF_COUNT;
-    const uint64_t sourceStride = asc::te::get_total_column_shape(b.layout()) / HALF_COUNT;
-    for (uint64_t part = 0; part < HALF_COUNT; ++part) {
-        auto destination = outB.slice(
-            asc::te::make_coord(0, static_cast<Index>(part * partColumns)),
-            asc::te::make_shape(static_cast<Index>(kColumns), static_cast<Index>(partColumns)));
-        CopyMxOperandTile(copy, destination, b, static_cast<Index>(kOffset),
-                          static_cast<Index>(nOffset + part * sourceStride), static_cast<Index>(kColumns),
-                          static_cast<Index>(partColumns));
-    }
-}
-
-template <typename C, typename A, typename B>
-__aicore__ inline void IssueMxMmad(const asc::te::mmad_params& params, const C& c, const A& a, const B& b)
-{
-    auto atom = asc::te::make_mmad(asc::te::mmad_operation{}, MmadTraitMX{}).with(params);
-    asc::te::mmad(atom, c, a, b);
-}
-
-constexpr uint64_t MX_L0_SCALE_ADDRESS_SHIFT = 4UL;
-
-__aicore__ inline void UpdateMxMmadParams(asc::te::mmad_params& params, uint16_t k, bool firstK, bool lastK,
-                                          bool needBias)
-{
-    params.k = k;
-    params.unit_flag = lastK ? asc::te::unit_flag_mode::enable_update : asc::te::unit_flag_mode::enable_keep;
-    params.init_with_zero = firstK && !needBias;
-}
-
-template <typename Scale, bool OperandB, typename Index = int64_t, typename Tensor>
-__aicore__ inline void CopyMxScaleToL0(const Tensor& source, uint64_t l0Offset, uint64_t rows, uint64_t columns,
-                                       uint64_t kOffset, uint64_t outerOffset = 0)
-{
-    using Layout = AscendC::Std::conditional_t<OperandB, asc::te::nn_layout_ptn, asc::te::zz_layout_ptn>;
-    using Location = AscendC::Std::conditional_t<OperandB, asc::te::location::l0scaleb, asc::te::location::l0scalea>;
-    using Copy = AscendC::Std::conditional_t<OperandB, asc::te::copy_l1_to_l0scaleb, asc::te::copy_l1_to_l0scalea>;
-    auto layout = asc::te::make_frame_layout<Layout, AscendC::Std::Int<MXFP_MULTI_BASE_SIZE>>(rows, columns);
-    auto destination = asc::te::make_tensor(
-        asc::te::make_mem_ptr<Location, Scale>(l0Offset >> MX_L0_SCALE_ADDRESS_SHIFT), layout);
-    const Index offset = static_cast<Index>(kOffset);
-    if constexpr (OperandB) {
-        CopyMxOperandTile(asc::te::make_copy(Copy{}), destination, source, offset, static_cast<Index>(outerOffset),
-                          static_cast<Index>(rows), static_cast<Index>(columns));
-    } else {
-        CopyMxOperandTile(asc::te::make_copy(Copy{}), destination, source, static_cast<Index>(outerOffset), offset,
-                          static_cast<Index>(rows), static_cast<Index>(columns));
-    }
-}
-
-} // namespace Blaze::Gemm::Tile
-
-#endif

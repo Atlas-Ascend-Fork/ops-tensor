@@ -113,6 +113,14 @@ struct SetupUb {
 };
 template struct MetadataAccess<SetupUb, &Epilogue::SetupUbLayout>;
 
+struct KBlockPolicy {
+    static constexpr uint64_t COLUMNS = 128UL;
+    using Type = void (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t&, uint64_t&, uint64_t&);
+    friend constexpr Type ReadMember(KBlockPolicy);
+};
+
+template struct MetadataAccess<KBlockPolicy, &Mmad::CalcWeightQuantMxKBlock<int8_t, KBlockPolicy::COLUMNS>>;
+
 struct PrologueScaleOffset {
     using Type = const uint64_t*;
     friend constexpr Type ReadMember(PrologueScaleOffset);
@@ -306,15 +314,14 @@ TEST_P(WqgmmSwigluMxMetadataTest, ExpertChannelOffsetAndTimeSharedUbBudget)
 TEST(WqgmmSwigluMxMetadataTest, InvalidKBlockInputsDoNotDivideByZero)
 {
     constexpr uint64_t TEST_CAPACITY = 32768UL;
-    constexpr uint64_t TEST_COLUMNS = 128UL;
+    constexpr uint64_t TEST_COLUMNS = KBlockPolicy::COLUMNS;
     constexpr uint64_t TEST_ROWS = 16UL;
     constexpr uint64_t TEST_REUSE = 2UL;
     constexpr uint64_t EXPECTED_SMALL_K = 128UL;
     for (bool zeroRows : {false, true}) {
         uint64_t ka = 1, kb = 1, k0 = 1;
-        Blaze::Gemm::CalcWeightQuantMxKBlock<int8_t, TEST_COLUMNS>(zeroRows ? 0UL : TEST_ROWS, TEST_COLUMNS,
-                                                                   TEST_CAPACITY, TEST_CAPACITY,
-                                                                   zeroRows ? TEST_REUSE : 0UL, ka, kb, k0);
+        ReadMember(KBlockPolicy{})(zeroRows ? 0UL : TEST_ROWS, TEST_COLUMNS, TEST_CAPACITY, TEST_CAPACITY,
+                                   zeroRows ? TEST_REUSE : 0UL, ka, kb, k0);
         EXPECT_EQ(ka, 0UL);
         EXPECT_EQ(kb, 0UL);
         EXPECT_EQ(k0, EXPECTED_SMALL_K);

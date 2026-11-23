@@ -181,6 +181,8 @@ struct MatmulWithWeightQuantPergroup {
 using GroupedMatmulWithWeightQuantMx = WeightQuantMxPolicy<KernelWqgmmMxMix, WeightPrologueMxKSchedule::DYNAMIC,
                                                            WeightPrologueMxScaleBSource::AIV>;
 
+enum class MxPipelineMode : uint32_t { ParameterDriven = 0U, Aligned = 2U, OperandTriple = 3U, WeightQuad = 4U };
+
 // Finalize routing uses dynamic K blocking with AIC ScaleB loads and a deferred AIV epilogue.
 using GroupedMatmulFinalizeRoutingWithWeightQuantMx = WeightQuantMxPolicy<
     KernelWqgmmMxMix, WeightPrologueMxKSchedule::DYNAMIC, WeightPrologueMxScaleBSource::AIC>;

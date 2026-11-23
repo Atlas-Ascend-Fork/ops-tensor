@@ -23,9 +23,6 @@
 #include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
 #include "blaze/gemm/policy/dispatch_policy.h"
-#if defined(__NPU_ARCH__)
-#include "blaze/gemm/tile/arch35/shift_w4_to_w8.h"
-#endif
 #include "blaze/gemm/tile/compute.h"
 #include "blaze/gemm/tile/datamove.h"
 #include "blaze/gemm/utils/common_utils.h"
@@ -240,7 +237,8 @@ public:
             WaitFlag<HardEvent::MTE3_V>(VEC_EVENT_ID_MTE3_TO_V + (ubComputeLoopIdx_ & (WEIGHT_8BIT_BUFFER_NUM - 1)));
             WaitFlag<HardEvent::MTE3_V>(VEC_EVENT_ID_MTE3_TO_V +
                                         ((ubComputeLoopIdx_ + 1) & (WEIGHT_8BIT_BUFFER_NUM - 1)));
-            Tile::ShiftW4ToW8<OutType, InType>::ConvertContinuousPair(leftInput, leftOutput, rightInput, rightOutput);
+            asc_vf_call<ShiftW4ToW8PairVf>(MakeContinuousWeightParams(leftInput, leftOutput),
+                                           MakeContinuousWeightParams(rightInput, rightOutput));
             SetFlag<HardEvent::V_MTE3>(0);
             WaitFlag<HardEvent::V_MTE3>(0);
             SetFlag<HardEvent::V_MTE2>(VEC_EVENT_ID_V_TO_MTE2 + (inputIndex & (UB_MTE2_BUFFER_NUM - 1)));
@@ -267,6 +265,158 @@ public:
     __aicore__ inline ~GroupedWeightPrologueMx();
 
 private:
+    struct ContinuousWeightParams {
+        uint64_t loopKNum;
+        uint64_t innerLoopNum;
+        uint64_t loopKDstStride;
+        uint64_t innerDstStride;
+        uint64_t nRealSizeAlign;
+        __ubuf__ InType_* weight4BitPhyAddr;
+        __ubuf__ OutType_* weight8BitPhyAddr;
+    };
+    static __simd_callee__ inline void DecodeFastWeight(
+        AscendC::Reg::RegTensor<int8_t>& decoded, AscendC::Reg::RegTensor<int8_t>& shifted,
+        AscendC::Reg::RegTensor<int8_t>& rightShifted, AscendC::Reg::RegTensor<int8_t>& packed,
+        AscendC::Reg::RegTensor<int8_t>& laneShift, AscendC::Reg::RegTensor<int8_t>& rightShift,
+        AscendC::Reg::RegTensor<int8_t>& mask, AscendC::Reg::MaskReg& active)
+    {
+        AscendC::Reg::ShiftLeft(shifted, packed, laneShift, active);
+        AscendC::Reg::ShiftRight(rightShifted, shifted, rightShift, active);
+        AscendC::Reg::And(decoded, rightShifted, mask, active);
+    }
+
+    static constexpr bool IS_E1M2 = AscendC::IsSameType<InType, fp4x2_e1m2_t>::value;
+    static constexpr uint32_t SHIFT_RIGHT_SIZE = IS_E1M2 ? 0x3U : 0x2U;
+    static constexpr uint32_t SHIFT_LEFT_SIZE = 0x4U;
+    static constexpr uint32_t AND_MASK = IS_E1M2 ? 0x8EU : 0x9CU;
+    static constexpr uint64_t FP4_VALUES_PER_BYTE = 2UL;
+    static constexpr uint64_t GATHER_WORD_BYTES = sizeof(uint16_t);
+    static constexpr uint64_t PACKED_K32_ROW_BYTES = C0_SIZE_B8 / FP4_VALUES_PER_BYTE;
+    static constexpr uint64_t PACKED_K64_ROW_BYTES = C0_SIZE_B4 / FP4_VALUES_PER_BYTE;
+    static constexpr uint64_t PACKED_K32_ROW_WORDS = PACKED_K32_ROW_BYTES / GATHER_WORD_BYTES;
+    static constexpr uint64_t PACKED_K64_ROW_WORDS = PACKED_K64_ROW_BYTES / GATHER_WORD_BYTES;
+    static constexpr uint64_t K32_SLABS_PER_K64 = C0_SIZE_B4 / C0_SIZE_B8;
+    static constexpr uint64_t N_ROWS_PER_VF = static_cast<uint64_t>(AscendC::VECTOR_REG_WIDTH) / C0_SIZE_B8;
+    static constexpr uint64_t INPUT_GROUP_WORDS = N_ROWS_PER_VF * PACKED_K64_ROW_WORDS;
+    static constexpr uint32_t GATHER_WORD_COUNT = static_cast<uint32_t>(AscendC::VECTOR_REG_WIDTH) /
+                                                  FP4_VALUES_PER_BYTE / GATHER_WORD_BYTES;
+    static constexpr uint16_t INDEX_GROUP_WORD_SHIFT = 3;
+    static_assert((1UL << INDEX_GROUP_WORD_SHIFT) == PACKED_K32_ROW_WORDS,
+                  "Gather index shift must match the packed K32 row size in uint16 words");
+
+    static __simd_callee__ inline void InitializeGather(AscendC::Reg::RegTensor<uint16_t>& gatherIndex,
+                                                        AscendC::Reg::RegTensor<uint16_t>& indexGroup,
+                                                        AscendC::Reg::RegTensor<int16_t>& indexShift,
+                                                        AscendC::Reg::MaskReg& gatherMask)
+    {
+        // 64 packed uint16 words (128 bytes) cover eight N rows of one K32 slab.
+        // i + ((i >> 3) << 3) skips the other K32 half of every physical K64 row.
+        uint32_t gatherWords = GATHER_WORD_COUNT;
+        gatherMask = AscendC::Reg::UpdateMask<uint16_t>(gatherWords);
+        AscendC::Reg::Arange(reinterpret_cast<AscendC::Reg::RegTensor<int16_t>&>(gatherIndex), static_cast<int16_t>(0));
+        AscendC::Reg::Duplicate(indexShift, static_cast<int16_t>(INDEX_GROUP_WORD_SHIFT), gatherMask);
+        AscendC::Reg::ShiftRight(indexGroup, gatherIndex, indexShift, gatherMask);
+        AscendC::Reg::ShiftLeft(indexGroup, indexGroup, indexShift, gatherMask);
+        AscendC::Reg::Add(gatherIndex, gatherIndex, indexGroup, gatherMask);
+    }
+
+    static __simd_callee__ inline void LoadPackedWeight(ContinuousWeightParams& params, uint16_t loopKIdx,
+                                                        uint16_t innerLoopIdx, AscendC::Reg::RegTensor<int8_t>& wLoad,
+                                                        AscendC::Reg::RegTensor<uint16_t>& gathered,
+                                                        AscendC::Reg::RegTensor<uint16_t>& activeGatherIndex,
+                                                        AscendC::Reg::RegTensor<uint8_t>& unused,
+                                                        AscendC::Reg::MaskReg& gatherMask)
+    {
+        // Pointer arithmetic is in uint16 words: K64 slab, then eight N rows.
+        auto src = reinterpret_cast<__ubuf__ uint16_t*>(params.weight4BitPhyAddr) +
+                   (loopKIdx / K32_SLABS_PER_K64) * params.nRealSizeAlign * PACKED_K64_ROW_WORDS +
+                   innerLoopIdx * INPUT_GROUP_WORDS;
+        AscendC::Reg::Gather(gathered, src, activeGatherIndex, gatherMask);
+        auto& packed = reinterpret_cast<AscendC::Reg::RegTensor<uint8_t>&>(gathered);
+        // Only the gathered low 128 bytes contribute to the first Interleave result.
+        AscendC::Reg::Interleave(reinterpret_cast<AscendC::Reg::RegTensor<uint8_t>&>(wLoad), unused, packed, packed);
+    }
+
+    static __simd_callee__ inline void ConvertWeightLoops(
+        ContinuousWeightParams& params, AscendC::Reg::RegTensor<int8_t>& wShrReg,
+        AscendC::Reg::RegTensor<int8_t>& wAndReg, AscendC::Reg::RegTensor<int8_t>& wLoad,
+        AscendC::Reg::RegTensor<int8_t>& wShl, AscendC::Reg::RegTensor<int8_t>& wShr1,
+        AscendC::Reg::RegTensor<int8_t>& wAnd, AscendC::Reg::RegTensor<int8_t>& laneShift,
+        AscendC::Reg::RegTensor<uint16_t>& gatherIndex, AscendC::Reg::RegTensor<uint16_t>& activeGatherIndex,
+        AscendC::Reg::RegTensor<uint16_t>& indexGroup, AscendC::Reg::RegTensor<uint16_t>& gathered,
+        AscendC::Reg::RegTensor<uint8_t>& unused, AscendC::Reg::MaskReg& preg, AscendC::Reg::MaskReg& gatherMask)
+    {
+        for (uint16_t loopKIdx = 0; loopKIdx < params.loopKNum; ++loopKIdx) {
+            // Keep Gather's UB pointer 32B aligned; select the odd K32 half through its word indices.
+            AscendC::Reg::Duplicate(
+                indexGroup, static_cast<uint16_t>((loopKIdx % K32_SLABS_PER_K64) * PACKED_K32_ROW_WORDS), gatherMask);
+            AscendC::Reg::Add(activeGatherIndex, gatherIndex, indexGroup, gatherMask);
+
+            for (uint16_t innerLoopIdx = 0; innerLoopIdx < params.innerLoopNum; ++innerLoopIdx) {
+                LoadPackedWeight(params, loopKIdx, innerLoopIdx, wLoad, gathered, activeGatherIndex, unused,
+                                 gatherMask);
+                DecodeFastWeight(wAnd, wShl, wShr1, wLoad, laneShift, wShrReg, wAndReg, preg);
+                AscendC::Reg::AddrReg aregWeightB8Out = AscendC::Reg::CreateAddrReg<uint8_t>(
+                    loopKIdx, params.loopKDstStride, innerLoopIdx, params.innerDstStride);
+                AscendC::Reg::StoreAlign<uint8_t, AscendC::Reg::StoreDist::DIST_NORM_B8>(
+                    (__ubuf__ uint8_t*&)params.weight8BitPhyAddr, (AscendC::Reg::RegTensor<uint8_t>&)wAnd,
+                    aregWeightB8Out, preg);
+            }
+        }
+    }
+
+    static __simd_callee__ inline void ShiftW4ToW8ExtendedCallee(ContinuousWeightParams params)
+    {
+        AscendC::Reg::RegTensor<int8_t> wShrReg;
+        AscendC::Reg::RegTensor<int8_t> wShlReg;
+        AscendC::Reg::RegTensor<int8_t> wAndReg;
+        AscendC::Reg::RegTensor<int8_t> wLoad;
+        AscendC::Reg::RegTensor<int8_t> wShl;
+        AscendC::Reg::RegTensor<int8_t> wShr1;
+        AscendC::Reg::RegTensor<int8_t> wAnd;
+
+        AscendC::Reg::MaskReg preg = AscendC::Reg::CreateMask<uint8_t, AscendC::Reg::MaskPattern::ALL>();
+        AscendC::Reg::MaskReg pregVsel = AscendC::Reg::CreateMask<uint16_t, AscendC::Reg::MaskPattern::ALL>();
+
+        AscendC::Reg::Duplicate<int8_t, AscendC::Reg::MaskMergeMode::ZEROING>(wShrReg, SHIFT_RIGHT_SIZE, preg);
+        AscendC::Reg::Duplicate<int8_t, AscendC::Reg::MaskMergeMode::ZEROING>(wShlReg, SHIFT_LEFT_SIZE, preg);
+        AscendC::Reg::Duplicate<int8_t, AscendC::Reg::MaskMergeMode::ZEROING>(wAndReg, AND_MASK, preg);
+
+        AscendC::Reg::RegTensor<uint16_t> gatherIndex, activeGatherIndex, indexGroup, gathered;
+        AscendC::Reg::RegTensor<int16_t> indexShift;
+        AscendC::Reg::RegTensor<uint8_t> unused;
+        AscendC::Reg::MaskReg gatherMask;
+        InitializeGather(gatherIndex, indexGroup, indexShift, gatherMask);
+
+        AscendC::Reg::RegTensor<int8_t> laneShift;
+        AscendC::Reg::RegTensor<int8_t> zeroShift;
+        AscendC::Reg::Duplicate(zeroShift, static_cast<int8_t>(0), preg);
+        AscendC::Reg::Select(laneShift, wShlReg, zeroShift, pregVsel);
+
+        ConvertWeightLoops(params, wShrReg, wAndReg, wLoad, wShl, wShr1, wAnd, laneShift, gatherIndex,
+                           activeGatherIndex, indexGroup, gathered, unused, preg, gatherMask);
+    }
+
+    static __simd_vf__ inline void ShiftW4ToW8PairVf(ContinuousWeightParams left, ContinuousWeightParams right)
+    {
+        ShiftW4ToW8ExtendedCallee(left);
+        ShiftW4ToW8ExtendedCallee(right);
+    }
+
+    template <typename W, typename O>
+    __aicore__ static inline ContinuousWeightParams MakeContinuousWeightParams(const W& input, const O& output)
+    {
+        ContinuousWeightParams params;
+        params.weight4BitPhyAddr = (__ubuf__ InType*)input.data().get();
+        params.weight8BitPhyAddr = (__ubuf__ OutType*)output.data().get();
+        params.loopKNum = AscendC::Std::get<1>(AscendC::Std::get<0>(input.layout().shape())) * K32_SLABS_PER_K64;
+        params.nRealSizeAlign = AscendC::Std::get<1>(AscendC::Std::get<1>(input.layout().shape())) * BLOCK_CUBE;
+        params.innerDstStride = AscendC::Std::get<1>(AscendC::Std::get<1>(output.layout().stride()));
+        params.innerLoopNum = (params.nRealSizeAlign * C0_SIZE_B8) / static_cast<uint64_t>(asc_get_vf_len());
+        params.loopKDstStride = params.innerLoopNum * params.innerDstStride;
+        return params;
+    }
+
     template <typename W, typename T>
     __aicore__ inline void CopyContinuousPairInput(const W& weight, const T& leftInput, const T& rightInput,
                                                    uint64_t kOffset, uint64_t offset, uint64_t fullN, uint64_t realK,
@@ -1463,6 +1613,1321 @@ __aicore__ inline void GROUPED_MATMUL_RESPLIT_KERNEL_CLASS::operator()(const Par
 
 #undef GROUPED_MATMUL_RESPLIT_KERNEL_CLASS
 #undef GROUPED_MATMUL_RESPLIT_KERNEL_TEMPLATE_PARAM
+
+} // namespace Kernel
+} // namespace Gemm
+} // namespace Blaze
+
+namespace Blaze {
+namespace Gemm {
+namespace Kernel {
+
+namespace MxPipeline {
+
+template <typename ProblemShape_, bool ColumnFirst = false, bool Incremental = false>
+class BlockSchedulerWqgmmNResplit {
+public:
+    struct Params {
+        uint64_t mainBlockCount;
+        uint64_t mainBlockSize;
+        uint64_t firstTailBlockCount;
+        uint64_t firstTailBlockSize;
+        uint64_t secondTailBlockCount;
+        uint64_t secondTailBlockSize;
+        uint64_t coreNum;
+        uint64_t cubeNumBlocksN;
+        int32_t baseM;
+        uint64_t nSize;
+    };
+
+    using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
+    using BlockCoord = asc::te::coord<int64_t, int64_t, int64_t, int64_t>;
+    using ProblemShape = ProblemShape_;
+
+    __aicore__ inline explicit BlockSchedulerWqgmmNResplit(const Params& params) : params_(params)
+    {
+        cubeBlockIdx_ = AscendC::GetBlockIdx();
+        if ASCEND_IS_AIV {
+            cubeBlockIdx_ >>= 1;
+        }
+        nBlockNum_ = params_.mainBlockCount + params_.firstTailBlockCount + params_.secondTailBlockCount;
+        seg01Count_ = params_.mainBlockCount + params_.firstTailBlockCount;
+        seg1Base_ = params_.mainBlockCount * params_.mainBlockSize;
+        seg2Base_ = seg1Base_ + params_.firstTailBlockCount * params_.firstTailBlockSize;
+    }
+
+    // Initialize the per-group scheduling state before enumerating that group's tiles.
+    __aicore__ inline void UpdateNextProblem(const ProblemShape& problemShape)
+    {
+        startBasicBlockId_ = (startBasicBlockId_ + prevTileNum_) % params_.coreNum;
+        mSize_ = asc::te::get<MNK_M>(problemShape);
+        mBlkNum_ = CeilDiv(mSize_, static_cast<uint64_t>(params_.baseM));
+        const uint64_t baseM = static_cast<uint64_t>(params_.baseM);
+        // Single and complete M tiles do not need a second dynamic division.
+        mStep_ = mBlkNum_ <= 1 ? mSize_ : (mSize_ == mBlkNum_ * baseM ? baseM : CeilDiv(mSize_, mBlkNum_));
+        tileNum_ = mBlkNum_ * nBlockNum_;
+
+        const uint64_t first = cubeBlockIdx_ >= startBasicBlockId_ ? cubeBlockIdx_ : cubeBlockIdx_ + params_.coreNum;
+        tileIdx_ = first - startBasicBlockId_;
+        prevTileNum_ = tileNum_;
+        // Idle cores never enumerate this group; avoid their division/remainder setup.
+        if (Incremental && tileIdx_ < tileNum_) {
+            const uint64_t innerCount = ColumnFirst ? mBlkNum_ : nBlockNum_;
+            if (innerCount == 1) {
+                outerTileIdx_ = tileIdx_;
+                innerTileIdx_ = 0;
+                outerTileStep_ = params_.coreNum;
+                innerTileStep_ = 0;
+            } else {
+                outerTileIdx_ = tileIdx_ / innerCount;
+                innerTileIdx_ = tileIdx_ % innerCount;
+                outerTileStep_ = params_.coreNum / innerCount;
+                innerTileStep_ = params_.coreNum % innerCount;
+            }
+        }
+    }
+
+    // Return the next element coordinate assigned to this cube core.
+    __aicore__ inline bool GetTileIdx(BlockCoord& blockCoord)
+    {
+        BlockShape unusedShape;
+        return GetTileIdx(blockCoord, unusedShape);
+    }
+
+    __aicore__ inline bool GetTileIdx(BlockCoord& blockCoord, BlockShape& shape)
+    {
+        if (tileIdx_ >= tileNum_) {
+            return false;
+        }
+
+        const uint64_t innerCount = ColumnFirst ? mBlkNum_ : nBlockNum_;
+        const uint64_t outer = Incremental ? outerTileIdx_ : tileIdx_ / innerCount;
+        const uint64_t inner = Incremental ? innerTileIdx_ : tileIdx_ % innerCount;
+        const uint64_t mIdx = ColumnFirst ? inner : outer;
+        const uint64_t nIdx = ColumnFirst ? outer : inner;
+        const uint64_t mOffset = mIdx * mStep_;
+        uint64_t nOffset = 0UL;
+        uint64_t segmentSize = params_.secondTailBlockSize;
+
+        if (nIdx < params_.mainBlockCount) {
+            nOffset = nIdx * params_.mainBlockSize;
+            segmentSize = params_.mainBlockSize;
+        } else if (nIdx < seg01Count_) {
+            const uint64_t localIdx = nIdx - params_.mainBlockCount;
+            nOffset = seg1Base_ + localIdx * params_.firstTailBlockSize;
+            segmentSize = params_.firstTailBlockSize;
+        } else {
+            const uint64_t localIdx = nIdx - seg01Count_;
+            nOffset = seg2Base_ + localIdx * params_.secondTailBlockSize;
+        }
+
+        AscendC::Std::get<MNK_M>(blockCoord) = static_cast<int64_t>(mOffset);
+        AscendC::Std::get<MNK_N>(blockCoord) = static_cast<int64_t>(nOffset);
+
+        shape = {static_cast<int64_t>(mOffset + mStep_ > mSize_ ? mSize_ - mOffset : mStep_),
+                 static_cast<int64_t>(nOffset + segmentSize > params_.nSize ? params_.nSize - nOffset : segmentSize), 0,
+                 0};
+        AdvanceTile();
+        return true;
+    }
+
+    // Resolve the true M/N tile shape for a previously returned coordinate.
+    __aicore__ inline BlockShape GetBlockShape(const BlockCoord& blockCoord) const
+    {
+        const uint64_t mOffset = static_cast<uint64_t>(asc::te::get<MNK_M>(blockCoord));
+        const uint64_t nOffset = static_cast<uint64_t>(asc::te::get<MNK_N>(blockCoord));
+        const uint64_t rows = mOffset + mStep_ > mSize_ ? mSize_ - mOffset : mStep_;
+        uint64_t columns = params_.secondTailBlockSize;
+        if (nOffset < seg1Base_) {
+            columns = params_.mainBlockSize;
+        } else if (nOffset < seg2Base_) {
+            columns = params_.firstTailBlockSize;
+        }
+        columns = nOffset + columns > params_.nSize ? params_.nSize - nOffset : columns;
+        return {static_cast<int64_t>(rows), static_cast<int64_t>(columns), 0, 0};
+    }
+
+private:
+    __aicore__ inline void AdvanceTile()
+    {
+        tileIdx_ += params_.coreNum;
+        if constexpr (!Incremental) {
+            return;
+        }
+        outerTileIdx_ += outerTileStep_;
+        innerTileIdx_ += innerTileStep_;
+        const uint64_t innerCount = ColumnFirst ? mBlkNum_ : nBlockNum_;
+        if (innerTileIdx_ >= innerCount) {
+            innerTileIdx_ -= innerCount;
+            ++outerTileIdx_;
+        }
+    }
+
+    Params params_;
+
+    uint64_t cubeBlockIdx_{0};
+
+    // N-segment constants derived from host tiling.
+    uint64_t seg01Count_{0};
+    uint64_t seg1Base_{0};
+    uint64_t seg2Base_{0};
+    uint64_t nBlockNum_{0};
+
+    // Per-group runtime state.
+    uint64_t mSize_{0};
+    uint64_t mBlkNum_{0};
+    uint64_t mStep_{0};
+    uint64_t tileNum_{0};
+    uint64_t tileIdx_{0};
+    uint64_t innerTileIdx_{0};
+    uint64_t outerTileIdx_{0};
+    uint64_t innerTileStep_{0};
+    uint64_t outerTileStep_{0};
+
+    // Cross-group rolling state.
+    uint64_t startBasicBlockId_{0};
+    uint64_t prevTileNum_{0};
+};
+
+template <class OutType_, class InType_, class BiasType_, uint32_t Mode_ = 0U>
+class GroupedWeightPrologueMx {
+public:
+    using DispatchPolicy = MxWeightPipelineConfig<Mode_, OutType_, BiasType_>;
+    using OutType = OutType_;
+    using InType = InType_;
+    using BiasType = BiasType_;
+    struct Params {
+        __gm__ InType* ptrB{nullptr};
+    };
+    using PipelineConfig = MxWeightPipelineConfig<Mode_, OutType, BiasType>;
+    template <typename MmadParams>
+    __aicore__ inline explicit GroupedWeightPrologueMx(const MmadParams& params)
+    {
+        weightOffsets_ = params.weightOffsets;
+        biasOffsets_ = params.biasOffsets;
+        scaleBOffsets_ = params.scaleBOffsets;
+        scaleKWindowSize_ = AscendC::Std::get<SCALE_SHAPE_INDEX>(params.l1TileShape);
+        readyFlag_ = params.readyFlag;
+        freeFlag_ = params.freeFlag;
+        hasBias_ = params.hasBias;
+        InitializeVectorBuffers<true>();
+    }
+    __aicore__ inline explicit GroupedWeightPrologueMx(
+        bool hasBias,
+        uint64_t l1BufferStage = (MODE == MxPipelineMode::OperandTriple) ? TRIPLE_BUFFER_COUNT : DOUBLE_BUFFER_COUNT)
+    {
+        if constexpr (!(MODE == MxPipelineMode::ParameterDriven)) {
+            hasBias_ = hasBias;
+            if ((MODE == MxPipelineMode::Aligned) && GetSubBlockIdx() != 0) {
+                return;
+            }
+            if constexpr ((MODE == MxPipelineMode::OperandTriple)) {
+                l1BufferStage_ = !hasBias && l1BufferStage == TRIPLE_BUFFER_COUNT ? TRIPLE_BUFFER_COUNT :
+                                                                                    DOUBLE_BUFFER_COUNT;
+            }
+            InitializeVectorBuffers<!(MODE == MxPipelineMode::Aligned)>();
+        }
+    }
+    template <typename GMWeightTensorType_, typename GMScaleBTensorType_, typename GMBiasTensorType_>
+    __aicore__ inline void operator()(const GMWeightTensorType_& gmWeightTensor,
+                                      const GMScaleBTensorType_& gmScaleBTensor, const GMBiasTensorType_& gmBiasTensor,
+                                      uint64_t kbL1Size, uint64_t kSize, uint64_t nL1Size, uint64_t nOffset,
+                                      uint64_t nAlign)
+    {
+        if ((MODE == MxPipelineMode::Aligned) && GetSubBlockIdx() != 0) {
+            return;
+        }
+        static_assert(std::is_same_v<OutType, __fp8e4m3> || AscendC::IsSameType<OutType, fp8_e4m3fn_t>::value,
+                      "OutType must be fp8_e4m3fn_t");
+        static_assert(std::is_same_v<InType, __fp4e2m1x2> || AscendC::IsSameType<InType, fp4x2_e2m1_t>::value ||
+                          AscendC::IsSameType<InType, fp4x2_e1m2_t>::value,
+                      "InType must be fp4x2_e2m1_t or fp4x2_e1m2_t");
+        static_assert(AscendC::IsSameType<BiasType, half>::value || AscendC::IsSameType<BiasType, bfloat16_t>::value,
+                      "BiasType must be half or bfloat16_t");
+
+        WeightPrologueMxBlockParams offsetParam = {};
+        offsetParam.kSize = kSize;
+        offsetParam.nL1Size = nL1Size;
+        offsetParam.nOffset = nOffset;
+        offsetParam.kbL1Size = kbL1Size;
+        if constexpr (!(MODE == MxPipelineMode::ParameterDriven)) {
+            offsetParam.kbL1Size = CalcDynamicKBlock(kbL1Size, nL1Size);
+        }
+        if constexpr ((MODE == MxPipelineMode::WeightQuad)) {
+            if (!hasBias_) {
+                const uint64_t nAlignL1 = CeilAlign(nL1Size, static_cast<uint64_t>(BLOCK_CUBE));
+                while (offsetParam.kbL1Size > WEIGHT_FRAGMENT_K &&
+                       nAlignL1 * offsetParam.kbL1Size * sizeof(OutType) > QUAD_B_STRIDE) {
+                    offsetParam.kbL1Size >>= 1;
+                }
+            }
+        }
+        offsetParam.nAlign = nAlign;
+        ComputeBasicBlockAivNdKnNzNk(offsetParam, gmWeightTensor, gmScaleBTensor, gmBiasTensor);
+    }
+
+    __aicore__ inline ~GroupedWeightPrologueMx()
+    {
+        uint64_t limit = DOUBLE_BUFFER_COUNT;
+        if constexpr ((MODE == MxPipelineMode::WeightQuad)) {
+            limit = PipelineConfig::WeightStages(hasBias_);
+        } else if constexpr ((MODE == MxPipelineMode::OperandTriple)) {
+            limit = creditLimit_;
+        }
+        const uint64_t outstandingAicCredits = Min(cvLoopIdx_, limit);
+        for (uint64_t idx = 0UL; idx < outstandingAicCredits; ++idx) {
+            Sync::WaitForCube<(MODE == MxPipelineMode::ParameterDriven) ? SYNC_AIC_AIV_MODE : Sync::SYNC_MODE_INTRA,
+                              PIPE_MTE3>((MODE == MxPipelineMode::ParameterDriven) ? freeFlag_ : SYNC_AIV_AIC_FLAG);
+        }
+        if ((!(MODE == MxPipelineMode::Aligned) || GetSubBlockIdx() == 0)) {
+            DrainMxPrologueBuffers(WEIGHT_8BIT_BUFFER_NUM, UB_MTE2_BUFFER_NUM, MX_SCALE_OUTPUT_BUFFER_NUM,
+                                   VEC_EVENT_ID_MTE3_TO_V, VEC_EVENT_ID_V_TO_MTE2, VEC_EVENT_ID_TRANS_SCALE_MTE3_TO_V);
+        }
+    }
+
+private:
+    static constexpr auto MODE = static_cast<MxPipelineMode>(Mode_);
+    __aicore__ static inline void LoadMxScaleTransposeIndices(uint64_t ubOffset, uint16_t readyEvent)
+    {
+        auto layout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1, Tile::MX_SCALE_TRANS_ID_SIZE);
+        auto gm = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::gm>((__gm__ uint16_t*)Tile::MX_SCALE_TRANS_ID), layout);
+        auto ub = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, uint16_t>(ubOffset), layout);
+        auto copy = asc::te::make_copy(asc::te::copy_gm_to_ub{});
+        asc::te::copy(copy, ub, gm);
+        SetFlag<HardEvent::MTE2_V>(readyEvent);
+        WaitFlag<HardEvent::MTE2_V>(readyEvent);
+    }
+
+    template <typename OutType, typename InType, typename Weight4BitTensorType_, typename Weight8BitTensorType_,
+              typename BiasTensorType_>
+    __aicore__ static inline void ConvertMxPackedWeight(const Weight4BitTensorType_& weight4BitTensor,
+                                                        const Weight8BitTensorType_& weight8BitTensor,
+                                                        const BiasTensorType_& biasInTensor,
+                                                        const BiasTensorType_& biasOutTensor, bool processBias,
+                                                        uint64_t eventId)
+    {
+        WaitFlag<HardEvent::MTE3_V>(eventId);
+
+        Tile::ShiftW4ToW8<OutType, InType>(weight4BitTensor, weight8BitTensor, biasInTensor, biasOutTensor,
+                                           processBias);
+
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+    }
+
+    template <typename Weight8BitTensorType_, typename L1TensorType_, typename BiasTensorType_,
+              typename BiasL1TensorType_>
+    __aicore__ static inline void StoreMxConvertedWeight(uint64_t mte2RealK,
+                                                         const Weight8BitTensorType_& weight8BitTensor,
+                                                         const L1TensorType_& l1Tensor,
+                                                         const BiasTensorType_& biasOutTensor,
+                                                         const BiasL1TensorType_& biasL1Tensor, bool processBias,
+                                                         uint64_t eventId, uint64_t& computeIndex)
+    {
+        if (likely(mte2RealK > 0)) {
+            auto copyUB2L1 = asc::te::make_copy(Blaze::Gemm::Tile::CopyUB2L1Weight8Bit{});
+            asc::te::copy(copyUB2L1, l1Tensor, weight8BitTensor);
+        }
+        if (processBias) {
+            auto copyUB2L1Bias = asc::te::make_copy(asc::te::copy_ub_to_l1{});
+            asc::te::copy(copyUB2L1Bias, biasL1Tensor, biasOutTensor);
+        }
+        SetFlag<HardEvent::MTE3_V>(eventId);
+        computeIndex++;
+    }
+
+    template <typename OutType, typename InType, uint64_t InputC0 = asc::te::c0_element<OutType>>
+    __aicore__ static inline auto MakeMxPackedWeightTensor(uint64_t mte2RealK, uint64_t nL1Size, uint64_t offset)
+    {
+        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, InType>(offset),
+                                    asc::te::make_frame_layout<asc::te::zn_layout_ptn, AscendC::Std::Int<InputC0>>(
+                                        static_cast<int64_t>(mte2RealK), static_cast<int64_t>(nL1Size)));
+    }
+
+    template <typename BiasType>
+    __aicore__ static inline auto MakeMxBiasUbTensor(uint64_t baseOffset, uint64_t slotIdx, uint64_t nL1Size,
+                                                     uint64_t bufferSize)
+    {
+        auto layout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
+            1, CeilAlign(nL1Size, static_cast<uint64_t>(BLOCK_CUBE)));
+        return asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::ub, BiasType>(baseOffset + slotIdx * bufferSize), layout);
+    }
+
+    template <typename OutType>
+    __aicore__ static inline auto MakeMxConvertedWeightTensor(uint64_t mte2RealK, uint64_t nL1Size, uint64_t baseOffset,
+                                                              uint64_t slot, uint64_t bufferCount)
+    {
+        constexpr uint64_t vectorElements = AscendC::VECTOR_REG_WIDTH;
+        const uint64_t innerSize = vectorElements * bufferCount;
+        const uint64_t offset = baseOffset + slot * vectorElements * sizeof(OutType);
+        return asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::ub, OutType>(offset),
+            Blaze::Gemm::Weight8BitZnToZnUBLayout<OutType>{}(static_cast<int64_t>(mte2RealK),
+                                                             static_cast<int64_t>(Align16(nL1Size)), innerSize));
+    }
+
+    __aicore__ static inline void DrainMxPrologueBuffers(uint16_t weightBuffers, uint16_t inputBuffers,
+                                                         uint16_t scaleBuffers, uint16_t weightEvent,
+                                                         uint16_t inputEvent, uint16_t scaleEvent)
+    {
+        for (uint16_t slot = 0U; slot < weightBuffers; ++slot) {
+            WaitFlag<HardEvent::MTE3_V>(weightEvent + slot);
+        }
+        for (uint16_t slot = 0U; slot < inputBuffers; ++slot) {
+            WaitFlag<HardEvent::V_MTE2>(inputEvent + slot);
+        }
+        for (uint16_t slot = 0U; slot < scaleBuffers; ++slot) {
+            WaitFlag<HardEvent::MTE3_V>(scaleEvent + slot);
+        }
+    }
+
+    template <typename GMScale>
+    __aicore__ static inline auto LoadMxScaleWindow(const GMScale& source, uint64_t kOffset, uint64_t nOffset,
+                                                    uint64_t kSize, uint64_t nSize, uint64_t ubOffset,
+                                                    uint16_t freeEvent, uint16_t readyEvent)
+    {
+        auto gm = source.slice(asc::te::make_coord(kOffset, nOffset), asc::te::make_shape(kSize, nSize));
+        WaitFlag<HardEvent::V_MTE2>(freeEvent);
+        auto layout = asc::te::make_frame_layout<asc::te::scaleb_dn_layout_ptn>(
+            AscendC::Std::Int<Tile::MX_SCALE_INPUT_ROW_STRIDE>{}, nSize);
+        auto base = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, fp8_e8m0_t>(ubOffset), layout);
+        auto input = base.slice(asc::te::make_coord(0, 0), asc::te::make_shape(kSize, nSize));
+        auto copy = asc::te::make_copy(Tile::CopyGM2UBMxScale{});
+        asc::te::copy(copy, input, gm);
+        SetFlag<HardEvent::MTE2_V>(readyEvent);
+        WaitFlag<HardEvent::MTE2_V>(readyEvent);
+        return input;
+    }
+
+    __aicore__ static inline auto MakeMxScaleOutput(uint64_t kSize, uint64_t nSize, uint64_t ubOffset,
+                                                    uint16_t freeEvent)
+    {
+        WaitFlag<HardEvent::MTE3_V>(freeEvent);
+        auto layout = asc::te::make_frame_layout<asc::te::nn_layout_ptn, AscendC::Std::Int<MXFP_MULTI_BASE_SIZE>>(
+            kSize, nSize);
+        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, fp8_e8m0_t>(ubOffset), layout);
+    }
+
+    template <typename Input, typename Output>
+    __aicore__ static inline void TransposeMxScaleWindow(const Input& input, const Output& output, uint64_t indexOffset,
+                                                         uint16_t readyEvent)
+    {
+        auto layout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1, Tile::MX_SCALE_TRANS_ID_SIZE);
+        auto indices = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, uint16_t>(indexOffset),
+                                            layout);
+        Tile::MxScaleTranspose::Transpose(output, input, indices);
+        SetFlag<HardEvent::V_MTE3>(readyEvent);
+        WaitFlag<HardEvent::V_MTE3>(readyEvent);
+    }
+
+    template <typename Output>
+    __aicore__ static inline void StoreMxScaleWindow(const Output& output, uint64_t kSize, uint64_t nSize,
+                                                     uint64_t fullN, uint64_t nOffset, uint64_t l1Offset)
+    {
+        auto layout = asc::te::make_frame_layout<asc::te::nn_layout_ptn, AscendC::Std::Int<MXFP_MULTI_BASE_SIZE>>(
+            kSize, fullN);
+        auto l1 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, fp8_e8m0_t>(l1Offset), layout);
+        auto slice = l1.slice(asc::te::make_coord(0, nOffset), asc::te::make_shape(kSize, nSize));
+        auto copy = asc::te::make_copy(Tile::CopyUB2L1MxScale{});
+        asc::te::copy(copy, slice, output);
+    }
+
+    template <typename GMWeight, typename Packed>
+    __aicore__ static inline void CopyMxPackedWeight(const GMWeight& source, const Packed& packed, uint64_t kOffset,
+                                                     uint64_t realK, uint64_t nOffset, uint64_t nSize)
+    {
+        auto gm = source.slice(asc::te::make_coord(kOffset, nOffset), asc::te::make_shape(realK, nSize));
+        auto copy = asc::te::make_copy(Tile::CopyGM2UBWeight{});
+        asc::te::copy(copy, packed, gm);
+    }
+
+    template <typename GMWeight, typename GMBias, typename Packed, typename Bias>
+    __aicore__ static inline void LoadMxPackedWeightAndBias(const GMWeight& weight, const GMBias& bias,
+                                                            const Packed& packed, const Bias& biasInput,
+                                                            uint64_t kOffset, uint64_t realK, uint64_t nOffset,
+                                                            uint64_t nSize, uint64_t biasOffset, uint64_t biasSize,
+                                                            bool processBias, uint16_t readyEvent)
+    {
+        if (realK > 0) {
+            CopyMxPackedWeight(weight, packed, kOffset, realK, nOffset, nSize);
+        }
+        if (processBias) {
+            auto source = bias.slice(asc::te::make_coord(0, nOffset + biasOffset), asc::te::make_shape(1, biasSize));
+            auto copy = asc::te::make_copy(asc::te::copy_gm_to_ub{});
+            asc::te::copy(copy, biasInput, source);
+        }
+        SetFlag<HardEvent::MTE2_V>(readyEvent);
+        WaitFlag<HardEvent::MTE2_V>(readyEvent);
+    }
+
+    template <bool NeedsScaleIndices>
+    __aicore__ inline void InitializeVectorBuffers()
+    {
+        for (uint16_t slot = 0; slot < UB_MTE2_BUFFER_NUM; ++slot) {
+            SetFlag<HardEvent::V_MTE2>(VEC_EVENT_ID_V_TO_MTE2 + slot);
+        }
+        for (uint16_t slot = 0; slot < WEIGHT_8BIT_BUFFER_NUM; ++slot) {
+            SetFlag<HardEvent::MTE3_V>(VEC_EVENT_ID_MTE3_TO_V + slot);
+        }
+        for (uint16_t slot = 0; slot < MX_SCALE_OUTPUT_BUFFER_NUM; ++slot) {
+            SetFlag<HardEvent::MTE3_V>(VEC_EVENT_ID_TRANS_SCALE_MTE3_TO_V + slot);
+        }
+        if constexpr (NeedsScaleIndices) {
+            LoadMxScaleTransposeIndices(MX_SCALE_TRANS_ID_OFFSET, EVENT_ID_MTE2_TO_V);
+        }
+    }
+
+    static constexpr uint64_t QUAD_B_STRIDE = 65536UL;
+    static constexpr uint64_t QUAD_A_BASE = 311296UL;
+    static constexpr uint64_t QUAD_A_STRIDE = 106496UL;
+    static constexpr uint64_t QUAD_SCALE_A_BASE = 262144UL;
+    static constexpr uint64_t QUAD_SCALE_B_BASE = 278528UL;
+    static constexpr uint64_t QUAD_SCALE_STRIDE = 8192UL;
+    static constexpr uint64_t KB = 1024UL;
+    static constexpr uint64_t BIAS_L1_BYTES = 4UL * KB;
+    static constexpr uint64_t DOUBLE_A_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {128UL * KB, 256UL * KB};
+    static constexpr uint64_t DOUBLE_B_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {0UL, 384UL * KB};
+    static constexpr uint64_t DOUBLE_SCALE_A_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {64UL * KB, 448UL * KB};
+    static constexpr uint64_t DOUBLE_SCALE_B_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {96UL * KB, 480UL * KB};
+    static constexpr uint64_t DOUBLE_BIAS_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {64UL * KB, 380UL * KB};
+    static constexpr uint64_t TRIPLE_A_L1_OFFSETS[TRIPLE_BUFFER_COUNT] = {0UL, 256UL * KB, 192UL * KB};
+    static constexpr uint64_t TRIPLE_B_L1_OFFSETS[TRIPLE_BUFFER_COUNT] = {64UL * KB, 320UL * KB, 448UL * KB};
+    static constexpr uint64_t TRIPLE_SCALE_A_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {128UL * KB, 384UL * KB};
+    static constexpr uint64_t TRIPLE_SCALE_B_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {160UL * KB, 416UL * KB};
+
+    static constexpr uint64_t UB_MTE2_BUFFER_NUM = 4UL;
+    static constexpr uint64_t WEIGHT_8BIT_BUFFER_NUM = 4UL;
+    static constexpr uint64_t DEFAULT_PACKED_INPUT_BYTES = 80UL * KB;
+    static constexpr uint64_t ALIGNED_PACKED_INPUT_BYTES = 64UL * KB;
+    static constexpr uint64_t WEIGHT_4BIT_TOTAL_SIZE = (MODE == MxPipelineMode::Aligned) ? ALIGNED_PACKED_INPUT_BYTES :
+                                                                                           DEFAULT_PACKED_INPUT_BYTES;
+    static constexpr uint64_t WEIGHT_4BIT_SINGLE_BUFFER_SIZE = WEIGHT_4BIT_TOTAL_SIZE / UB_MTE2_BUFFER_NUM;
+    static constexpr uint64_t WEIGHT_8BIT_TOTAL_SIZE = 128UL * KB;
+    static constexpr uint64_t BIAS_UB_SINGLE_BUFFER_SIZE = 512UL;
+    static constexpr uint64_t MX_BIAS_SINGLE_VECTOR_SIZE = 128UL;
+    static constexpr uint64_t BIAS_UB_TOTAL_SIZE = 4UL * BIAS_UB_SINGLE_BUFFER_SIZE;
+    static constexpr uint64_t BIAS_UB_INPUT_OFFSET = WEIGHT_4BIT_TOTAL_SIZE + WEIGHT_8BIT_TOTAL_SIZE;
+    static constexpr uint64_t BIAS_UB_OUTPUT_OFFSET = BIAS_UB_INPUT_OFFSET + BIAS_UB_TOTAL_SIZE;
+    static constexpr uint64_t MX_SCALE_TRANS_ID_OFFSET = BIAS_UB_OUTPUT_OFFSET + BIAS_UB_TOTAL_SIZE;
+    static constexpr uint64_t MX_SCALE_TRANS_ID_BUFFER_SIZE = 1UL * KB;
+    static constexpr uint64_t MX_SCALE_OUTPUT_OFFSET = MX_SCALE_TRANS_ID_OFFSET + MX_SCALE_TRANS_ID_BUFFER_SIZE;
+    static constexpr uint64_t MX_SCALE_OUTPUT_SINGLE_BUFFER_SIZE = 16UL * KB;
+    static constexpr uint64_t MX_SCALE_OUTPUT_BUFFER_NUM = ((MODE == MxPipelineMode::ParameterDriven) ||
+                                                            (MODE == MxPipelineMode::WeightQuad) ||
+                                                            (MODE == MxPipelineMode::OperandTriple)) ?
+                                                               DOUBLE_BUFFER_COUNT :
+                                                               0UL;
+    static constexpr uint64_t WEIGHT_4BIT_INIT_OFFSET = 0UL;
+    static constexpr uint64_t WEIGHT_8BIT_INIT_OFFSET = WEIGHT_4BIT_TOTAL_SIZE;
+    enum InputSlotIndex : uint32_t { THIRD_INPUT_SLOT = 2U, FOURTH_INPUT_SLOT = 3U };
+    static constexpr uint64_t WEIGHT_4BIT_OFFSETS[UB_MTE2_BUFFER_NUM] = {
+        WEIGHT_4BIT_INIT_OFFSET + 0UL * WEIGHT_4BIT_SINGLE_BUFFER_SIZE,
+        WEIGHT_4BIT_INIT_OFFSET + 1UL * WEIGHT_4BIT_SINGLE_BUFFER_SIZE,
+        WEIGHT_4BIT_INIT_OFFSET + THIRD_INPUT_SLOT* WEIGHT_4BIT_SINGLE_BUFFER_SIZE,
+        WEIGHT_4BIT_INIT_OFFSET + FOURTH_INPUT_SLOT* WEIGHT_4BIT_SINGLE_BUFFER_SIZE};
+    constexpr static AscendC::TEventID VEC_EVENT_ID_V_TO_MTE2 = 0;
+    constexpr static AscendC::TEventID VEC_EVENT_ID_MTE3_TO_V = 0;
+    constexpr static AscendC::TEventID VEC_EVENT_ID_TRANS_SCALE_MTE3_TO_V = 4;
+    constexpr static AscendC::TEventID EVENT_ID_MTE2_TO_V = 0;
+    static constexpr uint8_t SYNC_AIC_AIV_MODE = 4;
+    static constexpr uint64_t MX_GROUP_SIZE = 32UL;
+    static constexpr uint64_t WEIGHT_L1_INIT_OFFSET = DOUBLE_B_L1_OFFSETS[0UL];
+    static constexpr uint64_t WEIGHT_L1_DB_OFFSET = DOUBLE_B_L1_OFFSETS[1UL];
+    static constexpr uint64_t L1_WEIGHT_OFFSETS[DOUBLE_BUFFER_COUNT] = {WEIGHT_L1_INIT_OFFSET * sizeof(OutType),
+                                                                        WEIGHT_L1_DB_OFFSET * sizeof(OutType)};
+    static constexpr uint64_t SYNC_AIV_AIC_FLAG = PipelineConfig::READY_FLAG;
+    static constexpr uint64_t SYNC_AIC_AIV_FLAG = PipelineConfig::FREE_FLAG;
+    static constexpr uint64_t MX_A8W4_L1_K_CONFIG_256 = 256UL;
+    static constexpr uint64_t MX_A8W4_L1_K_CONFIG_512 = 512UL;
+    static constexpr uint64_t MX_A8W4_L1_K_DYNAMIC_CONFIG_N_THRESHOLD = 128UL;
+    static constexpr uint64_t MX_A8W4_L1_K_DYNAMIC_CONFIG_M_THRESHOLD = 160UL;
+    static constexpr uint64_t BIAS_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {DOUBLE_BIAS_L1_OFFSETS[0UL],
+                                                                      DOUBLE_BIAS_L1_OFFSETS[1UL]};
+    static constexpr uint64_t SCALE_B_L1_INIT_OFFSET = DOUBLE_SCALE_B_L1_OFFSETS[0UL];
+    static constexpr uint64_t SCALE_B_L1_DB_OFFSET = DOUBLE_SCALE_B_L1_OFFSETS[1UL] - DOUBLE_SCALE_B_L1_OFFSETS[0UL];
+    static constexpr uint64_t BIAS_L1_SINGLE_BUFFER_SIZE = BIAS_L1_BYTES;
+    static constexpr uint64_t MX_SCALE_K_WINDOW_SIZE = (MODE == MxPipelineMode::WeightQuad) ?
+                                                           PipelineConfig::DEFAULT_SCALE_WINDOW_K :
+                                                           PipelineConfig::SCALE_WINDOW_K;
+    static constexpr uint64_t DOUBLE_WEIGHT_L1_OFFSETS[DOUBLE_BUFFER_COUNT] = {DOUBLE_B_L1_OFFSETS[0UL],
+                                                                               DOUBLE_B_L1_OFFSETS[1UL]};
+    static constexpr uint64_t TRIPLE_WEIGHT_L1_OFFSETS[TRIPLE_BUFFER_COUNT] = {
+        TRIPLE_B_L1_OFFSETS[0UL], TRIPLE_B_L1_OFFSETS[1UL], TRIPLE_B_L1_OFFSETS[2UL]};
+
+    uint64_t cvLoopIdx_ = 0;
+    uint64_t ubMte2LoopIdx_ = 0;
+    uint64_t ubComputeLoopIdx_ = 0;
+    uint64_t scaleComputeLoopIdx_ = 0;
+    uint64_t scaleL1BufIdx_ = 0;
+    const uint64_t* weightOffsets_;
+    const uint64_t* biasOffsets_;
+    const uint64_t* scaleBOffsets_;
+    uint64_t scaleKWindowSize_;
+    uint16_t readyFlag_;
+    uint16_t freeFlag_;
+    bool hasBias_ = false;
+    uint64_t l1BufferStage_{DOUBLE_BUFFER_COUNT};
+    uint64_t creditLimit_{DOUBLE_BUFFER_COUNT};
+    static constexpr uint64_t UB_CAPACITY_BYTES = 248UL * 1024UL;
+    static constexpr uint64_t SCALE_SHAPE_INDEX = 3UL;
+    static_assert(MX_SCALE_OUTPUT_OFFSET + MX_SCALE_OUTPUT_BUFFER_NUM * MX_SCALE_OUTPUT_SINGLE_BUFFER_SIZE <=
+                      UB_CAPACITY_BYTES,
+                  "MX UB allocation exceeds hardware capacity");
+    // Share the transfer itself; callers retain their prefetch and event timing.
+
+    template <typename GMWeightTensorType_>
+    __aicore__ inline void PrefetchFragment(const GMWeightTensorType_& gmWeightTensor,
+                                            const WeightPrologueMxBlockParams& param, uint64_t firstSlot,
+                                            uint64_t fragIdx)
+    {
+        const uint64_t slot = (firstSlot + fragIdx) & (UB_MTE2_BUFFER_NUM - 1);
+        WaitFlag<HardEvent::V_MTE2>(VEC_EVENT_ID_V_TO_MTE2 + slot);
+        auto packed = MakeMxPackedWeightTensor<OutType, InType>(WEIGHT_FRAGMENT_K, param.nL1Size,
+                                                                WEIGHT_4BIT_OFFSETS[slot]);
+        CopyMxPackedWeight(gmWeightTensor, packed, fragIdx * WEIGHT_FRAGMENT_K, WEIGHT_FRAGMENT_K, param.nOffset,
+                           param.nL1Size);
+        SetFlag<HardEvent::MTE2_V>(EVENT_ID_MTE2_TO_V + slot);
+    }
+
+    __aicore__ inline uint64_t GetScaleBL1Offset(uint64_t bufferId) const
+    {
+        uint64_t offset = l1BufferStage_ == TRIPLE_BUFFER_COUNT ? TRIPLE_SCALE_B_L1_OFFSETS[bufferId] :
+                                                                  DOUBLE_SCALE_B_L1_OFFSETS[bufferId];
+        return offset +
+               (l1BufferStage_ == DOUBLE_BUFFER_COUNT && hasBias_ && bufferId == 0 ? BIAS_L1_SINGLE_BUFFER_SIZE : 0UL);
+    }
+
+    static constexpr uint64_t WEIGHT_FRAGMENT_K = 128UL;
+
+    struct WeightFragment {
+        uint64_t realK;
+        uint64_t splitOffset;
+        uint64_t biasSize;
+        uint64_t biasOffset;
+        bool hasBias;
+    };
+
+    __aicore__ inline WeightFragment MakeWeightFragment(const WeightPrologueMxBlockParams& param, uint64_t kOffset)
+    {
+        const uint64_t halfK = param.kbL1Size / DOUBLE_BUFFER_COUNT;
+        const uint64_t realK = Min(param.kbL1Size, param.kSize - kOffset);
+        WeightFragment fragment{};
+        fragment.realK = GetSubBlockIdx() == 0 ? Min(halfK, realK) : (realK > halfK ? realK - halfK : 0);
+        fragment.splitOffset = GetSubBlockIdx() * halfK;
+        if (hasBias_ && kOffset == 0) {
+            const uint64_t firstN = Min(param.nL1Size, MX_BIAS_SINGLE_VECTOR_SIZE);
+            fragment.biasSize = fragment.realK == realK ? param.nL1Size :
+                                                          (GetSubBlockIdx() == 0 ? firstN : param.nL1Size - firstN);
+            fragment.biasOffset = GetSubBlockIdx() * (fragment.biasSize != 0 ? MX_BIAS_SINGLE_VECTOR_SIZE : 0);
+        }
+        fragment.hasBias = hasBias_ && kOffset == 0 && fragment.biasSize != 0;
+        return fragment;
+    }
+
+    template <typename GMWeightTensorType_, typename GMBiasTensorType_>
+    __aicore__ inline void ConvertWeightStage(const WeightPrologueMxBlockParams& param, uint64_t kOffset,
+                                              const GMWeightTensorType_& gmWeight, const GMBiasTensorType_& gmBias)
+    {
+        const auto fragment = MakeWeightFragment(param, kOffset);
+        auto packed = MakeMxPackedWeightTensor<OutType, InType>(
+            fragment.realK, param.nL1Size, WEIGHT_4BIT_OFFSETS[ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1)]);
+        auto expanded = MakeMxConvertedWeightTensor<OutType>(fragment.realK, param.nL1Size, WEIGHT_8BIT_INIT_OFFSET,
+                                                             ubComputeLoopIdx_ & (WEIGHT_8BIT_BUFFER_NUM - 1),
+                                                             WEIGHT_8BIT_BUFFER_NUM);
+        auto weightL1 = MakeL1WeightTensor(fragment.realK, param.nL1Size, fragment.splitOffset);
+        auto biasInput = MakeMxBiasUbTensor<BiasType>(BIAS_UB_INPUT_OFFSET, ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1),
+                                                      fragment.biasSize, BIAS_UB_SINGLE_BUFFER_SIZE);
+        auto biasOutput = MakeMxBiasUbTensor<BiasType>(BIAS_UB_OUTPUT_OFFSET,
+                                                       ubComputeLoopIdx_ & (WEIGHT_8BIT_BUFFER_NUM - 1),
+                                                       fragment.biasSize, BIAS_UB_SINGLE_BUFFER_SIZE);
+        auto biasL1 = MakeL1BiasTensor(fragment.biasSize, fragment.biasOffset);
+        WaitFlag<HardEvent::V_MTE2>(VEC_EVENT_ID_V_TO_MTE2 + (ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1)));
+        LoadMxPackedWeightAndBias(gmWeight, gmBias, packed, biasInput, kOffset + fragment.splitOffset, fragment.realK,
+                                  param.nOffset, param.nL1Size, fragment.biasOffset, fragment.biasSize,
+                                  fragment.hasBias, EVENT_ID_MTE2_TO_V);
+        ConvertMxPackedWeight<OutType, InType>(
+            packed, expanded, biasInput, biasOutput, fragment.hasBias,
+            VEC_EVENT_ID_MTE3_TO_V + (ubComputeLoopIdx_ & (WEIGHT_8BIT_BUFFER_NUM - 1)));
+        SetFlag<HardEvent::V_MTE2>(VEC_EVENT_ID_V_TO_MTE2 + (ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1)));
+        ubMte2LoopIdx_++;
+        StoreMxConvertedWeight(fragment.realK, expanded, weightL1, biasOutput, biasL1, fragment.hasBias,
+                               VEC_EVENT_ID_MTE3_TO_V + (ubComputeLoopIdx_ & (WEIGHT_8BIT_BUFFER_NUM - 1)),
+                               ubComputeLoopIdx_);
+        Sync::NotifyCube<(MODE == MxPipelineMode::ParameterDriven) ? SYNC_AIC_AIV_MODE : Sync::SYNC_MODE_INTRA,
+                         PIPE_MTE3>((MODE == MxPipelineMode::ParameterDriven) ? readyFlag_ : SYNC_AIC_AIV_FLAG);
+    }
+
+    template <typename GMWeightTensorType_>
+    __aicore__ inline void ComputeAlignedFragments(const WeightPrologueMxBlockParams& param,
+                                                   const GMWeightTensorType_& gmWeight)
+    {
+        const uint64_t fragments = param.kSize / WEIGHT_FRAGMENT_K;
+        const uint64_t firstSlot = ubMte2LoopIdx_;
+        uint64_t produced = 0UL;
+        for (; produced < Min(static_cast<uint64_t>(DOUBLE_BUFFER_COUNT), fragments); ++produced) {
+            PrefetchFragment(gmWeight, param, firstSlot, produced);
+        }
+        for (uint64_t index = 0UL; index < fragments; ++index) {
+            const uint64_t offset = (index & 1) * WEIGHT_FRAGMENT_K;
+            auto packed = MakeMxPackedWeightTensor<OutType, InType>(
+                WEIGHT_FRAGMENT_K, param.nL1Size, WEIGHT_4BIT_OFFSETS[ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1)]);
+            auto expanded = MakeMxConvertedWeightTensor<OutType>(
+                WEIGHT_FRAGMENT_K, param.nL1Size, WEIGHT_8BIT_INIT_OFFSET,
+                ubComputeLoopIdx_ & (WEIGHT_8BIT_BUFFER_NUM - 1), WEIGHT_8BIT_BUFFER_NUM);
+            auto l1 = MakeL1WeightTensor(WEIGHT_FRAGMENT_K, param.nL1Size, offset);
+            auto biasIn = MakeMxBiasUbTensor<BiasType>(BIAS_UB_INPUT_OFFSET, ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1),
+                                                       0, BIAS_UB_SINGLE_BUFFER_SIZE);
+            auto biasOut = MakeMxBiasUbTensor<BiasType>(
+                BIAS_UB_OUTPUT_OFFSET, ubComputeLoopIdx_ & (WEIGHT_8BIT_BUFFER_NUM - 1), 0, BIAS_UB_SINGLE_BUFFER_SIZE);
+            auto biasL1 = MakeL1BiasTensor(0, 0);
+            WaitFlag<HardEvent::MTE2_V>(EVENT_ID_MTE2_TO_V + (ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1)));
+            if (produced < fragments) {
+                PrefetchFragment(gmWeight, param, firstSlot, produced++);
+            }
+            ConvertMxPackedWeight<OutType, InType>(
+                packed, expanded, biasIn, biasOut, false,
+                VEC_EVENT_ID_MTE3_TO_V + (ubComputeLoopIdx_ & (WEIGHT_8BIT_BUFFER_NUM - 1)));
+            SetFlag<HardEvent::V_MTE2>(VEC_EVENT_ID_V_TO_MTE2 + (ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1)));
+            ubMte2LoopIdx_++;
+            if (offset == 0 && cvLoopIdx_ >= DOUBLE_BUFFER_COUNT) {
+                Sync::WaitForCube<(MODE == MxPipelineMode::ParameterDriven) ? SYNC_AIC_AIV_MODE : Sync::SYNC_MODE_INTRA,
+                                  PIPE_MTE3>((MODE == MxPipelineMode::ParameterDriven) ? freeFlag_ : SYNC_AIV_AIC_FLAG);
+            }
+            StoreMxConvertedWeight(WEIGHT_FRAGMENT_K, expanded, l1, biasOut, biasL1, false,
+                                   VEC_EVENT_ID_MTE3_TO_V + (ubComputeLoopIdx_ & (WEIGHT_8BIT_BUFFER_NUM - 1)),
+                                   ubComputeLoopIdx_);
+            if (offset != 0) {
+                Sync::NotifyCube<(MODE == MxPipelineMode::ParameterDriven) ? SYNC_AIC_AIV_MODE : Sync::SYNC_MODE_INTRA,
+                                 PIPE_MTE3>((MODE == MxPipelineMode::ParameterDriven) ? readyFlag_ : SYNC_AIC_AIV_FLAG);
+                cvLoopIdx_++;
+            }
+        }
+    }
+
+    template <typename GMWeightTensorType_, typename GMScaleBTensorType_, typename GMBiasTensorType_>
+    __aicore__ inline void ComputeBasicBlockAivNdKnNzNk(const WeightPrologueMxBlockParams& param,
+                                                        const GMWeightTensorType_& gmWeight,
+                                                        const GMScaleBTensorType_& gmScale,
+                                                        const GMBiasTensorType_& gmBias)
+    {
+        if constexpr ((MODE == MxPipelineMode::Aligned)) {
+            ComputeAlignedFragments(param, gmWeight);
+        } else {
+            uint64_t limit = DOUBLE_BUFFER_COUNT;
+            if constexpr ((MODE == MxPipelineMode::WeightQuad)) {
+                limit = PipelineConfig::WeightStages(hasBias_);
+            } else if constexpr ((MODE == MxPipelineMode::OperandTriple)) {
+                creditLimit_ = Min(l1BufferStage_, PipelineConfig::CreditLimit(param.kSize, param.kbL1Size, hasBias_));
+                limit = creditLimit_;
+            }
+            for (uint64_t kOffset = 0UL; kOffset < param.kSize; kOffset += param.kbL1Size, cvLoopIdx_++) {
+                if (cvLoopIdx_ >= limit) {
+                    Sync::WaitForCube<(MODE == MxPipelineMode::ParameterDriven) ? SYNC_AIC_AIV_MODE :
+                                                                                  Sync::SYNC_MODE_INTRA,
+                                      PIPE_MTE3>((MODE == MxPipelineMode::ParameterDriven) ? freeFlag_ :
+                                                                                             SYNC_AIV_AIC_FLAG);
+                }
+                HandleMxScale(param, gmScale, kOffset);
+                ConvertWeightStage(param, kOffset, gmWeight, gmBias);
+            }
+        }
+    }
+
+    struct ScaleTransfer {
+        uint64_t kOffset;
+        uint64_t kSize;
+        uint64_t nSize;
+        uint64_t nOffset;
+        uint64_t l1Slot;
+        uint64_t outputSlot;
+    };
+
+    __aicore__ inline uint64_t ScaleTransferL1Base(uint64_t slot) const
+    {
+        if constexpr ((MODE == MxPipelineMode::ParameterDriven)) {
+            return scaleBOffsets_[slot];
+        } else if constexpr ((MODE == MxPipelineMode::OperandTriple)) {
+            return GetScaleBL1Offset(slot);
+        } else {
+            const uint64_t shift = hasBias_ && slot == 0 ? BIAS_L1_SINGLE_BUFFER_SIZE : 0;
+            if constexpr ((MODE == MxPipelineMode::WeightQuad)) {
+                if (!hasBias_) {
+                    return QUAD_SCALE_B_BASE + slot * QUAD_SCALE_STRIDE;
+                }
+            }
+            return SCALE_B_L1_INIT_OFFSET + slot * SCALE_B_L1_DB_OFFSET + shift;
+        }
+    }
+
+    template <typename GMScaleBTensorType_>
+    __aicore__ inline void HandleMxScale(const WeightPrologueMxBlockParams& param, const GMScaleBTensorType_& gmScale,
+                                         uint64_t kOffset)
+    {
+        const uint64_t window = (MODE == MxPipelineMode::ParameterDriven) ? scaleKWindowSize_ :
+                                                                            PipelineConfig::ScaleWindow(hasBias_);
+        if (kOffset % window != 0) {
+            return;
+        }
+        ScaleTransfer transfer{};
+        const uint64_t slots = (MODE == MxPipelineMode::WeightQuad) && !hasBias_ ? QUADRUPLE_BUFFER_COUNT :
+                                                                                   DOUBLE_BUFFER_COUNT;
+        transfer.l1Slot = scaleL1BufIdx_++ & (slots - 1);
+        const uint64_t firstN = param.nL1Size > BLOCK_CUBE ?
+                                    CeilAlign(param.nL1Size / DOUBLE_BUFFER_COUNT, static_cast<uint64_t>(BLOCK_CUBE)) :
+                                    param.nL1Size;
+        transfer.nSize = GetSubBlockIdx() == 0 ? firstN : param.nL1Size - firstN;
+        transfer.nOffset = GetSubBlockIdx() * firstN;
+        if (transfer.nSize == 0) {
+            return;
+        }
+        transfer.kOffset = kOffset;
+        const uint64_t realK = Min(window, param.kSize - kOffset);
+        transfer.kSize = (MODE == MxPipelineMode::ParameterDriven) ? Align64(realK) / MX_GROUP_SIZE :
+                                                                     CeilDiv(realK, MX_GROUP_SIZE);
+        transfer.outputSlot = scaleComputeLoopIdx_ & (MX_SCALE_OUTPUT_BUFFER_NUM - 1);
+        auto input = LoadMxScaleWindow(
+            gmScale, transfer.kOffset / MX_GROUP_SIZE, param.nOffset + transfer.nOffset, transfer.kSize, transfer.nSize,
+            WEIGHT_4BIT_OFFSETS[ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1)],
+            VEC_EVENT_ID_V_TO_MTE2 + (ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1)), EVENT_ID_MTE2_TO_V);
+        auto output = MakeMxScaleOutput(
+            transfer.kSize, transfer.nSize,
+            MX_SCALE_OUTPUT_OFFSET + transfer.outputSlot * MX_SCALE_OUTPUT_SINGLE_BUFFER_SIZE,
+            VEC_EVENT_ID_TRANS_SCALE_MTE3_TO_V + transfer.outputSlot);
+        TransposeMxScaleWindow(input, output, MX_SCALE_TRANS_ID_OFFSET, EVENT_ID_MTE2_TO_V);
+        StoreMxScaleWindow(output, transfer.kSize, transfer.nSize, param.nL1Size, transfer.nOffset,
+                           ScaleTransferL1Base(transfer.l1Slot));
+        SetFlag<HardEvent::MTE3_V>(VEC_EVENT_ID_TRANS_SCALE_MTE3_TO_V + transfer.outputSlot);
+        SetFlag<HardEvent::V_MTE2>(VEC_EVENT_ID_V_TO_MTE2 + (ubMte2LoopIdx_ & (UB_MTE2_BUFFER_NUM - 1)));
+        ubMte2LoopIdx_++;
+        scaleComputeLoopIdx_++;
+    }
+
+    __aicore__ inline uint64_t WeightL1Address() const
+    {
+        const uint64_t slot = cvLoopIdx_ & (DOUBLE_BUFFER_COUNT - 1);
+        if constexpr ((MODE == MxPipelineMode::ParameterDriven)) {
+            return weightOffsets_[slot];
+        } else if constexpr ((MODE == MxPipelineMode::OperandTriple)) {
+            return l1BufferStage_ == TRIPLE_BUFFER_COUNT ? TRIPLE_WEIGHT_L1_OFFSETS[cvLoopIdx_ % TRIPLE_BUFFER_COUNT] :
+                                                           DOUBLE_WEIGHT_L1_OFFSETS[slot];
+        } else if constexpr ((MODE == MxPipelineMode::WeightQuad)) {
+            if (!hasBias_) {
+                return (cvLoopIdx_ & (QUADRUPLE_BUFFER_COUNT - 1)) * QUAD_B_STRIDE;
+            }
+        }
+        return L1_WEIGHT_OFFSETS[slot];
+    }
+
+    __aicore__ inline auto MakeL1WeightTensor(uint64_t mte2RealK, uint64_t nL1Size, uint64_t l1SplitOffset)
+    {
+        const uint64_t layoutK = (MODE == MxPipelineMode::Aligned) ? MX_A8W4_L1_K_CONFIG_256 : mte2RealK;
+        auto layout = asc::te::make_frame_layout<asc::te::zn_layout_ptn, asc::te::layout_trait_default<OutType>>(
+            layoutK, nL1Size);
+        auto tensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l1, OutType>(WeightL1Address()),
+                                           layout);
+        return tensor.slice(asc::te::make_coord(l1SplitOffset, 0), asc::te::make_shape(mte2RealK, nL1Size));
+    }
+
+    __aicore__ inline uint64_t BiasL1Address() const
+    {
+        const uint64_t slot = cvLoopIdx_ & (DOUBLE_BUFFER_COUNT - 1);
+        if constexpr ((MODE == MxPipelineMode::ParameterDriven)) {
+            return biasOffsets_[slot];
+        } else if constexpr ((MODE == MxPipelineMode::OperandTriple)) {
+            const uint64_t biasSlot = l1BufferStage_ == TRIPLE_BUFFER_COUNT ? cvLoopIdx_ % TRIPLE_BUFFER_COUNT : slot;
+            return DOUBLE_BIAS_L1_OFFSETS[biasSlot];
+        } else {
+            return BIAS_L1_OFFSETS[slot];
+        }
+    }
+
+    __aicore__ inline auto MakeL1BiasTensor(uint64_t nL1Size, uint64_t nOffset)
+    {
+        auto layout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
+            1, CeilAlign(nL1Size, static_cast<uint64_t>(BLOCK_CUBE)));
+        return asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l1, BiasType>(BiasL1Address() + nOffset * sizeof(BiasType)),
+            layout);
+    }
+
+    __aicore__ inline uint64_t CalcDynamicKBlock(uint64_t mL1Size, uint64_t nL1Size) const
+    {
+        if constexpr ((MODE == MxPipelineMode::OperandTriple)) {
+            if (l1BufferStage_ == TRIPLE_BUFFER_COUNT) {
+                return MX_A8W4_L1_K_CONFIG_256;
+            }
+        }
+        return (mL1Size <= MX_A8W4_L1_K_DYNAMIC_CONFIG_M_THRESHOLD &&
+                nL1Size <= MX_A8W4_L1_K_DYNAMIC_CONFIG_N_THRESHOLD) ?
+                   MX_A8W4_L1_K_CONFIG_512 :
+                   MX_A8W4_L1_K_CONFIG_256;
+    }
+};
+
+// Macro aliases keep long template specializations readable in declarations/definitions.
+#define GROUPED_MATMUL_RESPLIT_KERNEL_TEMPLATE_PARAM                                              \
+    template <class ProblemShape_, class BlockMmad_, class BlockScheduler_, class BlockEpilogue_, \
+              class BlockPrologue_, bool IsSingleMultiSingle_, uint32_t PipelineStages_>
+
+#define GROUPED_MATMUL_RESPLIT_KERNEL_CLASS                                                            \
+    GmmWeightQuantMxKernel<ProblemShape_, BlockMmad_, BlockScheduler_, BlockEpilogue_, BlockPrologue_, \
+                           IsSingleMultiSingle_, PipelineStages_>
+
+/*!
+ * \brief Group-level orchestrator for the MXFP8(M1 input) + FP4(weight input) grouped matmul path.
+ *
+ * Design reason:
+ * - The MMAD compute stage requires A/B to use the same compute representation.
+ * - B is stored as FP4 in GM, but AIC cannot directly convert FP4 to FP8E4M3 inside MMAD.
+ * - Therefore AIV runs prologue first to convert packed FP4 weight tiles into FP8E4M3-compatible B', then AIC
+ *   consumes A, B', scaleA and scaleB for accumulation.
+ *
+ * Specific flow:
+ * - Outer loop reads cumulative M (type 0), group M counts (type 1), or [expert index, M count] rows (type 2).
+ * - For each group g:
+ *   C_g = MatmulMX(A_g, B'_g, scaleA_g, scaleB_g)
+ *   where A_g/B'_g are consumed by MMAD with a consistent compute type, and scaleA_g/scaleB_g are MX scales.
+ * - AIC branch: tile scheduling + block MMAD.
+ * - AIV branch: tile prologue (FP4E2M1/FP4E1M2 -> FP8E4M3) for B.
+ *
+ * Key constraints:
+ * 1) groupList has groupNum rows; type 2 uses two columns and places empty groups after nonempty groups,
+ *    with each partition ordered by expert index.
+ * 2) BlockMmad and BlockPrologue must use the same dispatch policy so they agree on tile boundaries and sync points.
+ *
+ * When to use:
+ * - Use this kernel for the weight-quant grouped matmul path where weights are stored in FP4 and must be consumed
+ *   by MMAD after prologue conversion to an A-compatible compute type.
+ */
+template <class ProblemShape_, class BlockMmad_, class BlockScheduler_, class BlockEpilogue_, class BlockPrologue_,
+          bool IsSingleMultiSingle_, uint32_t PipelineStages_ = 0U>
+class GmmWeightQuantMxKernel {
+public:
+    using ProblemShape = ProblemShape_;
+    using BlockMmad = BlockMmad_;
+    using BlockScheduler = BlockScheduler_;
+    using BlockEpilogue = BlockEpilogue_;
+    using BlockPrologue = BlockPrologue_;
+    using AType = typename BlockMmad::AType;
+    using BType = typename BlockMmad::BType;
+    using ScaleAType = typename BlockMmad::ScaleAType;
+    using ScaleBType = typename BlockMmad::ScaleBType;
+    using CType = typename BlockMmad::CType;
+    using BiasType = typename BlockMmad::BiasType;
+    static constexpr bool IS_SINGLE_MULTI_SINGLE = IsSingleMultiSingle_;
+    struct Params {
+        ProblemShape problemShape;
+        typename BlockMmad::Params mmad;
+        typename BlockScheduler::Params scheduler;
+        typename BlockPrologue::Params prologue;
+        GM_ADDR ptrGroupList;
+        uint32_t groupListType;
+        uint32_t hasBias;
+    };
+
+    __aicore__ inline GmmWeightQuantMxKernel() = default;
+    __aicore__ inline void operator()(const Params& params);
+
+private:
+    static constexpr auto MODE = static_cast<MxPipelineMode>(PipelineStages_);
+    template <typename AType, bool AllowFastPath>
+    __aicore__ static inline void CalcMxKernelKBlock(uint64_t mL1Size, uint64_t nL1Size, uint64_t aBufferBytes,
+                                                     uint64_t& kaL1Size, uint64_t& kbL1Size, uint64_t& l0KSize)
+    {
+        constexpr uint64_t L1_K_CONFIG_512 = 512UL;
+        constexpr uint64_t L1_K_CONFIG_256 = 256UL;
+        constexpr uint64_t L1_K_DYNAMIC_CONFIG_N_THRESHOLD = 128UL;
+        constexpr uint64_t L0_K_SMALL_TILE_THRESHOLD = 128UL;
+        constexpr uint64_t L0_K_SMALL_TILE_SIZE = 256UL;
+        constexpr uint64_t L0_K_LARGE_TILE_SIZE = 128UL;
+        constexpr uint64_t A_L1_MODEL_SINGLE_BUF_SIZE = 80UL * 1024UL;
+        constexpr uint64_t A_B_LOAD_BALANCE_FACTOR = 2UL;
+        constexpr uint64_t L1_K_DYNAMIC_CONFIG_M_THRESHOLD = (A_L1_MODEL_SINGLE_BUF_SIZE / sizeof(AType) /
+                                                              L1_K_CONFIG_512 / AscendC::BLOCK_CUBE) *
+                                                             AscendC::BLOCK_CUBE;
+
+        kbL1Size = (mL1Size <= L1_K_DYNAMIC_CONFIG_M_THRESHOLD && nL1Size <= L1_K_DYNAMIC_CONFIG_N_THRESHOLD) ?
+                       L1_K_CONFIG_512 :
+                       L1_K_CONFIG_256;
+
+        l0KSize = (mL1Size <= L0_K_SMALL_TILE_THRESHOLD && nL1Size <= L0_K_SMALL_TILE_THRESHOLD) ?
+                      L0_K_SMALL_TILE_SIZE :
+                      L0_K_LARGE_TILE_SIZE;
+        uint64_t mL1Align = CeilAlign(mL1Size, static_cast<uint64_t>(AscendC::BLOCK_CUBE));
+        if constexpr (AllowFastPath) {
+            if (nL1Size <= mL1Align * A_B_LOAD_BALANCE_FACTOR) {
+                kaL1Size = kbL1Size;
+                return;
+            }
+        }
+        uint64_t kaDepth = CeilDiv(nL1Size, mL1Align * A_B_LOAD_BALANCE_FACTOR);
+        kaDepth = kaDepth == 0UL ? 1UL : kaDepth;
+
+        uint64_t modelMaxKaDepth = (A_L1_MODEL_SINGLE_BUF_SIZE / sizeof(AType)) / (mL1Align * kbL1Size);
+        uint64_t actualMaxKaDepth = (aBufferBytes / sizeof(AType)) / (mL1Align * kbL1Size);
+        uint64_t maxKaDepth = modelMaxKaDepth < actualMaxKaDepth ? modelMaxKaDepth : actualMaxKaDepth;
+        // The scheduler guarantees one kb tile fits; preserve the original zero-depth guard.
+        maxKaDepth = maxKaDepth == 0UL ? 1UL : maxKaDepth;
+        kaDepth = kaDepth < maxKaDepth ? kaDepth : maxKaDepth;
+        kaL1Size = kaDepth * kbL1Size;
+    }
+
+    template <typename GroupListTensor>
+    __aicore__ static inline int64_t ReadMxGroupRows(const GroupListTensor& groupList, uint32_t loopIdx,
+                                                     uint32_t groupListType, int64_t& preOffset)
+    {
+        constexpr uint32_t SPARSE_ITEM_STRIDE = 2U;
+        constexpr uint32_t SPARSE_VALUE_OFFSET = 1U;
+        int64_t splitValue = 0L;
+        if (groupListType == 0U) {
+            const int64_t offset = groupList[loopIdx];
+            splitValue = offset - preOffset;
+            preOffset = offset;
+        } else if (groupListType == 1U) {
+            splitValue = groupList[loopIdx];
+            preOffset += splitValue;
+        } else {
+            const uint32_t splitValueIdx = loopIdx * SPARSE_ITEM_STRIDE + SPARSE_VALUE_OFFSET;
+            splitValue = groupList[splitValueIdx];
+            preOffset += splitValue;
+        }
+        return splitValue;
+    }
+
+    template <typename T_>
+    __aicore__ static inline __gm__ T_* GetTensorAddrFromTensorList(uint32_t tensorIdx, __gm__ T_* tensorListAddr)
+    {
+        AscendC::ListTensorDesc tensorList(reinterpret_cast<__gm__ void*>(tensorListAddr));
+        return tensorList.GetDataPtr<T_>(tensorIdx);
+    }
+
+    using PipelineConfig = MxWeightPipelineConfig<PipelineStages_, typename BlockMmad::AType,
+                                                  typename BlockMmad::BiasType>;
+    static_assert(AscendC::Std::is_same_v<typename BlockMmad::DispatchPolicy, PipelineConfig>,
+                  "Kernel pipeline mode must match BlockMmad dispatch policy");
+    static_assert(AscendC::Std::is_same_v<typename BlockPrologue::DispatchPolicy, PipelineConfig>,
+                  "Kernel pipeline mode must match weight prologue dispatch policy");
+    struct ProblemInfo {
+        uint64_t k;
+        uint64_t n;
+        uint64_t groups;
+        uint64_t scaleK;
+    };
+    struct GroupInputs {
+        __gm__ typename BlockPrologue::InType* weight;
+        __gm__ typename BlockMmad::ScaleBType* scale;
+        __gm__ typename BlockMmad::BiasType* bias;
+    };
+
+    __aicore__ inline ProblemInfo GetProblemInfo(const Params& params) const
+    {
+        const uint64_t k = AscendC::Std::get<PROBLEM_SHAPE_K_INDEX>(params.problemShape);
+        return {k, AscendC::Std::get<PROBLEM_SHAPE_N_INDEX>(params.problemShape),
+                AscendC::Std::get<PROBLEM_SHAPE_GROUP_NUM_INDEX>(params.problemShape),
+                CeilDiv(k, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE};
+    }
+
+    __aicore__ inline auto MakeGroupList(const ProblemInfo& info) const
+    {
+        const uint64_t size = info.groups *
+                              (groupListType_ == GROUP_LIST_TYPE_SPARSE ? SPARSE_GROUP_LIST_ITEM_STRIDE : 1U);
+        return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(groupListGm_),
+                                    TensorLayoutGroupList{}(1, size));
+    }
+
+    __aicore__ inline void InitializeMmad(const Params& params)
+    {
+        if constexpr ((MODE == MxPipelineMode::ParameterDriven)) {
+            constexpr uint64_t KB = 1024UL;
+            constexpr uint64_t BIAS_BYTES = 4UL * KB;
+            constexpr uint64_t L1_M = 256UL;
+            constexpr uint64_t L1_N = 256UL;
+            constexpr uint64_t K_STAGE = 256UL;
+            constexpr uint64_t SCALE_WINDOW = 4096UL;
+            const bool bias = params.hasBias != 0;
+            const uint64_t biasBytes = bias ? BIAS_BYTES : 0;
+            constexpr uint64_t weightBytes = L1_M * K_STAGE;
+            constexpr uint64_t l0K = K_STAGE / DOUBLE_BUFFER_COUNT;
+            for (uint64_t i = 0UL; i < DOUBLE_BUFFER_COUNT; ++i) {
+                const uint64_t shift = bias && i == 0 ? BIAS_BYTES : 0;
+                mmadParams_.weightOffsets[i] = i * 384UL * KB;
+                mmadParams_.biasOffsets[i] = (i == 0 ? 64UL : 380UL) * KB;
+                mmadParams_.aOffsets[i] = (128UL * KB) + i * (128UL * KB) + shift;
+                mmadParams_.scaleAOffsets[i] = (64UL * KB) + i * (384UL * KB) + shift;
+                mmadParams_.scaleBOffsets[i] = (96UL * KB) + i * (384UL * KB) + shift;
+            }
+            mmadParams_.aGmAddr = params.mmad.aGmAddr;
+            mmadParams_.scaleAGmAddr = params.mmad.scaleAGmAddr;
+            mmadParams_.scaleBGmAddr = params.mmad.scaleBGmAddr;
+            mmadParams_.biasGmAddr = params.mmad.biasGmAddr;
+            mmadParams_.cGmAddr = params.mmad.cGmAddr;
+            mmadParams_.aBufferBytes = (128UL * KB) - biasBytes;
+            mmadParams_.bBufferBytes = weightBytes;
+            mmadParams_.l1TileShape = {L1_M, L1_N, K_STAGE, SCALE_WINDOW};
+            mmadParams_.l0TileShape = {L1_M, L1_N, l0K};
+            mmadParams_.l1BufferNum = DOUBLE_BUFFER_COUNT;
+            mmadParams_.hasBias = bias;
+            mmadParams_.explicitL1Offsets = true;
+            mmadParams_.readyFlag = PipelineConfig::READY_FLAG;
+            mmadParams_.freeFlag = PipelineConfig::FREE_FLAG;
+            mmadParams_.seedWeightCredits = false;
+        }
+    }
+
+    __aicore__ inline void InitializeInputs(const Params& params)
+    {
+        const auto& inputs = params.mmad;
+        groupListType_ = params.groupListType;
+        preOffset_ = 0;
+        groupListGm_ = reinterpret_cast<__gm__ int64_t*>(params.ptrGroupList);
+        antiquantScaleGm_ = reinterpret_cast<__gm__ typename BlockMmad::ScaleBType*>(inputs.scaleBGmAddr);
+        if ASCEND_IS_AIC {
+            xGm_ = reinterpret_cast<__gm__ typename BlockMmad::AType*>(inputs.aGmAddr);
+            perTokenScaleGm_ = reinterpret_cast<__gm__ typename BlockMmad::ScaleAType*>(inputs.scaleAGmAddr);
+            yGm_ = reinterpret_cast<__gm__ typename BlockMmad::CType*>(inputs.cGmAddr);
+        }
+        if ASCEND_IS_AIV {
+            weightGm_ = reinterpret_cast<__gm__ typename BlockPrologue::InType*>(params.prologue.ptrB);
+            biasGm_ = reinterpret_cast<__gm__ typename BlockMmad::BiasType*>(inputs.biasGmAddr);
+        }
+    }
+
+    template <typename ATensor, typename ScaleATensor, typename BTensor, typename CTensor>
+    __aicore__ inline void ComputeAicTile(const ProblemInfo& info, BlockMmad& block, bool bias,
+                                          const typename BlockScheduler::BlockCoord& coord,
+                                          const typename BlockScheduler::BlockShape& shape, const ATensor& a,
+                                          const ScaleATensor& scaleA, const BTensor& scaleB, const CTensor& c)
+    {
+        const auto m = AscendC::Std::get<0>(coord);
+        const auto n = AscendC::Std::get<1>(coord);
+        const auto rows = AscendC::Std::get<0>(shape);
+        const auto cols = AscendC::Std::get<1>(shape);
+        auto blockA = a.slice(asc::te::make_coord(m, 0), asc::te::make_shape(rows, info.k));
+        auto blockScale = scaleA.slice(asc::te::make_coord(m, 0), asc::te::make_shape(rows, info.scaleK));
+        auto blockC = c.slice(asc::te::make_coord(m, n), asc::te::make_shape(rows, cols));
+        if constexpr ((MODE == MxPipelineMode::ParameterDriven)) {
+            uint64_t ka = 0UL, kb = 0UL, l0 = 0UL;
+            CalcMxKernelKBlock<AType, true>(rows, cols, mmadParams_.aBufferBytes, ka, kb, l0);
+            block(blockA, blockScale, scaleB, blockC, ka, kb, l0);
+        } else if constexpr ((MODE == MxPipelineMode::Aligned)) {
+            auto blockScaleB = scaleB.slice(asc::te::make_coord(0, n), asc::te::make_shape(info.scaleK, cols));
+            block(blockA, blockScale, blockScaleB, blockC, bias);
+        } else {
+            block(blockA, blockScale, scaleB, blockC, bias);
+        }
+    }
+
+    template <typename ScaleBTensor>
+    __aicore__ inline void ComputeAicGroup(const ProblemInfo& info, uint64_t rows, bool bias, BlockScheduler& scheduler,
+                                           BlockMmad& block, const ScaleBTensor& scaleB)
+    {
+        using LA = asc::te::frame_layout_format<typename BlockMmad::LayoutA>;
+        using LC = asc::te::frame_layout_format<typename BlockMmad::LayoutC>;
+        using LS = asc::te::frame_layout_format<typename BlockMmad::LayoutScaleA, AscendC::Std::Int<SCALE_C0>>;
+        const uint64_t offset = static_cast<uint64_t>(preOffset_) - rows;
+        auto a = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(xGm_ + offset * info.k),
+                                      LA{}(rows, info.k));
+        auto scale = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::gm>(perTokenScaleGm_ + offset * info.scaleK),
+            LS{}(rows, info.scaleK));
+        auto c = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(yGm_ + offset * info.n),
+                                      LC{}(rows, info.n));
+        scheduler.UpdateNextProblem(asc::te::make_shape(rows, info.n, info.k));
+        typename BlockScheduler::BlockCoord coord;
+        typename BlockScheduler::BlockShape shape;
+        while (scheduler.GetTileIdx(coord, shape)) {
+            ComputeAicTile(info, block, bias, coord, shape, a, scale, scaleB, c);
+        }
+    }
+
+    template <typename GroupTensor>
+    __aicore__ inline void RunAicGroups(const ProblemInfo& info, const Params& params, BlockScheduler& scheduler,
+                                        const GroupTensor& groups)
+    {
+        using LS = asc::te::frame_layout_format<typename BlockMmad::LayoutScaleB, AscendC::Std::Int<SCALE_C0>>;
+        auto block = MakeMmad();
+        for (uint32_t i = 0U; i < info.groups; ++i) {
+            const int64_t rows = ReadMxGroupRows(groups, i, groupListType_, preOffset_);
+            if (groupListType_ == GROUP_LIST_TYPE_SPARSE && rows <= 0) {
+                break;
+            }
+            if (rows > 0 && info.n > 0) {
+                auto address = antiquantScaleGm_;
+                if constexpr ((MODE == MxPipelineMode::Aligned)) {
+                    const uint32_t index = groupListType_ == GROUP_LIST_TYPE_SPARSE ?
+                                               static_cast<uint32_t>(groups[i * SPARSE_GROUP_LIST_ITEM_STRIDE]) :
+                                               i;
+                    address = GroupScaleBAddress(info, index);
+                }
+                auto scaleB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(address),
+                                                   LS{}(info.scaleK, info.n));
+                ComputeAicGroup(info, static_cast<uint64_t>(rows), params.hasBias != 0, scheduler, block, scaleB);
+            }
+        }
+    }
+
+    __aicore__ inline auto GroupScaleBAddress(const ProblemInfo& info, uint32_t index) const
+    {
+        if constexpr (IS_SINGLE_MULTI_SINGLE) {
+            return GetTensorAddrFromTensorList(index, antiquantScaleGm_);
+        } else {
+            return antiquantScaleGm_ + static_cast<uint64_t>(index) * info.n * info.scaleK;
+        }
+    }
+
+    __aicore__ inline GroupInputs GetGroupInputs(const ProblemInfo& info, uint32_t index, bool hasBias)
+    {
+        GroupInputs group{weightGm_, GroupScaleBAddress(info, index), biasGm_};
+        if constexpr (IS_SINGLE_MULTI_SINGLE) {
+            group.weight = GetTensorAddrFromTensorList(index, weightGm_);
+            if (hasBias) {
+                group.bias = GetTensorAddrFromTensorList(index, biasGm_);
+            }
+        } else {
+            group.weight += static_cast<uint64_t>(index) * ((info.n * info.k) >> 1U);
+            if (hasBias) {
+                group.bias += static_cast<uint64_t>(index) * info.n;
+            }
+        }
+        return group;
+    }
+
+    template <typename WeightTensor, typename ScaleTensor, typename BiasTensor>
+    __aicore__ inline void ComputeAivTile(const ProblemInfo& info, BlockPrologue& block,
+                                          const typename BlockScheduler::BlockCoord& coord,
+                                          const typename BlockScheduler::BlockShape& shape, uint64_t nAlign,
+                                          const WeightTensor& weight, const ScaleTensor& scale, const BiasTensor& bias)
+    {
+        const auto n = AscendC::Std::get<1>(coord);
+        const auto rows = AscendC::Std::get<0>(shape);
+        const auto cols = AscendC::Std::get<1>(shape);
+        if constexpr ((MODE == MxPipelineMode::ParameterDriven)) {
+            uint64_t ka = 0UL, kb = 0UL, l0 = 0UL;
+            CalcMxKernelKBlock<AType, true>(rows, cols, mmadParams_.aBufferBytes, ka, kb, l0);
+            block(weight, scale, bias, kb, info.k, cols, n, nAlign);
+        } else {
+            block(weight, scale, bias, rows, info.k, cols, n, nAlign);
+        }
+    }
+
+    __aicore__ inline void ComputeAivGroup(const ProblemInfo& info, uint64_t rows, uint32_t index, const Params& params,
+                                           BlockScheduler& scheduler, BlockPrologue& block)
+    {
+        using LB = asc::te::frame_layout_format<typename BlockMmad::LayoutB,
+                                                AscendC::Std::Int<asc::te::c0_element<typename BlockMmad::AType>>>;
+        using LS = asc::te::frame_layout_format<typename BlockMmad::LayoutScaleB, AscendC::Std::Int<SCALE_C0>>;
+        using LBI = asc::te::frame_layout_format<typename BlockMmad::LayoutBias>;
+        const uint64_t nAlign = CeilAlign(info.n, static_cast<uint64_t>(BLOCK_CUBE));
+        const auto group = GetGroupInputs(info, index, params.hasBias != 0);
+        auto weight = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(group.weight),
+                                           LB{}(static_cast<int64_t>(info.k), static_cast<int64_t>(nAlign)));
+        auto scale = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(group.scale),
+                                          LS{}(info.scaleK, info.n));
+        auto bias = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(group.bias),
+                                         LBI{}(static_cast<int64_t>(1), static_cast<int64_t>(info.n)));
+        constexpr uint64_t fp4CacheLineElements = 256UL;
+        const bool disable = rows <= static_cast<uint64_t>(params.scheduler.baseM) &&
+                             info.k % fp4CacheLineElements == 0;
+        weight.set_l2_cache_hint(disable ? asc::te::cache_mode::disable : asc::te::cache_mode::normal);
+        scheduler.UpdateNextProblem(asc::te::make_shape(rows, info.n, info.k));
+        typename BlockScheduler::BlockCoord coord;
+        typename BlockScheduler::BlockShape shape;
+        while (scheduler.GetTileIdx(coord, shape)) {
+            ComputeAivTile(info, block, coord, shape, nAlign, weight, scale, bias);
+        }
+    }
+
+    template <typename GroupTensor>
+    __aicore__ inline void RunAivGroups(const ProblemInfo& info, const Params& params, BlockScheduler& scheduler,
+                                        const GroupTensor& groups)
+    {
+        auto block = MakePrologue(params.hasBias != 0);
+        for (uint32_t i = 0U; i < info.groups; ++i) {
+            const int64_t rows = ReadMxGroupRows(groups, i, groupListType_, preOffset_);
+            if (groupListType_ == GROUP_LIST_TYPE_SPARSE && rows <= 0) {
+                break;
+            }
+            const uint32_t index = groupListType_ == GROUP_LIST_TYPE_SPARSE ?
+                                       static_cast<uint32_t>(groups[i * SPARSE_GROUP_LIST_ITEM_STRIDE]) :
+                                       i;
+            if (rows > 0 && info.n > 0) {
+                ComputeAivGroup(info, static_cast<uint64_t>(rows), index, params, scheduler, block);
+            }
+        }
+    }
+
+    typename BlockMmad::Params mmadParams_{};
+
+    __aicore__ inline BlockMmad MakeMmad() const
+    {
+        if constexpr ((MODE == MxPipelineMode::ParameterDriven)) {
+            return BlockMmad(mmadParams_);
+        } else if constexpr ((MODE == MxPipelineMode::OperandTriple)) {
+            return BlockMmad(TRIPLE_BUFFER_COUNT);
+        } else {
+            return BlockMmad{};
+        }
+    }
+
+    __aicore__ inline BlockPrologue MakePrologue(bool hasBias) const
+    {
+        if constexpr ((MODE == MxPipelineMode::ParameterDriven)) {
+            return BlockPrologue(mmadParams_);
+        } else if constexpr ((MODE == MxPipelineMode::OperandTriple)) {
+            return BlockPrologue(hasBias, TRIPLE_BUFFER_COUNT);
+        } else {
+            return BlockPrologue(hasBias);
+        }
+    }
+
+    // Select K blocking for both the AIC consumer and AIV producer.
+
+    static constexpr uint32_t GROUP_LIST_TYPE_OFFSET = 0U;
+    static constexpr uint32_t GROUP_LIST_TYPE_SPARSE = 2U;
+    static constexpr uint32_t SPARSE_GROUP_LIST_ITEM_STRIDE = 2U;
+    static constexpr int32_t PROBLEM_SHAPE_K_INDEX = 1;
+    static constexpr int32_t PROBLEM_SHAPE_N_INDEX = 2;
+    static constexpr int32_t PROBLEM_SHAPE_GROUP_NUM_INDEX = 3;
+
+    int64_t preOffset_{0};
+    uint32_t groupListType_{GROUP_LIST_TYPE_OFFSET};
+
+    __gm__ typename BlockMmad::AType* xGm_;
+    // Single-weight mode stores a data base; multi-weight mode stores the tensor-list descriptor.
+    __gm__ typename BlockMmad::ScaleBType* antiquantScaleGm_;
+    __gm__ typename BlockMmad::CType* yGm_;
+    __gm__ typename BlockMmad::ScaleAType* perTokenScaleGm_;
+
+    // Single-weight mode stores a data base; multi-weight mode stores the tensor-list descriptor.
+    __gm__ typename BlockPrologue::InType* weightGm_;
+    __gm__ typename BlockMmad::BiasType* biasGm_;
+
+    __gm__ int64_t* groupListGm_;
+
+    using TensorLayoutGroupList = typename asc::te::frame_layout_format<asc::te::nd_ext_layout_ptn>;
+};
+
+GROUPED_MATMUL_RESPLIT_KERNEL_TEMPLATE_PARAM
+__aicore__ inline void GROUPED_MATMUL_RESPLIT_KERNEL_CLASS::operator()(const Params& params)
+{
+    InitializeMmad(params);
+    InitializeInputs(params);
+    BlockScheduler scheduler(params.scheduler);
+    const auto info = GetProblemInfo(params);
+    const auto groups = MakeGroupList(info);
+    if ASCEND_IS_AIC {
+        RunAicGroups(info, params, scheduler, groups);
+    } else {
+        RunAivGroups(info, params, scheduler, groups);
+    }
+}
+
+#undef GROUPED_MATMUL_RESPLIT_KERNEL_CLASS
+#undef GROUPED_MATMUL_RESPLIT_KERNEL_TEMPLATE_PARAM
+
+} // namespace MxPipeline
 
 } // namespace Kernel
 } // namespace Gemm
