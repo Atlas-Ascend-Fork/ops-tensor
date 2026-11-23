@@ -32,9 +32,10 @@ using AscendC::SetFlag;
 using AscendC::WaitFlag;
 
 template <uint64_t FullLoadMode_, bool AtomicAdd_, class ScheduleType_, class GmmArrayPtr_, uint64_t NonContiguousType_,
-          class AType_, class LayoutA_, class BTypeTuple_, class LayoutB_, class CType_, class LayoutC_,
-          class BiasType_, class LayoutBias_>
-class BlockMmad<MatmulWithScaleFixpipeQuant<FullLoadMode_, AtomicAdd_, ScheduleType_, GmmArrayPtr_, NonContiguousType_>,
+          bool IsTensorList_, class AType_, class LayoutA_, class BTypeTuple_, class LayoutB_, class CType_,
+          class LayoutC_, class BiasType_, class LayoutBias_>
+class BlockMmad<MatmulWithScaleFixpipeQuant<FullLoadMode_, AtomicAdd_, ScheduleType_, GmmArrayPtr_, NonContiguousType_,
+                                            IsTensorList_>,
                 AType_, LayoutA_, BTypeTuple_, LayoutB_, CType_, LayoutC_, BiasType_, LayoutBias_> {
 public:
     using AType = AType_;
@@ -48,7 +49,7 @@ public:
     using LayoutBias = LayoutBias_;
     using L0CType = AscendC::Std::conditional_t<AscendC::IsSameType<AType, int8_t>::value, int32_t, float>;
     using DispatchPolicy = MatmulWithScaleFixpipeQuant<FullLoadMode_, AtomicAdd_, ScheduleType_, GmmArrayPtr_,
-                                                       NonContiguousType_>;
+                                                       NonContiguousType_, IsTensorList_>;
     using WorkspaceType = L0CType;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
@@ -324,7 +325,8 @@ public:
     // A new GM K slice requires the corresponding K-dependent loop state.
     __aicore__ inline void UpdateParamsForKSlice(uint64_t curK)
     {
-        static_assert(IS_GROUPED_FIXPIPE, "UpdateParamsForKSlice is only supported by grouped fixpipe kernels.");
+        static_assert(IS_GROUPED_FIXPIPE || AscendC::Std::is_same_v<ScheduleType_, KernelGroupedMmadFixpipeQuant>,
+                      "UpdateParamsForKSlice is only supported by grouped fixpipe kernels with K slices.");
         UpdateKLoop(curK);
     }
 
@@ -367,6 +369,9 @@ private:
             asc::te::copy(copyL0C2GM.with(asc::te::l0c_to_gm_params(asc::te::unit_flag_mode::enable_update)), gmC,
                           tensorL0C);
         } else if constexpr (isScalarScale) {
+            if constexpr (AtomicAdd_ && AscendC::Std::is_same_v<ScheduleType_, KernelGroupedMmadFixpipeQuant>) {
+                AscendC::PipeBarrier<PIPE_FIX>();
+            }
             asc::te::copy(copyL0C2GM.with(asc::te::l0c_to_gm_params(asc::te::unit_flag_mode::enable_update)), gmC,
                           tensorL0C, scalarScale_);
         } else if constexpr (isPerChannelScale) {

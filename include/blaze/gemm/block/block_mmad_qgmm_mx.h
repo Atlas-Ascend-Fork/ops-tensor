@@ -892,6 +892,9 @@ private:
             }
         } else {
             auto copyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
+            if constexpr (AtomicAdd_) {
+                AscendC::PipeBarrier<PIPE_FIX>();
+            }
             asc::te::copy(copyL0C2GM.with(asc::te::l0c_to_gm_params(asc::te::unit_flag_mode::enable_update)), tensorC,
                           tensorL0C);
         }

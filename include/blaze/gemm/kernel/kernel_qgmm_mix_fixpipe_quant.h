@@ -10,11 +10,12 @@
 
 /*!
  * \file kernel_qgmm_mix_fixpipe_quant.h
- * \brief Grouped int8 Cube-input per-channel/per-group kernel using FixPipe quant and an AIV epilogue.
+ * \brief Grouped Cube/Vector matmul kernels using Fixpipe transfers.
  *
  * The operator repository supplies int8 Cube inputs and optional asymmetric-quantization workspaces.
  * AIC writes the FixPipe result to a per-core workspace slot. AIV applies per-token scaling and,
  * when withOffset is enabled, the row-sum/offset correction before storing the final output.
+ * The HiFloat8 T-C inplace-add path sends FP32 results to two AIV cores for scaling and atomic writeback.
  */
 #pragma once
 
@@ -26,6 +27,7 @@
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {
@@ -34,10 +36,11 @@ namespace Kernel {
 
 #define GMM_FIXPIPE_CLASS_TEM_PARAMS \
     template <class ProblemShape, class BlockMmad, class BlockEpilogue, class BlockScheduler>
-#define GMM_FIXPIPE_TEM_PARAMS                                                                    \
-    ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler,                                       \
-        AscendC::Std::enable_if_t<AscendC::Std::is_same_v<KernelGroupedMmadWithScaleFixpipeQuant, \
-                                                          typename BlockMmad::DispatchPolicy::ScheduleType>>
+#define GMM_FIXPIPE_TEM_PARAMS                                                                                \
+    ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler,                                                   \
+        AscendC::Std::enable_if_t<AscendC::Std::is_one_of_v<typename BlockMmad::DispatchPolicy::ScheduleType, \
+                                                            KernelGroupedMmadWithScaleFixpipeQuant,           \
+                                                            KernelGroupedMmadWithScaleMixInplaceAdd>>
 #define GMM_FIXPIPE_TEMPLATE_DEF \
     template <class ProblemShape, class BlockMmad, class BlockEpilogue, class BlockScheduler>
 
@@ -50,6 +53,10 @@ private:
     static constexpr uint32_t GMM_SPARSE_STRIDE = 2U;
     static constexpr uint32_t GMM_SPARSE_VALUE_OFFSET = 1U;
     static constexpr int64_t GMM_BLOCK_MASK = BLOCK_CUBE - 1;
+
+    using DispatchPolicy = typename BlockMmad::DispatchPolicy;
+    static constexpr bool IS_MIX_INPLACE_ADD = AscendC::Std::is_same_v<typename DispatchPolicy::ScheduleType,
+                                                                       KernelGroupedMmadWithScaleMixInplaceAdd>;
 
 public:
     using AType = typename BlockMmad::AType;
@@ -66,22 +73,36 @@ public:
     using SchedulerProblemShape = typename BlockScheduler::ProblemShape;
     using SchedulerBlockInfo = typename BlockScheduler::BlockInfo;
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
-    static_assert(AscendC::IsSameType<AType, int8_t>::value && AscendC::IsSameType<BType, int8_t>::value,
+    using L0CType = typename BlockMmad::L0CType;
+
+    static_assert(IS_MIX_INPLACE_ADD ||
+                      (AscendC::IsSameType<AType, int8_t>::value && AscendC::IsSameType<BType, int8_t>::value),
                   "GMM Fixpipe Quant only supports int8_t AType and BType.");
-    static_assert(AscendC::IsSameType<ScaleType, uint64_t>::value,
+    static_assert(IS_MIX_INPLACE_ADD || AscendC::IsSameType<ScaleType, uint64_t>::value,
                   "GMM Fixpipe Quant only supports uint64_t scale type.");
-    static_assert(AscendC::IsSameType<CType, half>::value && AscendC::IsSameType<BiasType, int32_t>::value,
+    static_assert(IS_MIX_INPLACE_ADD ||
+                      (AscendC::IsSameType<CType, half>::value && AscendC::IsSameType<BiasType, int32_t>::value),
                   "GMM Fixpipe Quant only supports half CType and int32_t BiasType.");
-    static_assert(AscendC::Std::is_same_v<LayoutA, asc::te::nd_ext_layout_ptn>,
+    static_assert(IS_MIX_INPLACE_ADD || AscendC::Std::is_same_v<LayoutA, asc::te::nd_ext_layout_ptn>,
                   "GMM Fixpipe Quant only supports ND LayoutA.");
-    static_assert(AscendC::Std::is_one_of_v<LayoutB, asc::te::nd_ext_layout_ptn, asc::te::dn_ext_layout_ptn,
-                                            asc::te::nz_layout_ptn, asc::te::zn_layout_ptn>,
+    static_assert(IS_MIX_INPLACE_ADD ||
+                      AscendC::Std::is_one_of_v<LayoutB, asc::te::nd_ext_layout_ptn, asc::te::dn_ext_layout_ptn,
+                                                asc::te::nz_layout_ptn, asc::te::zn_layout_ptn>,
                   "GMM Fixpipe Quant only supports ND/DN/NZ/ZN LayoutB.");
-    static_assert(!AscendC::Std::is_one_of_v<LayoutC, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn> &&
-                      !AscendC::Std::is_one_of_v<LayoutBias, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn>,
+    static_assert(IS_MIX_INPLACE_ADD ||
+                      (!AscendC::Std::is_one_of_v<LayoutC, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn> &&
+                       !AscendC::Std::is_one_of_v<LayoutBias, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn>),
                   "GMM Fixpipe Quant does not support NZ/ZN LayoutC or LayoutBias.");
     static_assert(AscendC::IsSameType<typename BlockEpilogue::FixpipeType, CType>::value,
                   "GMM Fixpipe Quant requires BlockEpilogue FixpipeType to match CType.");
+    static_assert(!IS_MIX_INPLACE_ADD || DispatchPolicy::IS_ATOMIC_ADD,
+                  "QGMM Mix inplace add requires AtomicAdd_ = true.");
+    static_assert(!IS_MIX_INPLACE_ADD ||
+                      (AscendC::Std::is_same_v<AType, hifloat8_t> && AscendC::Std::is_same_v<BType, hifloat8_t> &&
+                       AscendC::Std::is_same_v<LayoutA, asc::te::dn_ext_layout_ptn> &&
+                       AscendC::Std::is_same_v<LayoutB, asc::te::nd_ext_layout_ptn> &&
+                       AscendC::Std::is_same_v<L0CType, float>),
+                  "QGMM Mix inplace add requires HiFloat8 DN A, HiFloat8 ND B, and FP32 accumulation.");
 
     struct GMMTiling {
         uint32_t groupNum{0};
@@ -116,12 +137,8 @@ private:
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool WEIGHT_NZ = IsWeightNz<LayoutB>::value;
     static constexpr int64_t C0_SIZE = asc::te::c0_element<AType>;
-    // This kernel uses direct Cube/Vector pairing (sync mode 2). In this mode one
-    // flag operation synchronizes the paired Cube and Vector task; unlike mode
-    // 4 it must not explicitly signal the second Vector sub-block with +16.
+    // Match the AscendC mode-2 Cube/Vector handshake used by grouped_matmul.
     static constexpr uint16_t GMM_SYNC_MODE = 2;
-    // Keep the flag allocation consistent with the A5 grouped_matmul mode-2
-    // implementation in grouped_matmul_utils.h.
     static constexpr uint16_t AIC_TO_AIV_FLAG = 5;
     static constexpr uint16_t AIV_TO_AIC_FLAG = 3;
     using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<C0_SIZE>>;
@@ -150,10 +167,42 @@ private:
     __aicore__ inline void ProcessOneBlock(const TensorA& gmA, const TensorB& gmB, const BlockShape& blockShape,
                                            uint32_t groupIdx, int64_t groupMOffset, int64_t mPos, int64_t nPos,
                                            int64_t curM, int64_t curN, int64_t k, int64_t n);
-    __aicore__ inline void NotifyVector() { AscendC::CrossCoreSetFlag<GMM_SYNC_MODE, PIPE_FIX>(AIC_TO_AIV_FLAG); }
-    __aicore__ inline void WaitForVector() { AscendC::CrossCoreWaitFlag(AIV_TO_AIC_FLAG); }
-    __aicore__ inline void NotifyCube() { AscendC::CrossCoreSetFlag<GMM_SYNC_MODE, PIPE_MTE2>(AIV_TO_AIC_FLAG); }
-    __aicore__ inline void WaitForCube() { AscendC::CrossCoreWaitFlag(AIC_TO_AIV_FLAG); }
+
+    __aicore__ inline void NotifyVector()
+    {
+        if constexpr (IS_MIX_INPLACE_ADD) {
+            Sync::NotifyVector(Sync::FIXPIPE_AIC_READY_FLAG_BASE, true);
+        } else {
+            AscendC::CrossCoreSetFlag<GMM_SYNC_MODE, PIPE_FIX>(AIC_TO_AIV_FLAG);
+        }
+    }
+    __aicore__ inline void WaitForVector()
+    {
+        if constexpr (IS_MIX_INPLACE_ADD) {
+            // Wait on Fixpipe before reusing the UB accumulator.
+            Sync::WaitForVector(Sync::FIXPIPE_AIV_ACK_FLAG_BASE, true);
+        } else {
+            AscendC::CrossCoreWaitFlag(AIV_TO_AIC_FLAG);
+        }
+    }
+    __aicore__ inline void NotifyCube()
+    {
+        if constexpr (IS_MIX_INPLACE_ADD) {
+            // Release the UB accumulator after its last Vector read.
+            Sync::NotifyCube(Sync::FIXPIPE_AIV_ACK_FLAG_BASE);
+        } else {
+            AscendC::CrossCoreSetFlag<GMM_SYNC_MODE, PIPE_MTE2>(AIV_TO_AIC_FLAG);
+        }
+    }
+    __aicore__ inline void WaitForCube()
+    {
+        if constexpr (IS_MIX_INPLACE_ADD) {
+            // Wait on Vector before reading the UB accumulator.
+            Sync::WaitForCube(Sync::FIXPIPE_AIC_READY_FLAG_BASE);
+        } else {
+            AscendC::CrossCoreWaitFlag(AIC_TO_AIV_FLAG);
+        }
+    }
 
     BlockMmad mmOp_;
     BlockEpilogue epilogueOp_;
@@ -179,10 +228,10 @@ private:
 GMM_FIXPIPE_TEMPLATE_DEF
 __aicore__ inline void GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::Run(const Params& params)
 {
-    Init(params);
-    if (groupNum_ == 0) {
+    if (params.gmmParams.groupNum == 0) {
         return;
     }
+    Init(params);
 
     const auto groupListLayout = asc::te::make_layout(asc::te::make_shape(static_cast<int64_t>(groupNum_)),
                                                       asc::te::make_stride(1L));
@@ -207,6 +256,9 @@ __aicore__ inline void GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::Run(const Params& 
         }
         PrepareScheduler(scheduler);
         ProcessSingleGroup(scheduler, groupIdx);
+        if constexpr (IS_MIX_INPLACE_ADD) {
+            preOffset_ += asc::te::get<MNK_K>(problemShape_);
+        }
     }
 
     const uint32_t groupIdx = GetGroupIdx(groupList, lastLoopIdx);
@@ -224,6 +276,12 @@ __aicore__ inline void GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::Run(const Params& 
         }
         AscendC::SetMMLayoutTransform(false);
     }
+
+    if constexpr (IS_MIX_INPLACE_ADD) {
+        if ASCEND_IS_AIV {
+            AscendC::SetAtomicNone();
+        }
+    }
 }
 
 GMM_FIXPIPE_TEMPLATE_DEF
@@ -233,34 +291,44 @@ __aicore__ inline void GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::Init(const Params&
     problemShape_ = ProblemShape{tiling.m, tiling.n, tiling.k, 0};
     groupNum_ = tiling.groupNum;
     groupListType_ = tiling.groupListType;
+    aBasePtr_ = reinterpret_cast<__gm__ AType*>(params.mmadParams.aGmAddr);
+    bBasePtr_ = reinterpret_cast<__gm__ BType*>(params.mmadParams.bGmAddr);
     baseM_ = tiling.baseM;
     baseN_ = tiling.baseN;
-    curBaseM_ = baseM_;
-    isPerGroup_ = static_cast<QuantMode>(tiling.quantMode) == QuantMode::PERGROUP_MODE;
-    quantMode_ = isPerGroup_ ? QuantMode::PERGROUP_MODE : QuantMode::PERCHANNEL_MODE;
-    const int64_t problemK = tiling.k > 0 ? tiling.k : 0;
-    quantGroupSize_ = isPerGroup_ ? (tiling.quantGroupSize > 0 ?
-                                         tiling.quantGroupSize :
-                                         (tiling.baseK > 0 ? tiling.baseK : static_cast<uint32_t>(problemK))) :
-                                    static_cast<uint32_t>(problemK);
-    quantGroupNum_ = isPerGroup_ && quantGroupSize_ > 0 && problemK > 0 ?
-                         static_cast<uint32_t>(CeilDiv(problemK, static_cast<int64_t>(quantGroupSize_))) :
-                         1;
-    workspaceBasePtr_ = reinterpret_cast<__gm__ CType*>(params.mmadParams.cGmAddr);
-    if ASCEND_IS_AIC {
-        aBasePtr_ = reinterpret_cast<__gm__ AType*>(params.mmadParams.aGmAddr);
-        bBasePtr_ = reinterpret_cast<__gm__ BType*>(params.mmadParams.bGmAddr);
-        scaleBasePtr_ = reinterpret_cast<__gm__ ScaleType*>(params.mmadParams.scaleBGmAddr);
-        perGroupBOffset_ = GetPerGroupBOffset(tiling.n, tiling.k);
-        const int64_t mmK = isPerGroup_ ? Min(problemK, static_cast<int64_t>(quantGroupSize_)) : problemK;
-        const BlockShape mmProblemShape{tiling.m, tiling.n, mmK, 0};
-        const BlockShape l0Shape{static_cast<int64_t>(baseM_), static_cast<int64_t>(baseN_),
-                                 Min(static_cast<int64_t>(tiling.baseK), mmK), 0};
-        mmOp_.Init(mmProblemShape, l0Shape, tiling.kAL1, tiling.kBL1, tiling.nBufferNum, quantMode_, false,
-                   tiling.dbL0C > 1);
+    if constexpr (IS_MIX_INPLACE_ADD) {
+        preOffset_ = 0;
+        if ASCEND_IS_AIC {
+            mmOp_.Init(params.mmadParams);
+        }
+    } else {
+        curBaseM_ = baseM_;
+        isPerGroup_ = static_cast<QuantMode>(tiling.quantMode) == QuantMode::PERGROUP_MODE;
+        quantMode_ = isPerGroup_ ? QuantMode::PERGROUP_MODE : QuantMode::PERCHANNEL_MODE;
+        const int64_t problemK = tiling.k > 0 ? tiling.k : 0;
+        quantGroupSize_ = isPerGroup_ ? (tiling.quantGroupSize > 0 ?
+                                             tiling.quantGroupSize :
+                                             (tiling.baseK > 0 ? tiling.baseK : static_cast<uint32_t>(problemK))) :
+                                        static_cast<uint32_t>(problemK);
+        quantGroupNum_ = isPerGroup_ && quantGroupSize_ > 0 && problemK > 0 ?
+                             static_cast<uint32_t>(CeilDiv(problemK, static_cast<int64_t>(quantGroupSize_))) :
+                             1;
+        workspaceBasePtr_ = reinterpret_cast<__gm__ CType*>(params.mmadParams.cGmAddr);
+        if ASCEND_IS_AIC {
+            scaleBasePtr_ = reinterpret_cast<__gm__ ScaleType*>(params.mmadParams.scaleBGmAddr);
+            perGroupBOffset_ = GetPerGroupBOffset(tiling.n, tiling.k);
+            const int64_t mmK = isPerGroup_ ? Min(problemK, static_cast<int64_t>(quantGroupSize_)) : problemK;
+            const BlockShape mmProblemShape{tiling.m, tiling.n, mmK, 0};
+            const BlockShape l0Shape{static_cast<int64_t>(baseM_), static_cast<int64_t>(baseN_),
+                                     Min(static_cast<int64_t>(tiling.baseK), mmK), 0};
+            mmOp_.Init(mmProblemShape, l0Shape, tiling.kAL1, tiling.kBL1, tiling.nBufferNum, quantMode_, false,
+                       tiling.dbL0C > 1);
+        }
     }
     if ASCEND_IS_AIV {
         epilogueOp_.Init(params.epilogueParams);
+        if constexpr (IS_MIX_INPLACE_ADD) {
+            AscendC::SetAtomicAdd<typename BlockEpilogue::OutType>();
+        }
     }
 }
 
@@ -312,8 +380,14 @@ template <class GroupListTensor>
 __aicore__ inline void GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::SetGroupShape(const GroupListTensor& groupList,
                                                                             uint32_t loopIdx)
 {
-    const int64_t groupM = GetGroupM(groupList, loopIdx);
-    problemShape_ = ProblemShape{groupM, asc::te::get<MNK_N>(problemShape_), asc::te::get<MNK_K>(problemShape_), 0};
+    if constexpr (IS_MIX_INPLACE_ADD) {
+        const int64_t groupSize = groupList[loopIdx];
+        const int64_t groupK = groupListType_ == GMM_GROUP_LIST_OFFSET ? groupSize - preOffset_ : groupSize;
+        problemShape_ = ProblemShape{asc::te::get<MNK_M>(problemShape_), asc::te::get<MNK_N>(problemShape_), groupK, 0};
+    } else {
+        const int64_t groupM = GetGroupM(groupList, loopIdx);
+        problemShape_ = ProblemShape{groupM, asc::te::get<MNK_N>(problemShape_), asc::te::get<MNK_K>(problemShape_), 0};
+    }
 }
 
 GMM_FIXPIPE_TEMPLATE_DEF
@@ -329,11 +403,13 @@ __aicore__ inline void GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::PrepareScheduler(B
     const int64_t m = asc::te::get<MNK_M>(problemShape_);
     const int64_t n = asc::te::get<MNK_N>(problemShape_);
     const int64_t k = asc::te::get<MNK_K>(problemShape_);
-    const int64_t safeBaseM = baseM_ > 0 ? baseM_ : static_cast<int64_t>(BLOCK_CUBE);
-    const int64_t blockCount = CeilDiv(m, safeBaseM);
-    const int64_t balancedBaseM = CeilDiv(m, blockCount);
-    curBaseM_ = static_cast<uint32_t>((balancedBaseM + GMM_BLOCK_MASK) & ~GMM_BLOCK_MASK);
-    scheduler.UpdateBaseM(curBaseM_);
+    if constexpr (!IS_MIX_INPLACE_ADD) {
+        const int64_t safeBaseM = baseM_ > 0 ? baseM_ : static_cast<int64_t>(BLOCK_CUBE);
+        const int64_t blockCount = CeilDiv(m, safeBaseM);
+        const int64_t balancedBaseM = CeilDiv(m, blockCount);
+        curBaseM_ = static_cast<uint32_t>((balancedBaseM + GMM_BLOCK_MASK) & ~GMM_BLOCK_MASK);
+        scheduler.UpdateBaseM(curBaseM_);
+    }
     scheduler.UpdateNextProblem(SchedulerProblemShape{m, n, k, 0});
 }
 
@@ -349,6 +425,9 @@ GMM_FIXPIPE_TEMPLATE_DEF
 __aicore__ inline bool GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::IsLastGroupAndNeedSplit(
     const BlockScheduler& scheduler) const
 {
+    if constexpr (IS_MIX_INPLACE_ADD) {
+        return false;
+    }
     return (scheduler.GetEndBlockIdx() + 1) <= (AscendC::GetBlockNum() >> 1);
 }
 
@@ -359,21 +438,32 @@ __aicore__ inline void GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::ProcessSingleGroup
     const int64_t m = asc::te::get<MNK_M>(problemShape_);
     const int64_t n = asc::te::get<MNK_N>(problemShape_);
     const int64_t k = asc::te::get<MNK_K>(problemShape_);
-    const int64_t groupMOffset = preOffset_ - m;
+    const int64_t groupMOffset = IS_MIX_INPLACE_ADD ? static_cast<int64_t>(groupIdx) * m : preOffset_ - m;
+    const int64_t aOffset = IS_MIX_INPLACE_ADD ? preOffset_ * m : groupMOffset * k;
+    const int64_t bOffset = IS_MIX_INPLACE_ADD ? preOffset_ * n : static_cast<int64_t>(groupIdx) * perGroupBOffset_;
 
     auto layoutA = MakeLayoutA{}(m, k);
     auto layoutB = MakeLayoutB{}(k, n);
-    auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aBasePtr_ + groupMOffset * k),
-                                    layoutA);
-    auto gmB = asc::te::make_tensor(
-        asc::te::make_mem_ptr<asc::te::location::gm>(bBasePtr_ + static_cast<int64_t>(groupIdx) * perGroupBOffset_),
-        layoutB);
+    auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aBasePtr_ + aOffset), layoutA);
+    auto gmB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(bBasePtr_ + bOffset), layoutB);
     SchedulerBlockInfo blockInfo;
+    bool isFirstGroupBlock = true;
     while (scheduler.GetNextBlock(blockInfo)) {
         const int64_t curM = asc::te::get<MNK_M>(blockInfo.blockShape);
         const int64_t curN = asc::te::get<MNK_N>(blockInfo.blockShape);
         if (curM <= 0 || curN <= 0) {
             continue;
+        }
+        if constexpr (IS_MIX_INPLACE_ADD) {
+            if (isFirstGroupBlock) {
+                if ASCEND_IS_AIC {
+                    mmOp_.UpdateParamsForKSlice(k);
+                }
+                if ASCEND_IS_AIV {
+                    epilogueOp_.UpdatePerTensorScale(groupIdx);
+                }
+                isFirstGroupBlock = false;
+            }
         }
 
         const int64_t mPos = asc::te::get<MNK_M>(blockInfo.blockCoord);
@@ -434,29 +524,34 @@ __aicore__ inline void GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::ProcessOneBlock(co
         if (!isFirstBlock_) {
             WaitForVector();
         }
-        auto workspaceLayout = MakeLayoutC{}(curM, curN);
-        auto gmWorkspace = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::gm>(workspaceBasePtr_ + workspaceOffset), workspaceLayout);
-        // BlockMmad keeps a bias tensor in its call signature. Init uses isBias=false,
-        // so this placeholder is never loaded or involved in the calculation.
-        auto unusedBiasLayout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1L, 1L);
-        auto gmUnusedBias = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ BiasType*>(workspaceBasePtr_)),
-            unusedBiasLayout);
-
         auto gmBlockA = gmA.slice(asc::te::make_coord(mPos, static_cast<int64_t>(0)), asc::te::make_shape(curM, k));
         auto gmBlockB = gmB.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos), asc::te::make_shape(k, curN));
-        const int64_t scaleExpertOffset = static_cast<int64_t>(groupIdx) * quantGroupNum_ * n;
-        auto scaleLayout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(static_cast<int64_t>(quantGroupNum_),
-                                                                                  n);
-        auto gmScale = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::gm>(scaleBasePtr_ + scaleExpertOffset), scaleLayout);
-        auto gmBlockScale = gmScale.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos),
-                                          asc::te::make_shape(static_cast<int64_t>(quantGroupNum_), curN));
-        if (isPerGroup_) {
-            ProcessPerGroup(gmBlockA, gmBlockB, gmBlockScale, gmUnusedBias, gmWorkspace, blockShape);
+        if constexpr (IS_MIX_INPLACE_ADD) {
+            auto ubC = epilogueOp_.GetAccumulatorTensor({curM, curN});
+            mmOp_(gmBlockA, gmBlockB, ubC, blockShape);
         } else {
-            mmOp_(gmBlockA, gmBlockB, gmBlockScale, gmUnusedBias, gmWorkspace, blockShape);
+            auto workspaceLayout = MakeLayoutC{}(curM, curN);
+            auto gmWorkspace = asc::te::make_tensor(
+                asc::te::make_mem_ptr<asc::te::location::gm>(workspaceBasePtr_ + workspaceOffset), workspaceLayout);
+            // BlockMmad keeps a bias tensor in its call signature. Init uses isBias=false,
+            // so this placeholder is never loaded or involved in the calculation.
+            auto unusedBiasLayout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1L, 1L);
+            auto gmUnusedBias = asc::te::make_tensor(
+                asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ BiasType*>(workspaceBasePtr_)),
+                unusedBiasLayout);
+
+            const int64_t scaleExpertOffset = static_cast<int64_t>(groupIdx) * quantGroupNum_ * n;
+            auto scaleLayout = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
+                static_cast<int64_t>(quantGroupNum_), n);
+            auto gmScale = asc::te::make_tensor(
+                asc::te::make_mem_ptr<asc::te::location::gm>(scaleBasePtr_ + scaleExpertOffset), scaleLayout);
+            auto gmBlockScale = gmScale.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos),
+                                              asc::te::make_shape(static_cast<int64_t>(quantGroupNum_), curN));
+            if (isPerGroup_) {
+                ProcessPerGroup(gmBlockA, gmBlockB, gmBlockScale, gmUnusedBias, gmWorkspace, blockShape);
+            } else {
+                mmOp_(gmBlockA, gmBlockB, gmBlockScale, gmUnusedBias, gmWorkspace, blockShape);
+            }
         }
         NotifyVector();
         isFirstBlock_ = false;
@@ -464,11 +559,17 @@ __aicore__ inline void GemmUniversal<GMM_FIXPIPE_TEM_PARAMS>::ProcessOneBlock(co
 
     if ASCEND_IS_AIV {
         WaitForCube();
-        const int64_t offsetPerTokenScale = groupMOffset + mPos;
-        const int64_t offsetOffset = static_cast<int64_t>(groupIdx) * n + nPos;
-        const int64_t offsetRowSum = offsetPerTokenScale;
         const int64_t offsetC = (groupMOffset + mPos) * n + nPos;
-        epilogueOp_(curM, curN, offsetPerTokenScale, offsetOffset, offsetRowSum, offsetC, workspaceOffset);
+        const int64_t offsetOffset = static_cast<int64_t>(groupIdx) * n + nPos;
+        if constexpr (IS_MIX_INPLACE_ADD) {
+            constexpr int64_t PER_TOKEN_SCALE_OFFSET = 0;
+            constexpr int64_t BIAS_OFFSET = 0;
+            epilogueOp_(curM, curN, offsetOffset, PER_TOKEN_SCALE_OFFSET, BIAS_OFFSET, offsetC);
+        } else {
+            const int64_t offsetPerTokenScale = groupMOffset + mPos;
+            const int64_t offsetRowSum = offsetPerTokenScale;
+            epilogueOp_(curM, curN, offsetPerTokenScale, offsetOffset, offsetRowSum, offsetC, workspaceOffset);
+        }
         NotifyCube();
     }
 }

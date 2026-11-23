@@ -76,16 +76,20 @@ public:
                   "QGMM MX atomic add requires an empty epilogue.");
     static constexpr bool IS_MIXED_INPUT = AscendC::Std::is_same_v<AType, fp8_e4m3fn_t> &&
                                            (AscendC::Std::is_same_v<BType, fp4x2_e2m1_t> || IsHif4<BType>());
+    static constexpr bool IS_SAME_WIDTH_INPUT = (IsFp4<AType>() && !IsHif4<AType>() && IsFp4<BType>() &&
+                                                 !IsHif4<BType>()) ||
+                                                (IsFp8<AType>() && IsFp8<BType>());
     static constexpr bool IS_MX_A8W4 = BlockMmad::IS_MX_A8W4;
     using ScaleBType = MxScaleType<BType>;
-    static_assert((IsFp4<AType>() && !IsHif4<AType>() && IsFp4<BType>() && !IsHif4<BType>()) ||
-                      (IsFp8<AType>() && IsFp8<BType>()) || (ENABLE_INPLACE_ADD && IS_MIXED_INPUT) || IS_MX_A8W4,
+    static_assert(IS_SAME_WIDTH_INPUT || IS_MX_A8W4 || (ENABLE_INPLACE_ADD && IS_MIXED_INPUT),
                   "QGMM MX requires same-width inputs, ND A / ZN B / DN scaleB MXA8W4, or FP8 x FP4/HIF4 inplace add.");
-    static_assert(!ENABLE_INPLACE_ADD || (IS_MIXED_INPUT && AscendC::Std::is_same_v<CType, float> &&
+    static_assert(!ENABLE_INPLACE_ADD || ((IS_MIXED_INPUT || (ENABLE_ATOMIC_ADD && IS_SAME_WIDTH_INPUT)) &&
+                                          AscendC::Std::is_same_v<CType, float> &&
                                           AscendC::Std::is_same_v<LayoutA, asc::te::dn_ext_layout_ptn> &&
                                           AscendC::Std::is_same_v<LayoutB, asc::te::nd_ext_layout_ptn> &&
                                           AscendC::Std::is_same_v<LayoutC, asc::te::nd_ext_layout_ptn>),
-                  "QGMM MX inplace add requires FP8 x FP4/HIF4, DN A, ND B/C, FP32 C.");
+                  "QGMM MX inplace add requires FP8 x FP4/HIF4 or atomic add with MX A8W8 or MX A4W4. "
+                  "Use DN A, ND B/C, and FP32 C.");
     static_assert(AscendC::Std::is_one_of_v<CType, half, bfloat16_t, float>,
                   "QGMM MX only supports half/bfloat16_t/float CType.");
     static_assert(AscendC::Std::is_same_v<BiasType, float> ||
@@ -278,7 +282,6 @@ private:
             }
         }
         if constexpr (ENABLE_ATOMIC_ADD) {
-            AscendC::PipeBarrier<PIPE_FIX>();
             AscendC::SetAtomicNone();
         }
     }
@@ -497,6 +500,9 @@ private:
                          scaleBOffset_;
         auto gmScaleB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(scaleBPtr), layoutScaleB);
         auto gmC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(cBasePtr_ + cOffset_), layoutC);
+        if constexpr (ENABLE_ATOMIC_ADD && IS_SAME_WIDTH_INPUT) {
+            gmC.set_l2_cache_hint(asc::te::cache_mode::disable);
+        }
         auto biasPtr = isBias_ ? (biasBasePtr_ + biasOffset_) : nullptr;
         auto layoutBias = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(static_cast<int64_t>(1), problemN);
         auto gmBias = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(biasPtr), layoutBias);

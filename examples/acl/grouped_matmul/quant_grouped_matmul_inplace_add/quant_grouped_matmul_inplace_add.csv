@@ -1,0 +1,9 @@
+caseName,scenario,m,n,k,groupNum,groupListType,groupLengths
+tc_offset_empty_middle,hif8_tc,33,48,194,3,0,33;0;161
+tc_length_empty_edges,hif8_tc,49,40,224,4,1,0;64;160;0
+tt_offset_empty_middle,hif8_tt,33,48,194,3,0,33;0;161
+tt_length_empty_edges,hif8_tt,49,40,224,4,1,0;64;160;0
+mxfp8_offset_empty_middle,mxfp8,33,48,194,3,0,33;0;161
+mxfp8_length_empty_edges,mxfp8,49,40,224,4,1,0;64;160;0
+mxfp4_offset_empty_middle,mxfp4,34,48,194,3,0,33;0;161
+mxfp4_length_empty_edges,mxfp4,50,40,224,4,1,0;64;160;0

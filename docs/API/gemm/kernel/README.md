@@ -21,13 +21,13 @@
 | [kernel_qbmm_mx_activation_quant](./kernel_qbmm_mx_activation_quant.md) | 支持多 Batch 的 MX 量化 Matmul，融合 GELU/SwiGLU/Swish 激活和动态 MX 量化 |
 | [kernel_qbmm_mix](./kernel_qbmm_mix.md) | 支持多 Batch 的 A8W8 MIX Matmul，AIC 计算、AIV 反量化 |
 | [kernel_qbmm_mix_without_batch](./kernel_qbmm_mix_without_batch.md) | Batch 固定为 1 的 A8W8 MIX Matmul，不处理多 Batch 广播 |
-| [kernel_qgmm_mx_basic](./kernel_qgmm_mx_basic.md) | MX 量化 Grouped Matmul，支持 group list、tail split 和 FP8 × FP4/HiFloat4 原地累加 |
+| [kernel_qgmm_mx_basic](./kernel_qgmm_mx_basic.md) | MX 量化 Grouped Matmul，支持 group list、tail split 和按 K 分组的 FP32 原地累加（MX A8W8、MX A4W4 或 FP8 × FP4/HiFloat4） |
 | [grouped_matmul_finalize_routing](./grouped_matmul_finalize_routing.md) | GMMFR 三数据流的接口、存储、初始化及调用约束 |
 | [kernel_qgmm_mix_pertoken_finalize_routing](./kernel_qgmm_mix_pertoken_finalize_routing.md) | pertoken 全量化 GMMFR，支持可选 token scale 和确定性 workspace |
 | [kernel_wqgmm_mx_mix_finalize_routing](./kernel_wqgmm_mx_mix_finalize_routing.md) | MX A8W4 GMMFR，FP32 路由输出、AIV 权重转换和路由参数预取 |
 | [kernel_qgmm_mx_mix_finalize_routing](./kernel_qgmm_mx_mix_finalize_routing.md) | GroupedMatmulFinalizeRouting MX TensorAPI Kernel，支持 shared input、logit 融合和 rowIndex 原子写回 |
 | [kernel_qgmm_swiglu_mx](./kernel_qgmm_swiglu_mx.md) | MXFP8 Grouped Matmul + SwiGLU mode 2 + MX 输出量化，支持 ND/DN/NZ/ZN weight |
-| [kernel_qgmm_mix_fixpipe_quant](./kernel_qgmm_mix_fixpipe_quant.md) | 量化 Grouped Matmul，通过 Fixpipe 输出，支持 per-channel/per-group 和可选 offset 后处理 |
+| [kernel_qgmm_mix_fixpipe_quant](./kernel_qgmm_mix_fixpipe_quant.md) | 支持 S8S4/S4S4 按 M 分组的perchannel Fixpipe 反量化与pergroup反量化，以及 HiFloat8 T-C 按 K 分组的 FP32 原地累加 |
 | [kernel_matmul_streamk](./kernel_matmul_streamk.md) | StreamK 矩阵乘 Kernel，AIC+AIV 双核计算，支持 workspace |
 | [kernel_qbmm_streamk](./kernel_qbmm_streamk.md) | MX 量化 StreamK Kernel，支持单 Batch MxFP4/MxFP8 workspace 归约 |
 | [kernel_qbmm_pertensor_streamk](./kernel_qbmm_pertensor_streamk.md) | QBMM per-tensor StreamK Kernel，AIC 输出分块累加结果，AIV 统一归约并反量化 |

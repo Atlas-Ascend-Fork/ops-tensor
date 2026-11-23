@@ -2,7 +2,7 @@
 > [代码位置](../../../../include/blaze/gemm/kernel/kernel_qgmm_cube.h)
 
 ## 功能说明
-Fixpipe 量化 Grouped Matmul Kernel，仅支持 AIC 计算。该 Kernel 组合 `BlockMmadA8W8FixpipeQuant` 与 `BlockSchedulerGmmSwatWithTailSplit`，按 group list 逐 group 完成量化 A/B 矩阵乘、Bias 处理、scale 反量化与 GM 输出。仅支持 SPLIT_M（groupType=0）和 NO_SPLIT（groupType=-1），不支持 SPLIT_K（切 K，groupType=2）。SPLIT_M 时每个 group 的 M 尺寸由 group list 动态给出，group 间通过 SWAT 调度器保持核负载均衡与双缓冲相位连续。
+Fixpipe 量化 Grouped Matmul Kernel，仅支持 AIC 计算。该 Kernel 组合 `BlockMmadA8W8FixpipeQuant` 与 `BlockSchedulerGmmSwatWithTailSplit`，按 group list 逐 group 完成量化 A/B 矩阵乘、Bias 处理、scale 反量化与 GM 输出。输出覆盖模式支持 SPLIT_M（groupType=0）和 NO_SPLIT（groupType=-1），HiFloat8 per-tensor 输出原子累加使用 SPLIT_K（groupType=2）。SPLIT_M 时每个 group 的 M 尺寸由 group list 动态给出，group 间通过 SWAT 调度器保持核负载均衡与双缓冲相位连续。
 
 **继承自**：[Kernel Matmul 基础框架](./kernel.md)
 
@@ -37,10 +37,10 @@ Scale 模式由 `x1QuantMode` 和 `x2QuantMode` 决定，取值来自 `QuantMode
 仅支持调度策略为 `MatmulWithScaleFixpipeQuant` 的 `BlockMmad`，即 `BlockMmad::DispatchPolicy::ScheduleType` 必须为 `KernelGroupedMmadFixpipeQuant`。该标签通过 `MatmulWithScaleFixpipeQuant` 的第 3 个模板参数 `ScheduleType_` 指定。
 
 ### BlockScheduler 限制
-使用 `BlockSchedulerGmmSwatWithTailSplit` 调度器，支持按 group 连续串接 block、SWAT 窗口分块、以及最后一个 group 的尾块切分（`UpdateTailTile`）。
+使用 `BlockSchedulerGmmSwatWithTailSplit` 调度器按 group 连续串接 block，并按 SWAT 窗口分块。覆盖模式和原子累加模式的末组均按调度条件调用 `UpdateTailTile`，在 M/N 方向切分尾块。
 
 ### groupList 布局
-NO_SPLIT 不读取 groupList，允许 `groupListGmAddr` 为空。SPLIT_M 要求调用方提供有效 int64 数组；OFFSET/LENGTH 长度为 `groupNum`，SPARSE 长度为 `2 * groupNum`，按 `groupListType` 解释：
+NO_SPLIT 允许 `groupListGmAddr` 为空。SPLIT_M 和 SPLIT_K 使用 INT64 组表，OFFSET 和 LENGTH 的长度均为 `groupNum`。SPARSE 只用于 SPLIT_M，长度为 `2 * groupNum`。
 - `0`（OFFSET）：第 i 个元素为该 group 的累计 offset，split 值为差分；
 - `1`（LENGTH）：第 i 个元素为该 group 的 split 长度；
 - `2`（SPARSE）：每 2 个 int64 一项，`[tensorIdx, splitValue]`。
@@ -56,6 +56,15 @@ NO_SPLIT 不读取 groupList，允许 `groupListGmAddr` 为空。SPLIT_M 要求�
 
 调用方通过 `MatmulWithScaleFixpipeQuant` 的第 4 个模板参数指定 GMMArray 指针类型。普通 GM 输入可省略该参数；常量 Tiling 输入需传入 `const int32_t*`，也可以使用 `decltype(gmmArrayAddr)` 保留实际指针类型。Kernel 不判断算子侧的 Tiling 宏，也不转换地址空间。
 
+第 6 个模板参数 `IsTensorList_` 决定调用方如何传入 A、B、C（对应 `aGmAddr`、`bGmAddr`、`cGmAddr`）。
+
+| 参数值 | 调用方传入的地址 | Kernel 取址方式 |
+| --- | --- | --- |
+| `true`（默认） | 各自的 TensorList 描述符地址 | 通过 `GetDataPtr(0)` 取得列表中第一个 Tensor 的数据地址 |
+| `false` | 每个 Tensor 的 GM 数据首地址 | 直接使用传入的数据地址 |
+
+只含一个 Tensor 的 TensorList 也按描述符传入，使用 `true`。有 bias 时，`biasGmAddr` 传 TensorList 描述符地址，两组 scale 传各自的数据地址。`AtomicAdd_` 独立控制输出是否使用原子累加。
+
 ## 数据结构
 
 ### `GmmParams`
@@ -70,8 +79,8 @@ Kernel 的 group 级参数（聚合初始化，字段顺序敏感）：
 | `x1QuantMode` / `x2QuantMode` | `uint32_t` | A/B 侧 QuantMode |
 | `isBias` | `uint8_t` | 是否带 bias |
 | `dbL0C` | `uint8_t` | L0C 双缓冲使能（>1 启用） |
-| `groupType` | `int8_t` | 分组模式：-1=NO_SPLIT，0=SPLIT_M；不支持 2=SPLIT_K，调用方不得将切 K 路径分发到本 Kernel |
-| `groupListType` | `uint8_t` | 0=OFFSET / 1=LENGTH / 2=SPARSE |
+| `groupType` | `int8_t` | 覆盖模式使用 -1（NO_SPLIT）或 0（SPLIT_M），HiFloat8 per-tensor 原子累加使用 2（SPLIT_K） |
+| `groupListType` | `uint8_t` | 0=OFFSET，1=LENGTH，2=SPARSE（仅 SPLIT_M） |
 | `singleW` / `singleX` / `singleY` | `uint8_t` | 保留兼容字段；singleW 参与尺寸选择，不表示支持独立多 tensor 寻址 |
 
 ### `Params`
@@ -85,12 +94,16 @@ Kernel 的 group 级参数（聚合初始化，字段顺序敏感）：
 | `gmmArrayGmAddr` | GMMArray 的 mList/kList/nList 地址；类型由 `DispatchPolicy::GmmArrayPtr` 指定，默认是 `__gm__ int32_t*` |
 | `gmmParams` | `GmmParams` |
 
+### HiFloat8 T-T 原子累加
+
+使用 `MatmulWithScaleFixpipeQuant` 和 `BlockEpilogueEmpty`。策略的第 2 个模板参数 `AtomicAdd_` 设为 `true`，第 3 个参数使用 `KernelGroupedMmadFixpipeQuant`，第 6 个参数 `IsTensorList_` 设为 `false`。A（HiFloat8 DN）、B（HiFloat8 ND）和输出 `YRef[G, M, N]`（FP32 ND）各传单个 Tensor 的 GM 数据首地址，两组 FP32 per-tensor scale 各传数据地址。设置 `groupType = 2`，A/B 的量化模式均为 `PERTENSOR_MODE`，`isBias = 0`，`gmmArrayGmAddr = nullptr`。调用前初始化 YRef，零长度 K 组保留对应输出切片的原值。
+
 ## 执行流程
 
-1. `Init`：保存输入描述符、GMMArray 和 scale 地址，调用 Block 初始化；L1 缓冲数量固定为 `DOUBLE_BUFFER_COUNT`，不是 `GmmParams` 字段。
+1. `Init` 保存调用方传入的 A/B/C、bias、GMMArray 和 scale 地址，并调用 Block 初始化。L1 缓冲数量固定为 `DOUBLE_BUFFER_COUNT`。
 2. `Run`：构造 groupList Tensor 和 Scheduler，遍历列表，解析专家号及 M/N/K。
 3. 每组先更新地址偏移，再判断空组和调度任务；SPARSE 的 X/Y 按遍历顺序累计，weight/bias/scale 按专家号定位。
-4. `ProcessSingleGroup`：解析 scalar scale、构造 Tensor，遍历 block 并调用 BlockMmad；最后一组按调度条件进行尾块切分。
+4. `ProcessSingleGroup` 解析 scalar scale，取得 A/B/C 的数据首地址并叠加组偏移，然后构造 Tensor、遍历 block 并调用 BlockMmad。最后一组按调度条件进行尾块切分。
 
 ## 调用示例
 
@@ -117,7 +130,7 @@ using GmmKernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, GmmBlockMmad,
 typename GmmKernel::GmmParams gmmParams{...};
 typename GmmKernel::Params params = {
     {gmmParams.m, gmmParams.n, gmmParams.k, 1},
-    {aDataAddr, bDataAddr, yDataAddr, biasDataAddr, perTokenScaleAddr, scaleDataAddr},
+    {aTensorListAddr, bTensorListAddr, yTensorListAddr, biasTensorListAddr, perTokenScaleAddr, scaleDataAddr},
     {}, groupListAddr, gmmArrayAddr, gmmParams};
 GmmKernel gmm;
 gmm(params);
@@ -126,7 +139,6 @@ gmm(params);
 ## 性能建议
 - `kAL1/kBL1` 由 host tiling 的 `stepKa/stepKb * baseK` 给出，二者允许不相等（Block 内按 `kAL1_ == / > / < kBL1_` 三分支调度）；
 - `nBufferNum` 固定传 2（双缓冲），与 host 侧 `depthA1 = 2 * stepKa` 的 L1 预算保持一致，L1 不溢出；
-- 与旧 `GmmASWKernel` 一致，X、weight、Y、可选 bias 固定解析 tensor list 第 0 项并叠加组偏移；scale 使用集中存储的数据地址。不支持通过逐组解析列表来访问独立 tensor。
 - `singleW` 保持与 host 一致，仅保留原有 N/K 尺寸选择语义。
 - SPLIT_M 且 `groupListType=2` 时，`loopIdx` 表示列表遍历位置，`groupIdx` 表示真实专家号。X/Y 按遍历的数据量累计偏移；weight 按专家号乘每组物理跨度定位（NZ 包含对齐），bias/per-channel scale 按 `groupIdx * N` 定位。专家号为 0 时也重新赋值。
 - 上层接口对多 tensor 的检查与旧内核地址实现存在不一致，本次迁移不修改该接口、不新增数据格式或选路。

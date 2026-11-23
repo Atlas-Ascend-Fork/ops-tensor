@@ -17,7 +17,7 @@ Scheduler 的 MX group/block 偏移接口完成 AIC/AIV 协同。
 ## 特殊约束
 
 ### 计算模式
-普通 QGMM 的覆盖模式仅使用 AIC，原地累加模式使用 AIC:AIV=1:1。
+普通 QGMM 的覆盖模式和 `AtomicAdd_=true` 模式仅使用 AIC，`BlockEpilogueInplaceAdd` 模式使用 AIC:AIV=1:1。
 ActivationQuant 标签由 AIC 将 float L0C 写入 UB，两个 AIV 执行 GeluTanh 与 MXFP8/MXFP4
 在线量化，并通过跨核 flag 串行复用 UB。
 
@@ -52,9 +52,12 @@ NZ 权重的组间偏移按 B 的位宽与 C0 计算，FP4 按每字节两个元
 
 ### 原地累加模式
 
-`BlockEpilogueEmpty` 选择覆盖输出，`Blaze::Epilogue::Block::BlockEpilogueInplaceAdd` 选择原地累加。
+`BlockEpilogueEmpty` 搭配默认的 `AtomicAdd_=false` 选择覆盖输出，搭配 `AtomicAdd_=true` 选择 Fixpipe 原子累加。
+`Blaze::Epilogue::Block::BlockEpilogueInplaceAdd` 用于 FP8 × FP4/HiFloat4，并按组 K 长度选择累加路径。
 `GroupedMatmulWithScaleMx` 保留原有三个模板参数，不增加输出模式参数。
 BlockMmad 根据输出 Tensor 的 GM/UB 位置和单输出/双 UB 输出接口选择搬运路径。
+
+#### FP8 × FP4/HiFloat4
 
 原地累加执行 `C[g] += MatmulMx(A[g], B[g], ScaleA[g], ScaleB[g])`，约束如下：
 
@@ -110,6 +113,12 @@ UB 暂存块大小根据剩余容量计算，
 M/N 尾部对齐为 `1/64`，不启用最后一组的额外 tail split。
 共享 scale 窗口向下对齐为 `max(kAL1, kBL1)` 的整数倍，至少取一个外层窗口，并以总 K 为上限；
 调用方需按实际窗口预算 L1 空间。普通覆盖模式保留现有 scale 窗口和调度行为。
+
+#### MX A8W8 和 MX A4W4 原子累加
+
+- A/B 支持 MX A8W8 或 MX A4W4。A 为 DN，B 为 ND，Epilogue 使用 `BlockEpilogueEmpty`。
+- 按 K 分组，组表支持 `groupListType = 0`（累计 K）和 `groupListType = 1`（每组 K 长度）。ScaleA/ScaleB 沿用按 K 分组的存储约定，scale padding 仍按原始组号计算，包含空组。
+- 输出为连续 FP32 ND `[G, M, N]`，其中 `G` 为组数，每组更新独立的 `[M, N]` 切片。调用者必须在启动 Kernel 前初始化输出，K 长度为零的组保留原值。
 
 ### SwiGLU MX 融合路径约束
 `KernelGmmSwiGluMixMx` 路径复用 QGMM MX 的 Cube 计算并在 AIV 侧完成 SwiGLU 与 MX 输出量化。当前该路径仅支持 MXFP8 输入：
@@ -318,6 +327,42 @@ QgmmKernel kernel;
 kernel(params);
 ```
 
+### MX A8W8 原子累加示例
+
+以下示例使用 MXFP8 E4M3 输入、连续存放的 B 和 ScaleB，以及按组长度编码的 INT64 组表。调用前将初始 YRef 写入 `yRefGmAddr` 指向的 FP32 GM 缓冲区。
+
+```cpp
+using Shape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
+using LayoutA = asc::te::dn_ext_layout_ptn;
+using LayoutND = asc::te::nd_ext_layout_ptn;
+using Policy = Blaze::Gemm::GroupedMatmulWithScaleMx<Blaze::Gemm::NONE_FULL_LOAD_MODE, true>;
+using Mmad = Blaze::Gemm::Block::BlockMmad<
+    Policy, fp8_e4m3fn_t, LayoutA, fp8_e4m3fn_t, LayoutND, float, LayoutND, float, LayoutND>;
+using Epilogue = Blaze::Gemm::Block::BlockEpilogueEmpty;
+using Scheduler = Blaze::Gemm::Block::BlockSchedulerGmmSwatWithTailSplit;
+using Kernel = Blaze::Gemm::Kernel::GemmUniversal<Shape, Mmad, Epilogue, Scheduler>;
+
+constexpr uint8_t NO_BIAS = 0;
+constexpr uint8_t DOUBLE_BUFFER = Blaze::Gemm::DOUBLE_BUFFER_COUNT;
+constexpr int8_t GROUP_TYPE_K = 2;
+constexpr uint8_t GROUP_LIST_LENGTH = 1;
+constexpr uint8_t SINGLE_WEIGHT = 1;
+Kernel::Params params{};
+params.problemShape = {m, n, k, 0};
+params.mmadParams.aGmAddr = aGmAddr;
+params.mmadParams.bGmAddr = bGmAddr;
+params.mmadParams.cGmAddr = yRefGmAddr;
+params.mmadParams.scaleAGmAddr = scaleAGmAddr;
+params.mmadParams.scaleBGmAddr = scaleBGmAddr;
+params.groupListGmAddr = groupListGmAddr;
+params.gmmParams = {groupNum, m, n, k, baseM, baseN, baseK, kAL1, kBL1,
+                    scaleKL1, scaleKL1, NO_BIAS, DOUBLE_BUFFER, DOUBLE_BUFFER,
+                    GROUP_TYPE_K, GROUP_LIST_LENGTH, SINGLE_WEIGHT};
+
+Kernel kernel;
+kernel(params);
+```
+
 ## 调度流程
 ```text
 读取首组 tiling
@@ -327,10 +372,14 @@ kernel(params);
     -> 更新 A/B/Scale/Bias/C 偏移（普通 QGMM 在 Kernel 内完成；GMMAQ 由 MX Scheduler 辅助完成）
     -> scheduler 分发单核 block
     -> BlockMmad 在单核 block 内执行 L0 tile 计算
-    -> 覆盖模式的末组按需执行 tail split；原地累加模式由 AIV 完成 UB 加法和 GM 写回，AIC 等待最终 ACK
+    -> 普通覆盖模式的末组按调度条件执行 tail split，原地累加模式沿用基础 tile 分配
+    -> 原地累加模式按所选路径使用 Fixpipe 原子写回或 AIV UB 加法及 GM 写回
 ```
+
+使用 `AtomicAdd_=true` 时，AIC 在遍历组表前调用 `SetAtomicAdd<float>()`，全部组处理结束后调用 `SetAtomicNone()`。
 
 ## 适用场景
 - MX 量化 grouped matmul
 - group 间 `m` 或 `k` 动态变化
 - 需要 sparse group list / tail split 的 grouped matmul 场景
+- 需要将各 K 分组的结果累加到 FP32 YRef 的场景

@@ -43,6 +43,7 @@ public:
     using X2ScaleType = X2ScaleType_;
     using X1ScaleType = X1ScaleType_;
     using L0CType = L0CType_;
+    using FixpipeType = L0CType;
 
     static constexpr uint32_t DATA_BLOCK = 32;
     static constexpr uint32_t FLOAT_ALIGN = DATA_BLOCK / sizeof(float);
@@ -79,6 +80,7 @@ public:
         bool isBias{false};
         uint32_t biasDtype{0};
         int64_t batch{1};
+        bool disableOutL2Cache{false};
     };
 
     using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
@@ -86,6 +88,7 @@ public:
     __aicore__ inline BlockEpilogueDequant();
     __aicore__ inline ~BlockEpilogueDequant();
     __aicore__ inline void Init(const Params& params);
+    __aicore__ inline void UpdatePerTensorScale(int64_t groupIdx);
     __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
     __aicore__ inline void operator()(int64_t singleCoreM, int64_t singleCoreN, int64_t offsetScale,
                                       int64_t offsetPtScale, int64_t offsetBias, int64_t offsetC,
@@ -124,6 +127,7 @@ private:
     bool isPerChannel_{false};
     bool isPerToken_{false};
     bool isX1PerTensor_{false};
+    bool initialized_{false};
     uint32_t subBlockIdx_{0};
     float x2ScaleScalar_{1.0f};
     float x1ScaleScalar_{1.0f};
@@ -134,6 +138,7 @@ private:
     uint64_t dequantPingOffset_{0};
     uint64_t dequantPongOffset_{0};
     GM_ADDR outGmAddr_{nullptr};
+    bool disableOutL2Cache_{false};
     GM_ADDR x2ScaleGmAddr_{nullptr};
     GM_ADDR x1ScaleGmAddr_{nullptr};
 };
@@ -148,11 +153,15 @@ __aicore__ inline BLAZE_DEQUANT_CLASS::BlockEpilogueDequant() {}
 BLAZE_DEQUANT_CLASS_TEMPLATE
 __aicore__ inline BLAZE_DEQUANT_CLASS::~BlockEpilogueDequant()
 {
-    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
-    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(1);
-    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(1);
+    if ASCEND_IS_AIV {
+        if (initialized_) {
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(1);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(1);
+        }
+    }
 }
 
 BLAZE_DEQUANT_CLASS_TEMPLATE
@@ -169,6 +178,7 @@ __aicore__ inline void BLAZE_DEQUANT_CLASS::Init(const Params& params)
     isX1PerTensor_ = (params.x1QuantMode == static_cast<uint32_t>(QuantMode::PERTENSOR_MODE));
     subBlockIdx_ = AscendC::GetSubBlockIdx();
     outGmAddr_ = params.outGmAddr;
+    disableOutL2Cache_ = params.disableOutL2Cache;
 
     if (isPerChannel_) {
         x2ScaleGmAddr_ = params.x2ScaleGmAddr;
@@ -183,13 +193,9 @@ __aicore__ inline void BLAZE_DEQUANT_CLASS::Init(const Params& params)
             Gemm::MakeNDExtLayout(1, 1, 1));
         ReadX2ScaleScalar(x2ScaleTensor);
     }
-    if (isPerToken_) {
-        x1ScaleGmAddr_ = params.x1ScaleGmAddr;
-    } else if (isX1PerTensor_) {
-        auto ptTensor = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ float*>(params.x1ScaleGmAddr)),
-            Gemm::MakeNDExtLayout(1, 1, 1));
-        x1ScaleScalar_ = ptTensor[asc::te::make_coord(static_cast<int64_t>(0), static_cast<int64_t>(0))];
+    x1ScaleGmAddr_ = params.x1ScaleGmAddr;
+    if (isX1PerTensor_) {
+        UpdatePerTensorScale(0);
     }
     if (isBias_) {
         biasDtype_ = params.biasDtype;
@@ -202,6 +208,16 @@ __aicore__ inline void BLAZE_DEQUANT_CLASS::Init(const Params& params)
     AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(BIAS_EVENT_ID);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(1);
+    initialized_ = true;
+}
+
+BLAZE_DEQUANT_CLASS_TEMPLATE
+__aicore__ inline void BLAZE_DEQUANT_CLASS::UpdatePerTensorScale(int64_t groupIdx)
+{
+    const auto gmScale = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ float*>(x1ScaleGmAddr_) + groupIdx),
+        Gemm::MakeNDExtLayout(1, 1, 1));
+    x1ScaleScalar_ = gmScale[asc::te::make_coord(0L, 0L)];
 }
 
 BLAZE_DEQUANT_CLASS_TEMPLATE
@@ -507,6 +523,9 @@ __aicore__ inline void BLAZE_DEQUANT_CLASS::CopyResultToGm(int64_t mSize, int64_
     auto outGm = asc::te::make_tensor(
         asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ OutType*>(outGmAddr_) + gmOffset),
         gmLayout);
+    if (disableOutL2Cache_) {
+        outGm.set_l2_cache_hint(asc::te::cache_mode::disable);
+    }
     auto copyUB2GM = asc::te::make_copy(asc::te::copy_ub_to_gm{});
     asc::te::copy(copyUB2GM, outGm, outUb);
 }

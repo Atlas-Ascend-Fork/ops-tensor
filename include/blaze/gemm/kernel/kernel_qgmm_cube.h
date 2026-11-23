@@ -38,7 +38,8 @@ public:
     using BlockMmad = BlockMmad_;
     using BlockEpilogue = BlockEpilogue_;
     using BlockScheduler = BlockScheduler_;
-    using GmmArrayPtr = typename BlockMmad::DispatchPolicy::GmmArrayPtr;
+    using DispatchPolicy = typename BlockMmad::DispatchPolicy;
+    using GmmArrayPtr = typename DispatchPolicy::GmmArrayPtr;
 
     using AType = typename BlockMmad::AType;
     using BType = typename BlockMmad::BType;
@@ -51,6 +52,8 @@ public:
     using LayoutA = typename BlockMmad::LayoutA;
     using LayoutB = typename BlockMmad::LayoutB;
     using LayoutC = typename BlockMmad::LayoutC;
+
+    static constexpr bool ENABLE_INPLACE_ADD = DispatchPolicy::IS_ATOMIC_ADD;
 
 private:
     static constexpr uint64_t GROUP_LIST_TYPE_OFFSET = 0UL;
@@ -66,6 +69,7 @@ private:
     static constexpr int64_t GMM_CUBE_NZ_OUTER_SIZE = 16; // fractal NZ outer alignment
     static constexpr int8_t GMM_CUBE_NO_SPLIT = -1;
     static constexpr int8_t GMM_CUBE_SPLIT_M = 0;
+    static constexpr int8_t GMM_CUBE_SPLIT_K = 2;
     static constexpr uint32_t HALF_CORE_NUM = 2; // divisor to compute half of the participating cores
     static constexpr bool TRANS_A = IsTrans<LayoutA>::value;
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
@@ -97,7 +101,12 @@ private:
         "QGMM Cube HIFLOAT8/FP8 requires CType FP16/BF16/FP32 and BiasType FLOAT.");
     static_assert(AscendC::Std::is_one_of_v<ScaleGmType, uint64_t, int64_t, bfloat16_t, float>,
                   "QGMM Cube only supports UINT64/INT64/BF16/FLOAT ScaleGmType.");
-    static_assert(AscendC::Std::is_same_v<LayoutA, asc::te::nd_ext_layout_ptn>,
+    static_assert(!ENABLE_INPLACE_ADD || (IS_HIFLOAT8_INPUT && AscendC::Std::is_same_v<CType, float> &&
+                                          AscendC::Std::is_same_v<ScaleGmType, float> &&
+                                          AscendC::Std::is_same_v<LayoutA, asc::te::dn_ext_layout_ptn> &&
+                                          AscendC::Std::is_same_v<LayoutB, asc::te::nd_ext_layout_ptn>),
+                  "QGMM Cube inplace add requires HiFloat8 DN A, HiFloat8 ND B, and FP32 scales and output.");
+    static_assert(ENABLE_INPLACE_ADD || AscendC::Std::is_same_v<LayoutA, asc::te::nd_ext_layout_ptn>,
                   "QGMM Cube only supports non-transposed A (NDExtLayoutPtn).");
     static_assert(AscendC::Std::is_same_v<LayoutC, asc::te::nd_ext_layout_ptn>, "QGMM Cube only supports ND LayoutC.");
 
@@ -126,7 +135,7 @@ public:
         uint32_t x2QuantMode; // B side quant mode (QuantMode)
         uint8_t isBias;
         uint8_t dbL0C;
-        // Supported group types: NO_SPLIT (-1) and SPLIT_M (0). SPLIT_K is unsupported.
+        // NO_SPLIT (-1) and SPLIT_M (0) for list tensors, SPLIT_K (2) for inplace add.
         int8_t groupType;
         uint8_t groupListType;
         uint8_t singleW;
@@ -159,6 +168,17 @@ private:
     {
         AscendC::ListTensorDesc tensorList(reinterpret_cast<__gm__ void*>(tensorPtr));
         return tensorList.GetDataPtr<T>(index);
+    }
+
+    template <typename T>
+    __aicore__ inline __gm__ T* ResolveTensorAddr(uint32_t tensorIdx, GM_ADDR tensorAddr) const
+    {
+        auto* tensorPtr = reinterpret_cast<__gm__ T*>(tensorAddr);
+        if constexpr (DispatchPolicy::IS_TENSOR_LIST) {
+            return GetTensorAddrFromTensorList(tensorIdx, tensorPtr);
+        } else {
+            return tensorPtr;
+        }
     }
 
     __aicore__ inline void SetSchedulerTailAlign(BlockScheduler& scheduler)
@@ -212,10 +232,10 @@ private:
         if ASCEND_IS_AIV {
             return;
         }
-        Init(params);
-        if (groupNum_ == 0) {
+        if (params.gmmParams.groupNum == 0) {
             return;
         }
+        Init(params);
         const int64_t groupListLength = groupType_ == GMM_CUBE_NO_SPLIT ?
                                             0 :
                                             static_cast<int64_t>(groupNum_) *
@@ -228,6 +248,9 @@ private:
         const auto& gmmParams = params.gmmParams;
         BlockScheduler scheduler(gmmParams.baseM, gmmParams.baseN, gmmParams.baseK);
         SetSchedulerTailAlign(scheduler);
+        if constexpr (ENABLE_INPLACE_ADD) {
+            AscendC::SetAtomicAdd<float>();
+        }
         const uint32_t lastGroupIdx = groupNum_ - 1;
         for (uint32_t loopIdx = 0; loopIdx < lastGroupIdx; ++loopIdx) {
             uint32_t groupIdx = loopIdx;
@@ -277,13 +300,15 @@ private:
                 ProcessSingleGroup<false>(scheduler, groupIdx);
             }
         }
+        if constexpr (ENABLE_INPLACE_ADD) {
+            AscendC::SetAtomicNone();
+        }
     }
 
     __aicore__ inline void Init(const Params& params)
     {
         const auto& gmmParams = params.gmmParams;
-        // x / weight / y / bias are ListTensorDesc. Keep the descriptor addresses here;
-        // ProcessSingleGroup resolves tensor zero and adds the corresponding group offset.
+        // Save the caller's A/B/C pointers as passed: tensor data or TensorList descriptors.
         xDescAddr_ = params.mmadParams.aGmAddr;
         wDescAddr_ = params.mmadParams.bGmAddr;
         yDescAddr_ = params.mmadParams.cGmAddr;
@@ -410,13 +435,16 @@ private:
     __aicore__ inline void SetMNK(const GroupListTensor& groupList, uint32_t listIdx, uint32_t groupIdx)
     {
         const int64_t splitValue = GetSplitValueFromGroupList(groupList, listIdx);
-        // Per-group independent shapes come from GMMArray, same contract as the cgmct
-        // GmmASWKernel::SetMNK: SPLIT_M -> M from groupList, k/n from list;
-        // NO_SPLIT -> m/k/n all from list. SPLIT_K is not supported in this kernel.
+        // SPLIT_M and NO_SPLIT read independent dimensions from GMMArray.
+        // SPLIT_K uses the common M/N and reads each group's K from groupList.
         switch (groupType_) {
             case GMM_CUBE_SPLIT_M:
                 problemShape_ = ProblemShape{splitValue, static_cast<int64_t>(nListGm_[singleW_ ? 0 : groupIdx]),
                                              static_cast<int64_t>(kListGm_[singleW_ ? 0 : groupIdx]), 0};
+                break;
+            case GMM_CUBE_SPLIT_K:
+                problemShape_ = ProblemShape{asc::te::get<MNK_M>(problemShape_), asc::te::get<MNK_N>(problemShape_),
+                                             splitValue, 0};
                 break;
             default: // NO_SPLIT
                 problemShape_ = ProblemShape{static_cast<int64_t>(mListGm_[groupIdx]),
@@ -488,20 +516,24 @@ private:
         }
         UpdateScaleScalar(groupIdx);
 
-        // Different groups may carry different M/N/K sizes (SPLIT_M or NO_SPLIT). The fixpipe-quant BlockMmad does not
-        // cache a per-problem shape (it takes the tile shape from each operator() call), so nothing to refresh
-        // here; double-buffer phase continuity is kept by the kernel-level scheduler loop.
+        // Different groups may carry different M/N/K sizes (SPLIT_M or NO_SPLIT). The fixpipe-quant BlockMmad
+        // takes M/N from the tile shape in each operator() call and uses the K-loop state from Init() on these paths.
+        // SPLIT_K refreshes the K-loop state for each group's K slice. Double-buffer phase continuity
+        // is kept by the kernel-level scheduler loop.
         const int64_t problemM = asc::te::get<MNK_M>(problemShape_);
         const int64_t problemN = asc::te::get<MNK_N>(problemShape_);
         const int64_t problemK = asc::te::get<MNK_K>(problemShape_);
+        if (groupType_ == GMM_CUBE_SPLIT_K) {
+            mmadOp_.UpdateParamsForKSlice(static_cast<uint64_t>(problemK));
+        }
         const int64_t baseN = static_cast<int64_t>(baseN_);
         auto layoutA = MakeLayoutA{}(problemM, problemK);
         auto layoutB = MakeLayoutB{}(problemK, problemN);
         auto layoutC = MakeLayoutC{}(problemM, problemN);
-        // Match GmmASWKernel: resolve tensor zero and apply the group offset.
-        auto aPtr = GetTensorAddrFromTensorList(0, reinterpret_cast<__gm__ AType*>(xDescAddr_)) + aOffset_;
-        auto bPtr = GetTensorAddrFromTensorList(0, reinterpret_cast<__gm__ BType*>(wDescAddr_)) + wOffset_;
-        auto cPtr = GetTensorAddrFromTensorList(0, reinterpret_cast<__gm__ CType*>(yDescAddr_)) + cOffset_;
+        // Apply the group offset to each data address.
+        auto aPtr = ResolveTensorAddr<AType>(0, xDescAddr_) + aOffset_;
+        auto bPtr = ResolveTensorAddr<BType>(0, wDescAddr_) + wOffset_;
+        auto cPtr = ResolveTensorAddr<CType>(0, yDescAddr_) + cOffset_;
         __gm__ BiasType* biasPtr = nullptr;
         if (isBias_) {
             biasPtr = GetTensorAddrFromTensorList(0, reinterpret_cast<__gm__ BiasType*>(biasDescAddr_)) + biasOffset_;
@@ -509,6 +541,9 @@ private:
         auto gmA = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(aPtr), layoutA);
         auto gmB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(bPtr), layoutB);
         auto gmC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(cPtr), layoutC);
+        if constexpr (ENABLE_INPLACE_ADD) {
+            gmC.set_l2_cache_hint(asc::te::cache_mode::disable);
+        }
         auto layoutBias = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(static_cast<int64_t>(1), problemN);
         auto gmBias = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(biasPtr), layoutBias);
 

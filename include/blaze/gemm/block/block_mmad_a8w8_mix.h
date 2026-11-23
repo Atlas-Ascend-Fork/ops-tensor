@@ -38,11 +38,18 @@ template <uint64_t FullLoadMode_, bool AtomicAdd_, class ScheduleType_, uint64_t
           class LayoutBias_>
 class BlockMmad<MatmulWithScaleMix<FullLoadMode_, AtomicAdd_, ScheduleType_, NonContiguousType_>, AType_, LayoutA_,
                 BTypeTuple_, LayoutB_, CType_, LayoutC_, BiasType_, LayoutBias_> {
+    static constexpr bool HAS_X2_SCALE_TYPE = AscendC::Std::tuple_size_v<BTypeTuple_> > 1;
+
 public:
     using AType = AType_;
     using BType = typename AscendC::Std::tuple_element<0, BTypeTuple_>::type;
+    using CType = CType_;
+    using BiasType = BiasType_;
+    using X2ScaleType = AscendC::Std::conditional_t<
+        HAS_X2_SCALE_TYPE, typename AscendC::Std::tuple_element<HAS_X2_SCALE_TYPE ? 1 : 0, BTypeTuple_>::type, void>;
     using LayoutA = LayoutA_;
     using LayoutB = LayoutB_;
+    using LayoutC = LayoutC_;
     using LayoutBias = LayoutBias_;
     using L0CType = AscendC::Std::conditional_t<AscendC::IsSameType<AType, int8_t>::value, int32_t, float>;
     using DispatchPolicy = MatmulWithScaleMix<FullLoadMode_, AtomicAdd_, ScheduleType_, NonContiguousType_>;
@@ -132,7 +139,25 @@ public:
                 kBL1_ = kL1_;
             }
         }
+        if constexpr (AscendC::Std::is_same_v<ScheduleType_, KernelGroupedMmadWithScaleMixInplaceAdd>) {
+            aL1OneBuffer = CeilAlign(baseM, static_cast<uint64_t>(C0_SIZE)) * CeilAlign(kAL1_, BLOCK_CUBE) *
+                           sizeof(AType);
+            bL1OneBuffer = CeilAlign(baseN_, static_cast<uint64_t>(C0_SIZE)) * CeilAlign(kBL1_, BLOCK_CUBE) *
+                           sizeof(BType);
+        }
         GetL1BufferOffset(aL1OneBuffer, bL1OneBuffer);
+    }
+
+    __aicore__ inline void UpdateParamsForKSlice(uint64_t k)
+    {
+        static_assert(DispatchPolicy::FULL_LOAD_MODE == NONE_FULL_LOAD_MODE,
+                      "K slices require independent A and B loads.");
+        k_ = k;
+        kAL1Iter_ = CeilDiv(k_, kAL1_);
+        kBL1Iter_ = CeilDiv(k_, kBL1_);
+        if (kAL1_ == kBL1_) {
+            kL1Iter_ = kAL1Iter_;
+        }
     }
 
     template <typename TensorA, typename TensorB, typename TensorC, typename TensorBias = decltype(nullptr)>
@@ -170,6 +195,9 @@ public:
         }
 
         auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Blaze::Gemm::Tile::CopyL0C2UBTraitMix{});
+        if constexpr (AscendC::Std::is_same_v<ScheduleType_, KernelGroupedMmadWithScaleMixInplaceAdd>) {
+            AscendC::PipeBarrier<PIPE_FIX>();
+        }
         asc::te::copy(copyL0C2UB.with(asc::te::l0c_to_ub_params(asc::te::unit_flag_mode::enable_update)), ubC, c1Local);
 
         if (hasIntegerBias_) {
