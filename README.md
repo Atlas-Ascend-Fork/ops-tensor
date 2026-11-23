@@ -42,6 +42,7 @@ ops-tensor/
 |---------|------|---------|------|
 | MatMul | 矩阵乘运算 | Basic / A 全载 / B 全载 / Fixpipe / StreamK | ✅ 已实现 |
 | BatchMatMul | 批量矩阵乘运算 | Broadcast / IterBatch Broadcast | ✅ 已实现 |
+| FusedMatMul | 融合矩阵乘运算（MatMul + Scale + Add） | Elemwise（add/mul）/ Sigmoid | ✅ 已实现 |
 | TransposeBatchMatMul（TBMM） | 转置批量矩阵乘运算 | Basic | ✅ 已实现 |
 | QuantBatchMatMul（QBMM） | 量化批量矩阵乘运算 | Cube（per-tensor/per-channel）/ MX / MIX（A8W8）/ StreamK | ✅ 已实现 |
 | WeightQuantBatchMatmulMX | 权重量化批量矩阵乘（weight-only，介于全量化与非量化矩阵乘之间） | Weight Prologue（SWAT） | ✅ 已实现 |
