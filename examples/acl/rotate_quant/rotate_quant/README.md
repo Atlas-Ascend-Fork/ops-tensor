@@ -1,8 +1,9 @@
 # RotateQuant Example
 
 本样例演示 Ascend950（`dav-3510`，AIC:AIV=1:2）上 RotateQuant 的 Blaze 模板组装，
-直接使用 `BlockSchedulerRotateQuant`、`GemmUniversal`、`BlockMmad` 和
-`BlockEpilogueRotateQuant`，不依赖 ops-nn 仓或 ACLNN 接口。
+普通模式使用 `BlockSchedulerMatmulBasic`、TBMM `GemmUniversal` 和 FixpipeOpti `BlockMmad`，
+分组模式使用 `BlockSchedulerGmmNoQuant`、GMM `GemmUniversal` 和同一 FixpipeOpti `BlockMmad`。
+两种模式均组装 `BlockEpilogueRotateQuant`，不依赖 ops-nn 仓或 ACLNN 接口。
 
 ## 计算语义
 
@@ -27,7 +28,11 @@ Z[m,q*K:(q+1)*K] = X[m,q*K:(q+1)*K] @ rotation[e, b]
 Cube 用 FP16/BF16 输入和 FP32 累加，Fixpipe 将完整结果转为 BF16 后送到 AIV。
 对于每连续 32 个元素组成的 MX 量化组，若 BF16 alpha 满足 `0<alpha<1`，
 先计算 BF16 阈值 `limit=alpha*max(abs(Z))`，再截断到 `[-limit,limit]`。
-随后计算 E8M0 scale 并量化为 MX-FP4 E2M1。两个 AIV 按轮次交替处理完整块。
+随后计算 E8M0 scale 并量化为 MX-FP4 E2M1。双 AIV 平台上，普通和分组模式均按 M 分担同一块，
+使用两条单目标 Fixpipe 分别交付各自的 BF16 分片；单 AIV 平台由 AIV0 消费完整块。
+普通模式在容量与任务数满足条件时启用 Fixpipe UB DB，分组模式按容量选择单／双槽。
+双槽使用两个 UB 半区，每个半区容纳完整后处理工作区；跨组保持槽位和缓存状态。
+Epilogue 统一接收四元 `(M,N,K,B)` 块形状。
 
 ## 本样例配置
 

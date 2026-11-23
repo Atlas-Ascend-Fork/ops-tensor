@@ -12,9 +12,9 @@
  * \file block_mmad_matmul_fixpipe_opti.h
  * \brief BlockMmad specialization for fixpipe-optimized matmul without B full-load.
  *
- * A and B both use pipeline buffering with l1Stages_ stages. Output uses fixpipe (L0C -> UB)
- * with AIC/AIV cross-core synchronization. Uses offset arrays and tile lock primitives,
- * mirroring the block_mmad_matmul_basic.h style.
+ * A/B use the standard stage layout. An optional weight cache keeps one B panel in
+ * stage zero with independent MTE2/MTE1 synchronization. Output always uses the
+ * Fixpipe UB-slot handshake, independently of the operand reuse policy.
  */
 
 #pragma once
@@ -119,6 +119,8 @@ public:
         abL1LoopCnt_ = 0;
         l0cPingPong_ = 0;
         cvPingPong_ = 0;
+        reuseWeight_ = false;
+        cachedWeightAddr_ = nullptr;
 
         uint64_t aL1OneSize = mL1_ * kL1_ * sizeof(AType);
         uint64_t bL1OneSize = nL1_ * kL1_ * sizeof(BType);
@@ -132,10 +134,13 @@ public:
         }
     }
 
+    // Keep enableReuseWeight unchanged between Init calls. Reuse requires one or two L1 stages,
+    // no bias, and immutable weight panels whose shape/layout are fixed for each GM address.
     template <typename TensorA, typename TensorB, typename TensorBias, typename TensorC>
     __aicore__ inline void operator()(TensorA& gmA, TensorB& gmB, TensorBias& gmBias, TensorC& tensorC,
-                                      TupleShape& tileShape)
+                                      TupleShape& tileShape, bool enableReuseWeight = false)
     {
+        reuseWeight_ = enableReuseWeight;
         uint64_t curM = asc::te::get<MNK_M>(tileShape);
         uint64_t curN = asc::te::get<MNK_N>(tileShape);
         uint64_t curK = asc::te::get<MNK_K>(tileShape);
@@ -172,10 +177,11 @@ public:
                 const uint64_t curKL1 = (iter0 + 1 == kL1Iter) ? (curK - curKL1Base * iter0) : curKL1Base;
                 uint16_t l1BufId = abL1LoopCnt_ & (l1Stages_ - 1);
                 uint16_t btBufId = abL1LoopCnt_ & 0x1;
+                uint16_t bL1BufId = reuseWeight_ ? 0 : l1BufId;
 
                 TileShape l1Shape{curM, tileN, curKL1};
                 const uint64_t kOffset = iter0 * curKL1Base;
-                auto l1TensorTuple = CopyL1FromGM(gmA, gmB, gmBias, l1Shape, l1BufId, kOffset);
+                auto l1TensorTuple = CopyL1FromGM(gmA, gmB, gmBias, l1Shape, l1BufId, bL1BufId, kOffset);
                 auto tensorAL1 = asc::te::get<0>(l1TensorTuple);
                 auto tensorBL1 = asc::te::get<1>(l1TensorTuple);
                 auto tensorBiasL1 = asc::te::get<2>(l1TensorTuple);
@@ -191,8 +197,14 @@ public:
 
                     TileShape l0Shape{curM, tileN, curK0};
                     bool needBias = NeedProcessBias(iter0, iter1);
+                    if (reuseWeight_) {
+                        Gemm::LockMte1(WEIGHT_L1_BUFFER_ID_BASE);
+                    }
                     auto l0TensorTuple = CopyL0FromL1(tensorAL1, tensorBL1, tensorBiasL1, l0Shape, l0BufferId, l1BufId,
                                                       aL1KOffset, bL1KOffset, bL1NOffset, needBias, btBufId);
+                    if (reuseWeight_) {
+                        Gemm::UnLockMte1(WEIGHT_L1_BUFFER_ID_BASE);
+                    }
                     auto tensorAL0 = asc::te::get<0>(l0TensorTuple);
                     auto tensorBL0 = asc::te::get<1>(l0TensorTuple);
                     auto tensorBiasL0 = asc::te::get<2>(l0TensorTuple);
@@ -228,6 +240,14 @@ public:
     }
 
 private:
+    static constexpr uint16_t WEIGHT_L1_BUFFER_ID_BASE = L1_BUFFER_ID_BASE + DOUBLE_BUFFER_COUNT;
+
+    template <typename TensorB>
+    __aicore__ inline bool NeedReloadWeight(const TensorB& panel) const
+    {
+        return !reuseWeight_ || panel.data().get() != cachedWeightAddr_;
+    }
+
     __aicore__ inline bool NeedProcessBias(uint64_t kIter0, uint64_t kIter1)
     {
         return isBias_ && kIter0 == 0 && kIter1 == 0;
@@ -235,7 +255,8 @@ private:
 
     template <typename TensorA, typename TensorB, typename TensorBias>
     __aicore__ inline auto CopyL1FromGM(const TensorA& tensorA, const TensorB& tensorB, const TensorBias& tensorBias,
-                                        const TileShape& l1Shape, uint16_t l1BufferId, uint64_t kOffset)
+                                        const TileShape& l1Shape, uint16_t l1BufferId, uint16_t bL1BufferId,
+                                        uint64_t kOffset)
     {
         constexpr bool IS_SLICE_POLICY = NON_CONTIGUOUS_TYPE ==
                                          static_cast<uint64_t>(NoContiguousType::NON_CONTIGUOUS_TYPE_SLICE);
@@ -250,7 +271,6 @@ private:
         auto layoutAL1 = MakeLayoutAL1{}(curM, curKL1);
         auto tensorAL1 = asc::te::make_tensor(
             asc::te::make_mem_ptr<asc::te::location::l1, AType>(aL1Buffer_[l1BufferId]), layoutAL1);
-
         if constexpr (IS_SLICE_POLICY) {
             auto layoutGmA = tensorA.layout();
             auto sliceM = asc::te::get<0>(asc::te::get<1>(layoutGmA.shape()));
@@ -263,12 +283,24 @@ private:
             auto gmTileA = tensorA.slice(asc::te::make_coord(0, kOffset), asc::te::make_shape(curM, curKL1));
             asc::te::copy(copyGM2L1, tensorAL1, gmTileA);
         }
+        if (reuseWeight_) {
+            Gemm::UnLockMte2(l1BufferId + L1_BUFFER_ID_BASE);
+        }
 
         auto layoutBL1 = MakeLayoutBL1{}(curKL1, curN);
         auto tensorBL1 = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::l1, BType>(bL1Buffer_[l1BufferId]), layoutBL1);
+            asc::te::make_mem_ptr<asc::te::location::l1, BType>(bL1Buffer_[bL1BufferId]), layoutBL1);
         auto gmTileB = tensorB.slice(asc::te::make_coord(kOffset, 0), asc::te::make_shape(curKL1, curN));
-        asc::te::copy(copyGM2L1, tensorBL1, gmTileB);
+        if (NeedReloadWeight(gmTileB)) {
+            if (reuseWeight_) {
+                Gemm::LockMte2(bL1BufferId + WEIGHT_L1_BUFFER_ID_BASE);
+            }
+            asc::te::copy(copyGM2L1, tensorBL1, gmTileB);
+            if (reuseWeight_) {
+                Gemm::UnLockMte2(bL1BufferId + WEIGHT_L1_BUFFER_ID_BASE);
+                cachedWeightAddr_ = gmTileB.data().get();
+            }
+        }
 
         auto layoutBiasL1 = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, curN);
         auto tensorBiasL1 = asc::te::make_tensor(
@@ -277,7 +309,9 @@ private:
             asc::te::copy(copyGM2L1, tensorBiasL1, tensorBias);
         }
 
-        Gemm::UnLockMte2(l1BufferId + L1_BUFFER_ID_BASE);
+        if (!reuseWeight_) {
+            Gemm::UnLockMte2(l1BufferId + L1_BUFFER_ID_BASE);
+        }
 
         return AscendC::Std::make_tuple(tensorAL1, tensorBL1, tensorBiasL1);
     }
@@ -428,6 +462,8 @@ private:
     bool enableL0cPingPong_{false};
     bool splitM_{false};
     uint64_t cvPingPong_{0};
+    bool reuseWeight_{false};
+    const __gm__ BType* cachedWeightAddr_{nullptr};
 
     uint64_t aL1Buffer_[4] = {0};
     uint64_t bL1Buffer_[4] = {0};

@@ -16,13 +16,13 @@
 #pragma once
 
 #include "kernel_basic_intf.h"
+#include "c_api/spr/spr.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "tensor_api/tensor.h"
 
 #include "blaze/epilogue/block/block_epilogue_compat.h"
 #include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_mmad.h"
-#include "blaze/gemm/block/block_mmad_matmul_basic.h"
 #include "blaze/gemm/block/block_scheduler_grouped_matmul.h"
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/tile/compute.h"
@@ -63,9 +63,14 @@ public:
     static constexpr bool WEIGHT_NZ = BlockMmad::WEIGHT_NZ_FORMAT;
     static constexpr bool ENABLE_INPLACE_ADD = DispatchPolicy::OUTPUT_MODE == MatmulOutputMode::INPLACE_ADD;
     static constexpr bool ENABLE_GELU = DispatchPolicy::FUSED_OP_TYPE == Gemm::OP_TYPE_GELU;
+    static constexpr bool ENABLE_QUANT = DispatchPolicy::FUSED_OP_TYPE == Gemm::OP_TYPE_QUANT;
     using EpilogueInputType = AscendC::Std::conditional_t<ENABLE_GELU, float, CType>;
     static_assert(!(ENABLE_GELU && ENABLE_INPLACE_ADD),
                   "GMM GELU epilogue does not support the inplace-add output mode.");
+    static_assert(!(ENABLE_QUANT && (ENABLE_GELU || ENABLE_INPLACE_ADD)),
+                  "Fixpipe-input epilogues cannot use the GELU or inplace-add protocol.");
+    static_assert(!ENABLE_QUANT || !AscendC::Std::is_same_v<BlockEpilogue, Blaze::Epilogue::Block::BlockEpilogueEmpty>,
+                  "Fixpipe epilogue mode requires a non-empty block epilogue.");
 
     struct GMMTiling {
         uint32_t groupNum{0};
@@ -93,60 +98,113 @@ public:
                 return;
             }
         }
-        auto blockNum = static_cast<int64_t>(AscendC::GetBlockNum());
-        if (blockNum == 0 || params.gmmParams.groupNum == 0 || !IsValidGroupParams(params)) {
+        if (AscendC::GetBlockNum() == 0 || params.gmmParams.groupNum == 0 || !IsValidGroupParams(params)) {
             return;
         }
-
-        Init(params);
-        // Sparse groupList is [E, 2]: each entry is [actualGroupIdx, groupSize], with non-zero
-        // groups front-loaded. Flatten both columns into the linear GM layout.
-        const auto groupListSize = static_cast<int64_t>(params.gmmParams.groupNum) *
-                                   (params.gmmParams.groupListType == GROUP_LIST_TYPE_SPARSE ?
-                                        SPARSE_GROUP_LIST_ITEM_STRIDE :
-                                        static_cast<int64_t>(1));
-        auto groupListLayout = asc::te::make_layout(asc::te::make_shape(groupListSize), asc::te::make_shape(1L));
-        auto gmGroupList = asc::te::make_tensor(asc::te::make_mem_ptr<AscendC::Te::Location::GM>(
-                                                    reinterpret_cast<__gm__ int64_t*>(params.mmParams.groupListGmAddr)),
-                                                groupListLayout);
-        BlockScheduler bs(params.schedulerParams);
-
-        if ASCEND_IS_AIV {
-            if constexpr (ENABLE_GELU) {
-                ProcessGeluGroups(params, bs, gmGroupList);
-            } else {
-                ProcessEmptyGroups(params, bs, gmGroupList);
-            }
-            return;
-        }
-
-        EnableAtomicAdd();
-        for (uint32_t loopIdx = 0; loopIdx < params.gmmParams.groupNum; ++loopIdx) {
-            uint32_t groupIdx = loopIdx;
-            if (params.gmmParams.groupListType == GROUP_LIST_TYPE_SPARSE &&
-                params.gmmParams.groupType == GROUP_TYPE_SPLIT_M) {
-                groupIdx = static_cast<uint32_t>(
-                    gmGroupList[static_cast<int64_t>(loopIdx) * SPARSE_GROUP_LIST_ITEM_STRIDE +
-                                SPARSE_GROUP_LIST_GROUP_IDX_OFFSET]);
-                bs.SetGroupIdx(groupIdx);
-            }
-            auto splitValue = GetSplitValueFromGroupList(params, gmGroupList, loopIdx);
-            auto groupCoord = PrepareGroup(params, bs, groupIdx, splitValue);
-
-            auto problemM = asc::te::get<MNK_M>(problemShape_);
-            auto problemN = asc::te::get<MNK_N>(problemShape_);
-            auto problemK = asc::te::get<MNK_K>(problemShape_);
-            if (problemM <= 0 || problemN <= 0 || problemK <= 0) {
-                // Sparse groupList front-loads non-zero groups; the first empty group marks the end.
-                if (params.gmmParams.groupType == GROUP_TYPE_SPLIT_M &&
-                    params.gmmParams.groupListType == GROUP_LIST_TYPE_SPARSE && problemM <= 0) {
-                    break;
+        if constexpr (ENABLE_QUANT) {
+            if ASCEND_IS_AIV {
+                if (!params.mmParams.splitM && AscendC::GetSubBlockIdx() != 0) {
+                    return;
                 }
-                continue;
             }
-            ProcessSingleGroup(params, bs, groupCoord, groupIdx);
         }
-        if constexpr (ENABLE_GELU) {
+
+        asc_override_strategy saturationStrategy = asc_override_strategy::USE_API;
+        {
+            BlockEpilogue epilogue;
+            Init(params, epilogue);
+            // Sparse groupList is [E, 2]: each entry is [actualGroupIdx, groupSize], with non-zero
+            // groups front-loaded. Flatten both columns into the linear GM layout.
+            const auto groupListSize = static_cast<int64_t>(params.gmmParams.groupNum) *
+                                       (params.gmmParams.groupListType == GROUP_LIST_TYPE_SPARSE ?
+                                            SPARSE_GROUP_LIST_ITEM_STRIDE :
+                                            static_cast<int64_t>(1));
+            auto groupListLayout = asc::te::make_layout(asc::te::make_shape(groupListSize), asc::te::make_shape(1L));
+            auto gmGroupList = asc::te::make_tensor(
+                asc::te::make_mem_ptr<AscendC::Te::Location::GM>(
+                    reinterpret_cast<__gm__ int64_t*>(params.mmParams.groupListGmAddr)),
+                groupListLayout);
+            BlockScheduler bs(params.schedulerParams);
+
+            if constexpr (ENABLE_QUANT) {
+                if ASCEND_IS_AIV {
+                    saturationStrategy = asc_get_saturation_strategy();
+                    asc_set_saturation_strategy(asc_override_strategy::USE_API);
+                    epilogue.Init(params.epilogueParams);
+                    // Every participating AIV supplies one initial credit per UB slot.
+                    for (uint16_t slot = 0; slot < params.mmParams.ubDB; ++slot) {
+                        Sync::NotifyCube<Sync::SYNC_MODE_INTRA, PIPE_MTE3>(Sync::FIXPIPE_AIV_ACK_FLAG_BASE + slot);
+                    }
+                }
+            } else {
+                if ASCEND_IS_AIV {
+                    if constexpr (ENABLE_GELU) {
+                        ProcessGeluGroups(params, bs, gmGroupList, epilogue);
+                    } else {
+                        ProcessEmptyGroups(params, bs, gmGroupList);
+                    }
+                    return;
+                }
+            }
+
+            // Keep the group-list cursor in original M rows, independent of the scheduling view.
+            int64_t rowEnd = 0;
+            EnableAtomicAdd();
+            for (uint32_t loopIdx = 0; loopIdx < params.gmmParams.groupNum; ++loopIdx) {
+                uint32_t groupIdx = loopIdx;
+                if (params.gmmParams.groupListType == GROUP_LIST_TYPE_SPARSE &&
+                    params.gmmParams.groupType == GROUP_TYPE_SPLIT_M) {
+                    groupIdx = static_cast<uint32_t>(
+                        gmGroupList[static_cast<int64_t>(loopIdx) * SPARSE_GROUP_LIST_ITEM_STRIDE +
+                                    SPARSE_GROUP_LIST_GROUP_IDX_OFFSET]);
+                    bs.SetGroupIdx(groupIdx);
+                }
+                int64_t splitValue;
+                if constexpr (ENABLE_QUANT) {
+                    const int64_t totalM = asc::te::get<MNK_M>(params.problemShape);
+                    const bool cumulative = params.gmmParams.groupListType == GROUP_LIST_TYPE_OFFSET;
+                    const int64_t value = gmGroupList[loopIdx];
+                    // Check before cumulative subtraction; finish only the already-submitted prefix.
+                    if (value < (cumulative ? rowEnd : 0) || value > (cumulative ? totalM : totalM - rowEnd)) {
+                        break;
+                    }
+                    splitValue = cumulative ? value - rowEnd : value;
+                    rowEnd += splitValue;
+                } else {
+                    splitValue = GetSplitValueFromGroupList(params, gmGroupList, loopIdx);
+                }
+                auto groupCoord = PrepareGroup(params, bs, groupIdx, splitValue);
+
+                auto problemM = asc::te::get<MNK_M>(problemShape_);
+                auto problemN = asc::te::get<MNK_N>(problemShape_);
+                auto problemK = asc::te::get<MNK_K>(problemShape_);
+                if (problemM <= 0 || problemN <= 0 || problemK <= 0) {
+                    // Sparse groupList front-loads non-zero groups; the first empty group marks the end.
+                    if (params.gmmParams.groupType == GROUP_TYPE_SPLIT_M &&
+                        params.gmmParams.groupListType == GROUP_LIST_TYPE_SPARSE && problemM <= 0) {
+                        break;
+                    }
+                    continue;
+                }
+                if constexpr (ENABLE_QUANT) {
+                    ProcessFixpipeSingleGroup(params, bs, problemShape_, groupCoord, epilogue);
+                } else {
+                    ProcessSingleGroup(params, bs, groupCoord, groupIdx, epilogue);
+                }
+            }
+        } // Finish all groups before epilogue destruction and Vector-mode restoration.
+        if constexpr (ENABLE_QUANT) {
+            if ASCEND_IS_AIV {
+                asc_set_saturation_strategy(saturationStrategy);
+            }
+            if ASCEND_IS_AIC {
+                // Consume the final returned credit, or the initial credit of an unused slot.
+                for (uint16_t slot = 0; slot < params.mmParams.ubDB; ++slot) {
+                    Sync::WaitForVector<Sync::SYNC_MODE_INTRA, PIPE_FIX>(Sync::FIXPIPE_AIV_ACK_FLAG_BASE + slot,
+                                                                         params.mmParams.splitM != 0);
+                }
+            }
+        } else if constexpr (ENABLE_GELU) {
             if ASCEND_IS_AIC {
                 const uint16_t slotCount = params.mmParams.ubDB > 1 ? static_cast<uint16_t>(2U) :
                                                                       static_cast<uint16_t>(1U);
@@ -186,11 +244,68 @@ private:
     using MakeLinearLayout = asc::te::frame_layout_format<asc::te::nd_ext_layout_ptn,
                                                           asc::te::layout_trait_default<CType>>;
 
-    __aicore__ inline void Init(const Params& params)
+    __aicore__ inline void ProcessFixpipeSingleGroup(const Params& params, BlockScheduler& scheduler,
+                                                     const ProblemShape& groupShape, const GroupCoord& offsets,
+                                                     BlockEpilogue& epilogue)
+    {
+        const int64_t r = asc::te::get<MNK_K>(groupShape);
+        const int64_t batchCount = asc::te::get<MNK_B>(groupShape);
+        const int64_t viewM = scheduler.GetGroupViewM();
+        auto layoutA = asc::te::make_pattern_layout<
+            asc::te::nd_layout_ptn, asc::te::layout_trait<AType, AscendC::Std::Int<asc::te::c0_element<AType>>>>(
+            asc::te::make_shape(batchCount, asc::te::make_shape(viewM, r)),
+            asc::te::make_stride(r, asc::te::make_stride(batchCount * r, asc::te::_1{})));
+        auto layoutB = MakeLayoutB{}(batchCount, r, r);
+        auto gmA = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ AType*>(params.mmParams.aGmAddr) +
+                                                         asc::te::get<MNK_M>(offsets)),
+            layoutA);
+        auto gmB = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ BType*>(params.mmParams.bGmAddr) +
+                                                         asc::te::get<MNK_N>(offsets)),
+            layoutB);
+        auto gmBias = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(
+                                               reinterpret_cast<__gm__ BiasType*>(params.mmParams.biasGmAddr)),
+                                           MakeLayoutBias{}(1L, r));
+        const int64_t core = static_cast<int64_t>(GetCurrentBlockIdx());
+        const int64_t cores = AscendC::GetBlockNum();
+        for (int64_t task = scheduler.GetFirstBlockIdx(core); task < scheduler.GetBlockNums(); task += cores) {
+            auto shape = scheduler.template GetBlockShape<TRANS_B, BType>(task);
+            const auto coord = scheduler.GetBlockCoord(task);
+            const int64_t rows = asc::te::get<MNK_M>(shape);
+            const auto columns = asc::te::get<MNK_N>(shape);
+            const auto k = asc::te::get<MNK_K>(shape);
+            const auto row = asc::te::get<MNK_M>(coord);
+            const auto col = asc::te::get<MNK_N>(coord);
+            const auto batch = asc::te::get<MNK_B>(coord);
+            if (rows <= 0 || columns <= 0) {
+                continue;
+            }
+            if ASCEND_IS_AIC {
+                auto a = asc::te::squeeze<0>(gmA.slice(AscendC::MakeCoord(batch, AscendC::MakeCoord(row, 0L)),
+                                                       AscendC::MakeShape(1L, AscendC::MakeShape(rows, k))));
+                auto rotation = asc::te::squeeze<0>(gmB.slice(AscendC::MakeCoord(batch, AscendC::MakeCoord(0L, col)),
+                                                              AscendC::MakeShape(1L, AscendC::MakeShape(k, columns))));
+                auto bias = gmBias.slice(AscendC::MakeCoord(0L, col), AscendC::MakeShape(1L, columns));
+                auto output = epilogue.GetAccumulatorTensor({rows, columns, 0});
+                blockMmad_(a, rotation, bias, output, shape, ENABLE_QUANT);
+            }
+            if ASCEND_IS_AIV {
+                epilogue(shape, scheduler.GetOutputBlockCoord(task));
+            }
+        }
+    }
+
+    __aicore__ inline void Init(const Params& params, BlockEpilogue& epilogue)
     {
         problemShape_ = params.problemShape;
+        preOffset_ = 0;
         if ASCEND_IS_AIC {
             blockMmad_.Init(params.mmParams);
+        }
+        if constexpr (ENABLE_QUANT) {
+            static_assert(AscendC::Std::is_same_v<typename BlockEpilogue::DataTypeIn, CType>,
+                          "Fixpipe output type must match the epilogue input type.");
         }
         if constexpr (ENABLE_GELU) {
             static_assert(AscendC::Std::is_same_v<typename BlockEpilogue::DataTypeIn, EpilogueInputType>,
@@ -203,7 +318,7 @@ private:
             if ASCEND_IS_AIV {
                 BlockEpilogueParams epilogueParams;
                 epilogueParams.splitM = params.mmParams.splitM;
-                blockEpilogue_.Init(epilogueParams);
+                epilogue.Init(epilogueParams);
                 const bool splitM = params.mmParams.splitM != 0;
                 if (splitM || AscendC::GetSubBlockIdx() == 0) {
                     constexpr uint16_t slotCount = static_cast<uint16_t>(BlockEpilogue::UB_BUFFER_DEPTH);
@@ -266,6 +381,11 @@ private:
     {
         auto validGroupListType = params.gmmParams.groupListType == GROUP_LIST_TYPE_OFFSET ||
                                   params.gmmParams.groupListType == GROUP_LIST_TYPE_COUNT;
+        if constexpr (ENABLE_QUANT) {
+            return params.gmmParams.groupType == GROUP_TYPE_SPLIT_M && validGroupListType &&
+                   params.mmParams.groupListGmAddr != nullptr && asc::te::get<MNK_K>(params.problemShape) > 0 &&
+                   asc::te::get<MNK_B>(params.problemShape) > 0;
+        }
         // inplace add only support split-k, split-k do not support groupList sparse
         if constexpr (ENABLE_INPLACE_ADD) {
             return params.gmmParams.groupType == GROUP_TYPE_SPLIT_K && validGroupListType &&
@@ -285,6 +405,13 @@ private:
 
     __aicore__ inline void SetProblemShape(const Params& params, uint32_t groupIdx, int64_t splitValue)
     {
+        if constexpr (ENABLE_QUANT) {
+            // Preserve the original group shape; folding and offsets belong to the scheduler.
+            problemShape_ = ProblemShape{splitValue, asc::te::get<MNK_N>(params.problemShape),
+                                         asc::te::get<MNK_K>(params.problemShape),
+                                         asc::te::get<MNK_B>(params.problemShape)};
+            return;
+        }
         if constexpr (ENABLE_INPLACE_ADD) {
             auto problemM = asc::te::get<MNK_M>(params.problemShape);
             auto problemN = asc::te::get<MNK_N>(params.problemShape);
@@ -475,7 +602,7 @@ private:
 
     template <typename GroupListTensor>
     __aicore__ inline void ProcessGeluGroups(const Params& params, BlockScheduler& bs,
-                                             const GroupListTensor& gmGroupList)
+                                             const GroupListTensor& gmGroupList, BlockEpilogue& epilogue)
     {
         // MIX_AIC_1_2 still launches both AIV sub-blocks. In single-AIV mode AIV1 must not
         // mirror the scheduler or participate in READY/ACK, otherwise it races AIV0 on UB and GM.
@@ -532,7 +659,7 @@ private:
                 if (blockM <= 0 || blockN <= 0) {
                     continue; // skipped by the AIC as well, no signal was sent
                 }
-                blockEpilogue_(cPtr + blockMOffset * n + blockNOffset, blockM, blockN, n, baseN_);
+                epilogue(cPtr + blockMOffset * n + blockNOffset, blockM, blockN, n, baseN_);
             }
         }
     }
@@ -563,7 +690,7 @@ private:
     }
 
     __aicore__ inline void ProcessSingleGroup(const Params& params, BlockScheduler& bs, const GroupCoord& groupCoord,
-                                              uint32_t groupIdx)
+                                              uint32_t groupIdx, BlockEpilogue& epilogue)
     {
         auto m = asc::te::get<MNK_M>(problemShape_);
         auto n = asc::te::get<MNK_N>(problemShape_);
@@ -624,7 +751,7 @@ private:
                                             asc::te::make_shape(static_cast<int64_t>(1), blockN));
             if constexpr (ENABLE_GELU) {
                 if constexpr (Blaze::Epilogue::Block::HasGetAccumulatorTensor<BlockEpilogue>::value) {
-                    auto ubBlockC = blockEpilogue_.GetAccumulatorTensor({blockM, blockN, 0});
+                    auto ubBlockC = epilogue.GetAccumulatorTensor({blockM, blockN, 0});
                     blockMmad_(gmBlockA, gmBlockB, gmBlockBias, ubBlockC, blockShape);
                 } else {
                     auto ubBlockC = asc::te::make_tensor(
@@ -639,7 +766,6 @@ private:
     }
 
     BlockMmad blockMmad_;
-    BlockEpilogue blockEpilogue_;
     ProblemShape problemShape_{};
     // Cumulative offset used to resolve per-group sizes from cumulative groupList entries.
     int64_t preOffset_{0};

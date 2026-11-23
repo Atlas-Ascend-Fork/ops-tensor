@@ -16,12 +16,15 @@
 #pragma once
 
 #include "kernel_basic_intf.h"
+#include "c_api/spr/spr.h"
 
+#include "blaze/epilogue/block/block_epilogue_empty.h"
 #include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_mmad_matmul_basic.h"
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {
@@ -40,6 +43,11 @@ public:
     using ProblemShape = ProblemShape_;
     using BlockScheduler = BlockScheduler_;
     using BlockEpilogue = BlockEpilogue_;
+    using DispatchPolicy = typename BlockMmad::DispatchPolicy;
+    static constexpr bool NEED_EPILOGUE = !AscendC::Std::is_same_v<BlockEpilogue, Block::BlockEpilogueEmpty>;
+    static constexpr bool ENABLE_QUANT = DispatchPolicy::FUSED_OP_TYPE == Gemm::OP_TYPE_QUANT;
+    static_assert(NEED_EPILOGUE == ENABLE_QUANT,
+                  "TBMM epilogue and dispatch policy must select the same execution path");
 
     // mmad
     using BlockMmadParams = typename BlockMmad::Params;
@@ -57,18 +65,21 @@ public:
     using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<asc::te::c0_element<BType>>>;
     using MakeLayoutBias = asc::te::frame_layout_format<LayoutBias, AscendC::Std::Int<asc::te::c0_element<BiasType>>>;
 
-    static_assert(AscendC::Std::is_one_of_v<
-                      AscendC::Std::tuple<AType, BType, CType, BiasType>, AscendC::Std::tuple<half, half, half, half>,
-                      AscendC::Std::tuple<half, half, half, float>, AscendC::Std::tuple<half, half, signed char, half>,
-                      AscendC::Std::tuple<half, half, signed char, float>,
-                      AscendC::Std::tuple<bfloat16_t, bfloat16_t, bfloat16_t, bfloat16_t>,
-                      AscendC::Std::tuple<float, float, float, float>>,
-                  "Unsupported (AType, BType, CType, BiasType) combination");
+    static_assert(
+        NEED_EPILOGUE ||
+            AscendC::Std::is_one_of_v<
+                AscendC::Std::tuple<AType, BType, CType, BiasType>, AscendC::Std::tuple<half, half, half, half>,
+                AscendC::Std::tuple<half, half, half, float>, AscendC::Std::tuple<half, half, signed char, half>,
+                AscendC::Std::tuple<half, half, signed char, float>,
+                AscendC::Std::tuple<bfloat16_t, bfloat16_t, bfloat16_t, bfloat16_t>,
+                AscendC::Std::tuple<float, float, float, float>>,
+        "Unsupported (AType, BType, CType, BiasType) combination");
     static_assert(!AscendC::Std::is_one_of_v<LayoutA, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn> &&
                       !AscendC::Std::is_one_of_v<LayoutC, asc::te::nz_layout_ptn, asc::te::zn_layout_ptn>,
                   "LayoutA and LayoutC cannot be nz_layout_ptn or zn_layout_ptn");
 
     struct Params {
+        // Standard TBMM view: (M, N, K, batch, splitBatch).
         ProblemShape problemShape;
         BlockMmadParams mmadParams;
         BlockEpilogueParams epilogueParams;
@@ -78,35 +89,76 @@ public:
 
     __aicore__ inline void operator()(Params& params)
     {
-        if ASCEND_IS_AIV {
-            return;
+        if constexpr (!NEED_EPILOGUE) {
+            if ASCEND_IS_AIV {
+                return;
+            }
+        } else {
+            static_assert(AscendC::Std::is_same_v<typename BlockEpilogue::DataTypeIn, CType>,
+                          "BlockMmad output and epilogue input types must match");
         }
         Init(params);
-
-        // 初始化blockScheduler
+        const int64_t coreNums = AscendC::GetBlockNum();
+        if (coreNums <= 0) {
+            return;
+        }
         BlockScheduler bs(params.problemShape, params.schParams);
-        int64_t curBlockIdx = AscendC::GetBlockIdx();
-        int64_t realCoreNums = bs.GetCoreNums(); // 实际需要的核数
-        if (curBlockIdx >= realCoreNums) {
+        const int64_t core = NEED_EPILOGUE ? Gemm::GetCurrentBlockIdx() : AscendC::GetBlockIdx();
+        const int64_t totalBlocks = bs.GetBlockNums();
+        if (core >= bs.GetCoreNums()) {
             return;
         }
 
-        if (params.schParams.isHf32) {
-            AscendC::SetHF32Mode(1);
-            AscendC::SetHF32TransMode(1);
+        asc_override_strategy saturationStrategy = asc_override_strategy::USE_API;
+        if constexpr (NEED_EPILOGUE) {
+            if ASCEND_IS_AIV {
+                if (!params.mmadParams.splitM && AscendC::GetSubBlockIdx() != 0) {
+                    return;
+                }
+            }
         }
 
+        Blaze::Gemm::SetHF32(params.schParams.isHf32);
         BlockMmad blockMmad;
-        blockMmad.Init(params.mmadParams);
+        {
+            BlockEpilogue epilogue;
+            if constexpr (NEED_EPILOGUE) {
+                if ASCEND_IS_AIV {
+                    saturationStrategy = asc_get_saturation_strategy();
+                    asc_set_saturation_strategy(asc_override_strategy::USE_API);
+                    epilogue.Init(params.epilogueParams);
+                    // Every participating AIV supplies one initial credit per UB slot.
+                    for (uint16_t slot = 0; slot < params.mmadParams.ubDB; ++slot) {
+                        Sync::NotifyCube<Sync::SYNC_MODE_INTRA, PIPE_MTE3>(Sync::FIXPIPE_AIV_ACK_FLAG_BASE + slot);
+                    }
+                }
+            }
+            if ASCEND_IS_AIC {
+                blockMmad.Init(params.mmadParams);
+            }
 
-        MatmulProcess(params, blockMmad, bs, curBlockIdx, AscendC::GetBlockNum(), bs.GetBlockNums());
-
-        UnsetHf32();
+            MatmulProcess(params, blockMmad, bs, epilogue, core, coreNums, totalBlocks);
+        } // Finish pending epilogue writebacks before restoring the Vector mode.
+        if constexpr (NEED_EPILOGUE) {
+            if ASCEND_IS_AIV {
+                asc_set_saturation_strategy(saturationStrategy);
+            }
+            if ASCEND_IS_AIC {
+                // Consume the final returned credit, or the initial credit of an unused slot.
+                for (uint16_t slot = 0; slot < params.mmadParams.ubDB; ++slot) {
+                    Sync::WaitForVector<Sync::SYNC_MODE_INTRA, PIPE_FIX>(Sync::FIXPIPE_AIV_ACK_FLAG_BASE + slot,
+                                                                         params.mmadParams.splitM != 0);
+                }
+            }
+        } else {
+            UnsetHf32();
+        }
     }
 
 private:
     __aicore__ inline void MatmulProcess(Params const& params, BlockMmad& blockMmad, BlockScheduler& bs,
-                                         int64_t curBlockIdx, int64_t coreNums, int64_t totalBlockNums)
+                                         BlockEpilogue& epilogue, int64_t curBlockIdx, int64_t coreNums,
+                                         int64_t totalBlockNums)
     {
         uint64_t batchStrideA = TRANS_BATCH_A ? k_ : m_ * k_;
         uint64_t mStrideA = TRANS_BATCH_A ? batch_ * k_ : k_;
@@ -129,11 +181,10 @@ private:
         auto splitBatchGmC = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(cGmAddr_),
                                                   splitBatchLayoutC);
         auto gmBias = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(biasGmAddr_), layoutBias);
+        if constexpr (!NEED_EPILOGUE) {
+            SetL2Cache(gmA, gmB, params.schParams.l2CacheMode);
+        }
 
-        // 使能双页表
-        SetL2Cache(gmA, gmB, params.schParams.l2CacheMode);
-
-        // Process tiles in ping-pong mode
         for (int64_t blockIdx = curBlockIdx; blockIdx < totalBlockNums; blockIdx += coreNums) {
             auto blockShape = bs.template GetBlockShape<TRANS_B, BType>(blockIdx); // 非全载
             auto blockCoord = bs.GetBlockCoord(blockIdx);                          // (m, n, k, b)
@@ -145,36 +196,37 @@ private:
             if (shapeM <= 0 || shapeN <= 0) {
                 continue;
             }
-            curBatchIdx_ = asc::te::get<MNK_B>(blockCoord);
-
-            // Block offset
-            auto subTensorA = gmA.slice(AscendC::MakeCoord(curBatchIdx_, AscendC::MakeCoord(coordM, 0L)),
-                                        AscendC::MakeShape(1L, AscendC::MakeShape(shapeM, shapeK)));
-            auto gmBlockA = asc::te::squeeze<0>(subTensorA);
-            auto subTensorB = gmB.slice(AscendC::MakeCoord(curBatchIdx_, AscendC::MakeCoord(0L, coordN)),
-                                        AscendC::MakeShape(1L, AscendC::MakeShape(shapeK, shapeN)));
-            auto gmBlockB = asc::te::squeeze<0>(subTensorB);
-            auto subTensorC = gmC.slice(AscendC::MakeCoord(curBatchIdx_, AscendC::MakeCoord(coordM, coordN)),
-                                        AscendC::MakeShape(1L, AscendC::MakeShape(shapeM, shapeN)));
-            auto gmBlockC = asc::te::squeeze<0>(subTensorC);
-
-            auto outerBatchIdx = curBatchIdx_ / innerBatch;
-            auto innerBatchIdx = curBatchIdx_ % innerBatch;
-            auto splitBatchSubTensorC = splitBatchGmC.slice(
-                AscendC::MakeCoord(outerBatchIdx, innerBatchIdx, AscendC::MakeCoord(coordM, coordN)),
-                AscendC::MakeShape(asc::te::_1{}, asc::te::_1{}, AscendC::MakeShape(shapeM, shapeN)));
-            auto splitBatchGmBlockC = asc::te::squeeze<0, 1>(splitBatchSubTensorC);
-
+            auto batchIdx = asc::te::get<MNK_B>(blockCoord);
+            auto gmBlockA = asc::te::squeeze<0>(gmA.slice(AscendC::MakeCoord(batchIdx, AscendC::MakeCoord(coordM, 0L)),
+                                                          AscendC::MakeShape(1L, AscendC::MakeShape(shapeM, shapeK))));
+            auto gmBlockB = asc::te::squeeze<0>(gmB.slice(AscendC::MakeCoord(batchIdx, AscendC::MakeCoord(0L, coordN)),
+                                                          AscendC::MakeShape(1L, AscendC::MakeShape(shapeK, shapeN))));
             auto gmBlockBias = gmBias.slice(AscendC::MakeCoord(0L, coordN), AscendC::MakeShape(1L, shapeN));
-
-            __gm__ uint64_t* gmScalePtr = nullptr;
-            if (scaleGmAddr_ != nullptr) {
-                gmScalePtr = scaleGmAddr_ + curBatchIdx_ * n_ + coordN;
+            if ASCEND_IS_AIC {
+                if constexpr (NEED_EPILOGUE) {
+                    auto ubC = epilogue.GetAccumulatorTensor({shapeM, shapeN, 0});
+                    blockMmad(gmBlockA, gmBlockB, gmBlockBias, ubC, blockShape, ENABLE_QUANT);
+                } else {
+                    auto gmBlockC = asc::te::squeeze<0>(
+                        gmC.slice(AscendC::MakeCoord(batchIdx, AscendC::MakeCoord(coordM, coordN)),
+                                  AscendC::MakeShape(1L, AscendC::MakeShape(shapeM, shapeN))));
+                    auto splitBatchGmBlockC = asc::te::squeeze<0, 1>(splitBatchGmC.slice(
+                        AscendC::MakeCoord(batchIdx / innerBatch, batchIdx % innerBatch,
+                                           AscendC::MakeCoord(coordM, coordN)),
+                        AscendC::MakeShape(asc::te::_1{}, asc::te::_1{}, AscendC::MakeShape(shapeM, shapeN))));
+                    __gm__ uint64_t* gmScalePtr = scaleGmAddr_ == nullptr ? nullptr :
+                                                                            scaleGmAddr_ + batchIdx * n_ + coordN;
+                    if (batchSplitFactor_ > 1) {
+                        blockMmad(gmBlockA, gmBlockB, gmBlockBias, splitBatchGmBlockC, blockShape, gmScalePtr);
+                    } else {
+                        blockMmad(gmBlockA, gmBlockB, gmBlockBias, gmBlockC, blockShape, gmScalePtr);
+                    }
+                }
             }
-            if (batchSplitFactor_ > 1) {
-                blockMmad(gmBlockA, gmBlockB, gmBlockBias, splitBatchGmBlockC, blockShape, gmScalePtr);
-            } else {
-                blockMmad(gmBlockA, gmBlockB, gmBlockBias, gmBlockC, blockShape, gmScalePtr);
+            if constexpr (NEED_EPILOGUE) {
+                if ASCEND_IS_AIV {
+                    epilogue(blockShape, blockCoord);
+                }
             }
         }
     }
@@ -201,7 +253,9 @@ private:
         bGmAddr_ = reinterpret_cast<__gm__ BType*>(blockMmadParams.bGmAddr);
         cGmAddr_ = reinterpret_cast<__gm__ CType*>(blockMmadParams.cGmAddr);
         biasGmAddr_ = reinterpret_cast<__gm__ BiasType*>(blockMmadParams.biasGmAddr);
-        scaleGmAddr_ = reinterpret_cast<__gm__ uint64_t*>(blockMmadParams.scaleGmAddr);
+        if constexpr (!NEED_EPILOGUE) {
+            scaleGmAddr_ = reinterpret_cast<__gm__ uint64_t*>(blockMmadParams.scaleGmAddr);
+        }
     }
 
     __aicore__ inline void UnsetHf32() { AscendC::SetHF32Mode(0); }
@@ -228,7 +282,6 @@ private:
     __gm__ BiasType* biasGmAddr_ = nullptr;  // 可选输入，直接初始化
     __gm__ uint64_t* scaleGmAddr_ = nullptr; // 可选输入，int8输出量化scale
 
-    uint64_t curBatchIdx_ = {0};
     uint64_t m_{1};
     uint64_t n_{1};
     uint64_t k_{1};

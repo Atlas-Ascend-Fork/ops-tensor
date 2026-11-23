@@ -30,9 +30,10 @@
 
 // The ASC host pass only needs the kernel entry; parse Blaze with device BF16 types.
 #if defined(__NPU_ARCH__)
-#include "blaze/gemm/block/block_mmad_rotate_quant.h"
-#include "blaze/gemm/block/block_scheduler_rotate_quant.h"
-#include "blaze/gemm/kernel/kernel_rotate_quant.h"
+#include "blaze/gemm/block/block_mmad.h"
+#include "blaze/gemm/block/block_scheduler_matmul_basic.h"
+#include "blaze/gemm/block/block_scheduler_grouped_matmul.h"
+#include "blaze/gemm/kernel/kernel_universal.h"
 #include "blaze/epilogue/block/block_epilogue_rotate_quant.h"
 #endif
 
@@ -48,12 +49,9 @@ constexpr int64_t SCALE_ALG_DYN = 2;
 constexpr std::array<int64_t, 4> SUPPORTED_K_SIZES{32, 64, 128, 256};
 constexpr uint32_t OUTPUT_SENTINEL = 0xa5;
 constexpr uint64_t REQUIRED_UB_BYTES = 64 * 1024;
+constexpr uint32_t EPILOGUE_FIXED_BYTES = 52736;
+constexpr uint32_t SCALE_ROW_BYTES = 32;
 constexpr float FP4_E2M1_MAX = 6.0f;
-
-template <typename ElementType_>
-struct MatmulType {
-    using T = ElementType_;
-};
 
 struct RotateQuantTilingData {
     int64_t m{0};
@@ -64,25 +62,46 @@ struct RotateQuantTilingData {
     int64_t groupNum{0};
     int64_t groupListType{0};
     int64_t hasAlpha{0};
+    uint32_t ubDB{1};
 };
 
 template <typename XType_, bool EnableGrouped_>
 __global__ __aicore__ void RotateQuantKernel(GM_ADDR xGm, GM_ADDR rotationGm, GM_ADDR alphaGm, GM_ADDR groupListGm,
                                              GM_ADDR yGm, GM_ADDR scaleGm, GM_ADDR tilingGm)
 {
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
+#else
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+#endif
 #if defined(__NPU_ARCH__)
     AscendC::InitSocState();
     const auto& tiling = *reinterpret_cast<const __gm__ RotateQuantTilingData*>(tilingGm);
 
     using Layout = asc::te::nd_ext_layout_ptn;
-    using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
-    using BlockScheduler = Blaze::Gemm::Block::BlockSchedulerRotateQuant<ProblemShape, EnableGrouped_>;
-    using DispatchPolicy = Blaze::Gemm::BlockRotateQuant<Blaze::Gemm::KernelRotateQuant>;
-    using BlockMmad = Blaze::Gemm::Block::BlockMmad<DispatchPolicy, MatmulType<XType_>, Layout, MatmulType<XType_>,
-                                                    Layout, MatmulType<bfloat16_t>, Layout, MatmulType<int8_t>, Layout>;
+    using GroupedProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
+    using TbmmProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t, int64_t>;
+    using ProblemShape = AscendC::Std::conditional_t<EnableGrouped_, GroupedProblemShape, TbmmProblemShape>;
+    using GroupedScheduler = Blaze::Gemm::Block::BlockSchedulerGmmNoQuant;
+    using TbmmScheduler = Blaze::Gemm::Block::BlockSchedulerMatmulBasic<TbmmProblemShape, 0, false, true, true>;
+    using BlockScheduler = AscendC::Std::conditional_t<EnableGrouped_, GroupedScheduler, TbmmScheduler>;
+#if (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202)
+    constexpr bool SPLIT_M = false;
+#else
+    constexpr bool SPLIT_M = true;
+#endif
+    constexpr uint64_t OUTPUT_MODEL = SPLIT_M ? Blaze::Gemm::ND_ALIG_1V2_FIXPIPE : Blaze::Gemm::ND_ALIG_1V1_FIXPIPE;
+    using TbmmPolicy = Blaze::Gemm::MatmulMultiBlockFixpipeOpti<
+        OUTPUT_MODEL, Blaze::Gemm::OP_TYPE_QUANT, Blaze::Gemm::KernelMmadMultiBlockTBMM,
+        static_cast<uint64_t>(Blaze::Gemm::NoContiguousType::NON_CONTIGUOUS_TYPE_PERM_X1)>;
+    using GroupedPolicy = Blaze::Gemm::MatmulMultiBlockFixpipeOpti<OUTPUT_MODEL, Blaze::Gemm::OP_TYPE_QUANT,
+                                                                   Blaze::Gemm::KernelGroupedMmadNoQuant, 0>;
+    using DispatchPolicy = AscendC::Std::conditional_t<EnableGrouped_, GroupedPolicy, TbmmPolicy>;
+    using BlockMmad = Blaze::Gemm::Block::BlockMmad<DispatchPolicy, XType_, Layout, XType_, Layout, bfloat16_t, Layout,
+                                                    XType_, Layout>;
     using BlockEpilogue = Blaze::Epilogue::Block::BlockEpilogueRotateQuant<bfloat16_t, fp4x2_e2m1_t, int8_t>;
     using Kernel = Blaze::Gemm::Kernel::GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler>;
+    static_assert(Kernel::ENABLE_QUANT);
 
     const int64_t m = tiling.m;
     const int64_t n = tiling.n;
@@ -93,15 +112,53 @@ __global__ __aicore__ void RotateQuantKernel(GM_ADDR xGm, GM_ADDR rotationGm, GM
     const int64_t groupNum = tiling.groupNum;
     const int64_t groupListType = tiling.groupListType;
     const int64_t hasAlpha = tiling.hasAlpha;
-    const int64_t remainder = (m * (n / k)) % BLOCK_M;
-    const int64_t tailM = remainder == 0 ? BLOCK_M : remainder;
-    typename Kernel::Params params = {
-        {m, n, k, b},
-        {xGm, rotationGm, alphaGm, {m, n, k, b}, {BLOCK_M, k, k, 1}, {BLOCK_M, k, baseK, 1}, b},
-        {yGm, scaleGm, {m, n, k, b}, {}, false, -1, ROUND_MODE_RINT, SCALE_ALG_DYN, FP4_E2M1_MAX, 1.0f / FP4_E2M1_MAX},
-        {BLOCK_M, k, k, BLOCK_M, k, baseK, n / k, tailM, FP4_E2M1_MAX, 1.0f / FP4_E2M1_MAX, -1, ROUND_MODE_RINT,
-         SCALE_ALG_DYN, hasAlpha, 0},
-        {groupListGm, groupNum, groupListType}};
+    const uint32_t ubDB = tiling.ubDB;
+    typename Kernel::Params params{};
+    params.epilogueParams = {yGm,           scaleGm,      {m, n, k, b},        {},   false,  -1, ROUND_MODE_RINT,
+                             SCALE_ALG_DYN, FP4_E2M1_MAX, 1.0f / FP4_E2M1_MAX, ubDB, SPLIT_M};
+    typename BlockMmad::Params mm{};
+    mm.aGmAddr = xGm;
+    mm.bGmAddr = rotationGm;
+    mm.oriK = k;
+    mm.mL1 = mm.mL0 = BLOCK_M;
+    mm.nL1 = mm.nL0 = k;
+    mm.kL1 = k;
+    mm.kL0 = baseK;
+    mm.l1Stages = mm.l0cStages = 2;
+    mm.splitM = SPLIT_M;
+    mm.ubDB = static_cast<uint8_t>(ubDB);
+    if constexpr (EnableGrouped_) {
+        params.problemShape = {m, n, k, b};
+        params.mmParams = mm;
+        params.mmParams.groupListGmAddr = groupListGm;
+        params.gmmParams = {static_cast<uint32_t>(groupNum), 0, static_cast<uint32_t>(groupListType), 1, 1, 1, 0, 0};
+        params.schedulerParams.baseM = static_cast<int32_t>(BLOCK_M);
+        params.schedulerParams.baseN = static_cast<int32_t>(k);
+        params.schedulerParams.mTailCnt = params.schedulerParams.nTailCnt = 1;
+        params.schedulerParams.groupType = 0;
+        params.schedulerParams.groupNum = static_cast<uint32_t>(groupNum);
+        params.schedulerParams.groupListType = static_cast<uint32_t>(groupListType);
+        params.schedulerParams.initialM = b == 1 ? m * (n / k) : m;
+        params.schedulerParams.singleX = params.schedulerParams.singleWeight = params.schedulerParams.singleY = true;
+        params.schedulerParams.weightElementSize = sizeof(XType_);
+        params.schedulerParams.matrixView = GroupedScheduler::MatrixView::BatchTransposedA;
+        params.schedulerParams.splitM = SPLIT_M;
+    } else {
+        params.problemShape = {b == 1 ? m * (n / k) : m, k, k, b, 1};
+        params.mmadParams = mm;
+        params.schParams.mL1 = BLOCK_M;
+        params.schParams.nL1 = params.schParams.kL1 = k;
+        params.schParams.mBaseTailSplitCnt = params.schParams.nBaseTailSplitCnt = 1;
+        params.schParams.mTailCnt = params.schParams.nTailCnt = 1;
+    }
+    if (hasAlpha == 1) {
+        auto layout = asc::te::make_layout(asc::te::make_shape(1L), asc::te::make_shape(1L));
+        auto alpha = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ bfloat16_t*>(alphaGm)), layout);
+        params.epilogueParams.alpha = alpha[0];
+        const float value = AscendC::Cast(params.epilogueParams.alpha);
+        params.epilogueParams.needClamp = value > 0.0f && value < 1.0f;
+    }
     Kernel kernel;
     kernel(params);
 #endif
@@ -263,6 +320,13 @@ RotateQuantTilingData MakeTiling(const ExampleConfig& config, const PlatformInfo
         REQUIRED_UB_BYTES > platform.ubSize) {
         throw std::runtime_error("The example block does not fit the device buffers");
     }
+    // Each Fixpipe half-UB slot must fit the complete epilogue workspace.
+    const uint32_t workspaceBytes = (EPILOGUE_FIXED_BYTES + SCALE_ROW_BYTES * BLOCK_M + 31) / 32 * 32;
+    const uint64_t problemM = config.b == 1 ? config.m * (config.n / config.k) : config.m;
+    const uint64_t tileCount = CeilDiv<uint64_t>(problemM, BLOCK_M) * config.b;
+    const uint32_t blockNum = std::min(MAX_BLOCK_NUM, platform.aicNum);
+    const bool useTwoSlots = (!config.groupList.empty() || tileCount > blockNum) &&
+                             workspaceBytes <= platform.ubSize / 2;
     return {config.m,
             config.n,
             config.k,
@@ -270,7 +334,8 @@ RotateQuantTilingData MakeTiling(const ExampleConfig& config, const PlatformInfo
             static_cast<int64_t>(baseK),
             static_cast<int64_t>(config.groupList.size()),
             config.groupListType,
-            config.hasAlpha ? 1L : 0L};
+            config.hasAlpha ? 1L : 0L,
+            useTwoSlots ? 2U : 1U};
 }
 
 template <typename XType_, bool EnableGrouped_>
@@ -329,8 +394,9 @@ int main(int argc, const char** argv)
         aclrtStream stream{nullptr};
         ACLDeviceGuard guard(stream);
         PlatformInfo platform{};
-        if (!InitPlatformInfo(platform) || platform.aicNum == 0 || platform.aivNum < 2 * platform.aicNum) {
-            throw std::runtime_error("This example requires Ascend950 with two AIVs per AIC");
+        if (!InitPlatformInfo(platform) || platform.aicNum == 0 ||
+            (platform.aivNum != platform.aicNum && platform.aivNum != 2 * platform.aicNum)) {
+            throw std::runtime_error("This example requires one or two AIVs per AIC");
         }
         if (config.dtype == "float16") {
             RunCase<half>(config, platform, stream);

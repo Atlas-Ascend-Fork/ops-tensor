@@ -29,6 +29,8 @@ public:
     using BlockCoord = asc::te::coord<int64_t, int64_t, int64_t, int64_t>;
     using GroupCoord = asc::te::coord<int64_t, int64_t, int64_t, int64_t>;
 
+    enum class MatrixView : uint8_t { Matrix, BatchTransposedA };
+
     struct Params {
         int32_t baseM{0};
         int32_t baseN{0};
@@ -46,6 +48,8 @@ public:
         bool weightNz{false};
         uint32_t weightElementSize{1};
         uint32_t groupListType{0};
+        MatrixView matrixView{MatrixView::Matrix};
+        bool splitM{false}; // Retained for source compatibility; full blocks are role-independent.
     };
 
     __aicore__ inline explicit BlockSchedulerGmmNoQuant(const Params& params)
@@ -64,7 +68,8 @@ public:
           transB_(params.transB),
           weightNz_(params.weightNz),
           weightElementSize_(params.weightElementSize),
-          groupListType_(params.groupListType)
+          groupListType_(params.groupListType),
+          matrixView_(params.matrixView)
     {
         blockNum_ = static_cast<int64_t>(AscendC::GetBlockNum());
     }
@@ -82,6 +87,8 @@ public:
         return blockIdx >= groupStartBlock_ ? blockIdx : blockIdx + blockNum_;
     }
 
+    __aicore__ inline int64_t GetGroupViewM() const { return m_; }
+
     __aicore__ inline int64_t GetCoreNums() { return Min(groupEndBlock_, blockNum_); }
 
     template <bool TransB_ = false, class BType_>
@@ -91,10 +98,20 @@ public:
         return blockShape_;
     }
 
-    __aicore__ inline BlockCoord GetBlockCoord(int blockIdx)
+    __aicore__ inline BlockCoord GetBlockCoord(int64_t blockIdx)
     {
-        UpdateBlockInfo(static_cast<int64_t>(blockIdx));
+        UpdateBlockInfo(blockIdx);
         return blockCoord_;
+    }
+
+    // Input coordinates stay group-local. Output coordinates include the group
+    // origin but still describe the full block on both AIC and AIV.
+    __aicore__ inline BlockCoord GetOutputBlockCoord(int64_t blockIdx)
+    {
+        UpdateBlockInfo(blockIdx);
+        const int64_t origin = matrixView_ == MatrixView::BatchTransposedA ? groupMOffset_ : 0;
+        return BlockCoord{asc::te::get<MNK_M>(blockCoord_) + origin, asc::te::get<MNK_N>(blockCoord_),
+                          asc::te::get<MNK_K>(blockCoord_), asc::te::get<MNK_B>(blockCoord_)};
     }
 
     __aicore__ inline void SetGroupIdx(uint32_t groupIdx) { groupIdx_ = static_cast<int64_t>(groupIdx); }
@@ -111,6 +128,9 @@ public:
 
     __aicore__ inline GroupCoord UpdateNextGroup(const ProblemShape& problemShape)
     {
+        if (matrixView_ == MatrixView::BatchTransposedA) {
+            return UpdateBatchedGroup(problemShape);
+        }
         // Offset state and block scheduling state advance together, including groups without valid tiles.
         auto groupCoord = UpdateGroupOffset(problemShape);
         UpdateNextProblem(problemShape, NeedTailSplit(asc::te::get<MNK_M>(problemShape)));
@@ -134,6 +154,26 @@ private:
         int64_t tailSplitIndex{0};
         bool isTailSplit{false};
     };
+
+    __aicore__ inline GroupCoord UpdateBatchedGroup(const ProblemShape& problemShape)
+    {
+        const int64_t problemM = asc::te::get<MNK_M>(problemShape);
+        const int64_t problemN = asc::te::get<MNK_N>(problemShape);
+        const int64_t problemK = asc::te::get<MNK_K>(problemShape);
+        batch_ = asc::te::get<MNK_B>(problemShape);
+        // Operand views start at this group; the epilogue keeps its global output origin.
+        groupMOffset_ = nextCOffset_ / (batch_ * problemK);
+        const auto groupCoord = GroupCoord{nextAOffset_, nextBOffset_, 0, nextCOffset_};
+        nextAOffset_ += problemM * problemN;
+        nextCOffset_ += problemM * problemN;
+        nextBOffset_ += batch_ * problemK * problemK;
+
+        // Keep the existing SWAT task order and weight locality; only the exposed view changes.
+        const ProblemShape gridShape{batch_ == 1 ? problemM * (problemN / problemK) : problemM,
+                                     batch_ == 1 ? problemK : problemN, problemK, 1};
+        UpdateNextProblem(gridShape, NeedTailSplit(asc::te::get<MNK_M>(gridShape)));
+        return groupCoord;
+    }
 
     __aicore__ inline bool NeedTailSplit(int64_t problemM) const
     {
@@ -246,6 +286,18 @@ private:
         const int64_t nOffset = asc::te::get<MNK_N>(tileCoord) * baseN_ + splitBlock.nOffset;
         blockShape_ = BlockShape{splitBlock.blockM, splitBlock.blockN, k_, 1};
         blockCoord_ = BlockCoord{mOffset, nOffset, 0, 0};
+        if (matrixView_ == MatrixView::BatchTransposedA) {
+            UpdateBatchedBlockInfo();
+        }
+    }
+
+    __aicore__ inline void UpdateBatchedBlockInfo()
+    {
+        const int64_t rows = asc::te::get<MNK_M>(blockShape_);
+        const int64_t row = asc::te::get<MNK_M>(blockCoord_);
+        const int64_t segment = asc::te::get<MNK_N>(blockCoord_) / k_;
+        blockShape_ = BlockShape{rows, asc::te::get<MNK_N>(blockShape_), k_, batch_};
+        blockCoord_ = BlockCoord{row, 0, 0, segment};
     }
 
     __aicore__ inline TaskInfo GetTaskInfo(int64_t relativeTask) const
@@ -347,6 +399,9 @@ private:
     bool weightNz_{false};
     uint32_t weightElementSize_{1};
     uint32_t groupListType_{0};
+    MatrixView matrixView_{MatrixView::Matrix};
+    int64_t batch_{1};
+    int64_t groupMOffset_{0};
 };
 
 } // namespace Block

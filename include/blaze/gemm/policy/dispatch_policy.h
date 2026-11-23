@@ -64,14 +64,6 @@ struct KernelGroupedMmadNoQuant {};      // Grouped multi-block without quantiza
 struct KernelWqgmmMixAntiquant {};       // Grouped vector antiquant
 struct KernelMmadAPrefetchBAntiquant {}; // AIV weight dequantization and AIC matrix multiplication
 
-struct KernelRotateQuant {}; // Rotate quantization single-matmul with MXFP4/FP8 AIC+AIV
-
-template <class KernelSchedule_ = KernelRotateQuant>
-struct BlockRotateQuant {
-    using ScheduleType = KernelSchedule_;
-    static constexpr bool ENABLE_INPUT_DATA_LEN_CHECK = false;
-};
-
 enum class MatmulOutputMode : std::uint8_t { OVERWRITE = 0, INPLACE_ADD = 1 };
 enum class MatMulL0C2Out : std::uint8_t { ON_THE_FLY = 0, ND_FIXPIPE_1_1 = 1, ND_FIXPIPE_1_2 = 2 };
 
@@ -338,6 +330,7 @@ template <uint64_t FullLoadMode_ = 0, bool IsSplitSinglecoreK_ = true,
 struct MatmulMultiBlockBasicSplitK {
     using ScheduleType = KernelSchedule_;
     static constexpr uint64_t FULL_LOAD_MODE = FullLoadMode_;
+    static constexpr uint64_t FUSED_OP_TYPE = OP_TYPE_EMPTY;
     static constexpr bool IS_SPLIT_SINGLECORE_K = IsSplitSinglecoreK_;
     static constexpr uint64_t NON_CONTIGUOUS_TYPE = NonContiguousType_;
 };
@@ -380,6 +373,7 @@ struct MatmulMultiBlockBFullLoad {
  * @brief Matrix multiplication fixpipe optimization without B full-load
  * @param [in] FusedOpType_: execute fusion after mmad, default is 0
  * @param [in] KernelSchedule_: mmad dispatch policy
+ * @param [in] NonContiguousType_: input batch-layout selection, default is contiguous
  */
 template <uint64_t L0C2OutModel_ = ON_THE_FLY, uint64_t FusedOpType_ = 0,
           class KernelSchedule_ = KernelMmadMultiBlockFixpipeOpti, uint64_t NonContiguousType_ = 0>
@@ -388,8 +382,8 @@ struct MatmulMultiBlockFixpipeOpti {
     static constexpr uint64_t FULL_LOAD_MODE = NONE_FULL_LOAD_MODE;
     static constexpr uint64_t L0C2OUT_MODEL = L0C2OutModel_;
     static constexpr uint64_t FUSED_OP_TYPE = FusedOpType_;
-    static constexpr MatmulOutputMode OUTPUT_MODE = MatmulOutputMode::OVERWRITE;
     static constexpr uint64_t NON_CONTIGUOUS_TYPE = NonContiguousType_;
+    static constexpr MatmulOutputMode OUTPUT_MODE = MatmulOutputMode::OVERWRITE;
 };
 
 /**

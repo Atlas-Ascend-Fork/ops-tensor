@@ -6,4 +6,9 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-AddOpTestCase(rotate_quant "ascend950pr_9599" "")
+option(ROTATE_QUANT_UT_REAL_EPILOGUE "Test MX output with a simulator that supports Cube and MX RegBase instructions" OFF)
+set(rotate_quant_ut_flags "")
+if(ROTATE_QUANT_UT_REAL_EPILOGUE)
+    set(rotate_quant_ut_flags "-DROTATE_QUANT_UT_REAL_EPILOGUE=1")
+endif()
+AddOpTestCase(rotate_quant "ascend950pr_9599;ascend960DT_968B7" "${rotate_quant_ut_flags}")

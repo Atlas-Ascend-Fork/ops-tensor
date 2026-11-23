@@ -22,7 +22,8 @@ namespace Blaze {
 namespace Gemm {
 namespace Block {
 
-template <class ProblemShape_, int64_t FullLoadMode_ = 0, bool IsFp32_ = false, bool IsNdFormat_ = true>
+template <class ProblemShape_, int64_t FullLoadMode_ = 0, bool IsFp32_ = false, bool IsNdFormat_ = true,
+          bool BatchInterleaved_ = false>
 class BlockSchedulerMatmulBasic {
 public:
     using BlockShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
@@ -177,7 +178,7 @@ public:
         UpdateMNBlockIdx(blockIdx);
         int64_t batchIdx = 0;
         if (batch_ > 1) {
-            batchIdx = blockIdx / blockNums_;
+            batchIdx = BatchInterleaved_ ? blockIdx % batch_ : blockIdx / blockNums_;
         }
 
         int64_t mOffset = mBlockIdx_ * mL1_ + mSplitOffset_;
@@ -202,7 +203,7 @@ private:
         }
         lastBlockIdx_ = tmpBlockIdx;
 
-        int64_t blockIdx = tmpBlockIdx % blockNums_;
+        int64_t blockIdx = BatchInterleaved_ ? tmpBlockIdx / batch_ : tmpBlockIdx % blockNums_;
         if (blockIdx / blockNum_ == (perCoreBlockNums_ - 1) && tailCnt_ > 1) {
             blockIdx = (perCoreBlockNums_ - 1) * blockNum_ + oriBlockIdx_ / tailCnt_;
         }

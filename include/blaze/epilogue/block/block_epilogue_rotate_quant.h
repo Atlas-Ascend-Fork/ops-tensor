@@ -10,7 +10,7 @@
 
 /*!
  * \file block_epilogue_rotate_quant.h
- * \brief Block epilogue for rotate quantization with MX FP4/FP8 support
+ * \brief
  */
 
 #pragma once
@@ -20,6 +20,7 @@
 #include "kernel_operator.h"
 #endif
 #include "blaze/epilogue/block/block_epilogue_types.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
 #include "blaze/gemm/tile/compute.h"
@@ -42,15 +43,14 @@ public:
 
     static_assert(AscendC::IsSameType<DataTypeIn, bfloat16_t>::value,
                   "BlockEpilogueRotateQuant requires BF16 input from Fixpipe.");
-    static_assert(sizeof(DataTypeScale) == sizeof(int8_t),
-                  "BlockEpilogueRotateQuant requires one-byte MX scale storage.");
+    static_assert(sizeof(DataTypeScale) == sizeof(int8_t), "RotateQuant requires one-byte MX scales.");
 
     static_assert(AscendC::IsSameType<DataTypeOut, fp4x2_e2m1_t>::value ||
                       AscendC::IsSameType<DataTypeOut, fp8_e4m3fn_t>::value ||
                       AscendC::IsSameType<DataTypeOut, fp8_e5m2_t>::value,
-                  "BlockEpilogueRotateQuant only supports FP4-E2M1 / FP8-E4M3 / FP8-E5M2 output.");
+                  "BlockEpilogueRotateQuant requires MX FP4/FP8 output.");
 
-    using BlockShape = AscendC::Te::Shape<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>;
+    using BlockShape = AscendC::Te::Shape<int64_t, int64_t, int64_t, int64_t>;
     using BlockCoord = AscendC::Te::Coord<int64_t, int64_t, int64_t, int64_t>;
     using ProblemShape = AscendC::Te::Shape<int64_t, int64_t, int64_t, int64_t>;
 
@@ -65,16 +65,31 @@ public:
         int64_t scaleAlg{0};
         float dstTypeMax{0.0f};
         float invDstTypeMax{0.0f};
+        uint32_t ubDB{1};
+        bool splitM{false};
     };
 
     using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
 
     __aicore__ inline BlockEpilogueRotateQuant();
+    __aicore__ inline ~BlockEpilogueRotateQuant();
     __aicore__ inline void Init(Params const& params);
     __aicore__ inline auto GetAccumulatorTensor(const AccumulatorTensorParams& params) const;
     __aicore__ inline void operator()(const BlockShape& blockShape, const BlockCoord& blockCoord);
 
 private:
+    __aicore__ inline uint32_t WaitForFixpipe() const;
+    __aicore__ inline void ReleaseFixpipe(uint32_t slot, bool hasMte3Dependency);
+    __aicore__ inline void Drain();
+
+    __aicore__ inline static constexpr uint32_t WorkspaceBytes(uint32_t maxRows)
+    {
+        return (SCALE_BLOCK_UB_OFFSET + maxRows * SCALE_STORE_STRIDE + SCALE_STORE_STRIDE - 1) / SCALE_STORE_STRIDE *
+               SCALE_STORE_STRIDE;
+    }
+
+    __aicore__ inline void SetWorkspace(uint32_t ubBaseOffset, uint32_t writebackEventId);
+    static constexpr uint32_t WORKSPACE_COUNT = 2;
     static constexpr int64_t MODE_RINT = 4;
     static constexpr int64_t MODE_ROUND = 0;
     static constexpr int64_t MODE_FLOOR = 1;
@@ -82,7 +97,7 @@ private:
     static constexpr int32_t GROUP_SIZE = 32;
     static constexpr int32_t MN_SIZE = 16 * 1024;
     static constexpr int32_t EMAX_SIZE = 512;
-    // Fixpipe writes the BF16 tile at UB offset 0. Preserve the original buffer byte offsets.
+    // All buffer offsets are relative to this instance's workspace base.
     static constexpr uint32_t X_UB_OFFSET = 0;
     static constexpr uint32_t Y_UB_OFFSET = X_UB_OFFSET + MN_SIZE * sizeof(bfloat16_t);
     static constexpr uint32_t LIMIT_UB_OFFSET = Y_UB_OFFSET + MN_SIZE * sizeof(int8_t);
@@ -127,6 +142,8 @@ private:
 
     __aicore__ inline void Quant(uint64_t offset, int64_t blkM, int64_t k);
 
+    __aicore__ inline void DrainWorkspace(uint32_t writebackEventId);
+
     // ---- Shape ----
     struct RotateQuantShapeInfo {
         int64_t m;
@@ -150,6 +167,13 @@ private:
     float invDstTypeMax_ = 0.0f;
     uint16_t fpEmax_ = 0;
     uint16_t addValueBits_ = 0;
+    uint32_t ubBaseOffset_ = 0;
+    uint32_t writebackEventId_ = 0;
+    bool deferWriteback_ = false;
+    bool pendingWriteback_[WORKSPACE_COUNT] = {false, false};
+    uint32_t ubSlotBytes_{AscendC::TOTAL_UB_SIZE};
+    bool splitM_{false};
+    uint64_t inputSequence_{0};
 };
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
@@ -158,12 +182,23 @@ __aicore__ inline BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeSc
 {}
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_,
+                                           FusionOp_>::~BlockEpilogueRotateQuant()
+{
+    if ASCEND_IS_AIV {
+        Drain();
+    }
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
 __aicore__ inline auto
 BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::GetAccumulatorTensor(
     const AccumulatorTensorParams& params) const
 {
     const int64_t alignN = Gemm::CeilAlign(params.cols, static_cast<int64_t>(Gemm::BLOCK_CUBE));
-    return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(X_UB_OFFSET),
+    // BlockMmad takes the slot-0 view and adds its ping-pong offset when issuing Fixpipe.
+    const uint32_t offset = X_UB_OFFSET + params.slot * (AscendC::TOTAL_UB_SIZE / WORKSPACE_COUNT);
+    return asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, DataTypeIn>(offset),
                                 asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(params.rows, alignN));
 }
 
@@ -171,6 +206,19 @@ template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, 
 __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::Init(
     Params const& params)
 {
+    const uint32_t slotBytes = params.ubDB == 2 ? AscendC::TOTAL_UB_SIZE / 2 : AscendC::TOTAL_UB_SIZE;
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
+    const bool validInput = (params.ubDB == 1 || params.ubDB == 2) && !params.splitM;
+#else
+    const bool validInput = params.ubDB == 1 || params.ubDB == 2;
+#endif
+    const bool validWorkspace = validInput && WorkspaceBytes(0) <= slotBytes;
+    ASCENDC_ASSERT(validWorkspace, { KERNEL_LOG(KERNEL_ERROR, "Invalid RotateQuant epilogue workspace"); });
+    ubSlotBytes_ = slotBytes;
+    splitM_ = params.splitM;
+    inputSequence_ = 0;
+    SetWorkspace(0, 0);
+    deferWriteback_ = params.ubDB == 2;
     // 饱和模式由单指令设置生效
     InitGlobalBuffer(params);
     InitProblemShape(params.problemShape);
@@ -179,9 +227,64 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
 }
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline uint32_t
+BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::WaitForFixpipe() const
+{
+    const uint32_t slot = deferWriteback_ ? inputSequence_ & 1U : 0U;
+    Gemm::Sync::WaitForCube<Gemm::Sync::SYNC_MODE_INTRA, PIPE_V>(Gemm::Sync::FIXPIPE_AIC_READY_FLAG_BASE + slot);
+    return slot;
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::ReleaseFixpipe(
+    uint32_t slot, bool hasMte3Dependency)
+{
+    // Zero-row consumers still need the V-to-MTE3 edge before returning the ACK.
+    // Quant already supplies this edge when it submits an actual GM writeback.
+    if (!hasMte3Dependency) {
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(slot);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(slot);
+    }
+    Gemm::Sync::NotifyCube<Gemm::Sync::SYNC_MODE_INTRA, PIPE_MTE3>(Gemm::Sync::FIXPIPE_AIV_ACK_FLAG_BASE + slot);
+    ++inputSequence_;
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::SetWorkspace(
+    uint32_t ubBaseOffset, uint32_t writebackEventId)
+{
+    // The consumer advances once for every Fixpipe chunk, including zero-row lanes.
+    ubBaseOffset_ = ubBaseOffset;
+    writebackEventId_ = writebackEventId;
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::Drain()
+{
+    for (uint32_t eventId = 0; eventId < WORKSPACE_COUNT; ++eventId) {
+        DrainWorkspace(eventId);
+    }
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::DrainWorkspace(
+    uint32_t writebackEventId)
+{
+    if (pendingWriteback_[writebackEventId]) {
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(writebackEventId);
+        pendingWriteback_[writebackEventId] = false;
+    }
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
 __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::Quant(
     uint64_t offset, int64_t blkM, int64_t k)
 {
+    DrainWorkspace(writebackEventId_);
+    const bool validWorkspace = blkM > 0 && k > 0 &&
+                                static_cast<uint64_t>(blkM) * static_cast<uint64_t>(k) <= MN_SIZE &&
+                                WorkspaceBytes(static_cast<uint32_t>(blkM)) <= ubSlotBytes_;
+    ASCENDC_ASSERT(validWorkspace, { KERNEL_LOG(KERNEL_ERROR, "RotateQuant epilogue tile exceeds its workspace"); });
     uint32_t mnSize = blkM * k;
     uint64_t yOffset = offset * static_cast<uint64_t>(k);
     ComputeMxQuant(mnSize);
@@ -207,8 +310,8 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
                 TransFp4Output(blkM, k);
             }
         }
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(writebackEventId_);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(writebackEventId_);
         CopyOutputFromUbToGm(yOffset, blkM, k, shape_.n);
         CopyScaleFromUbToGm(scaleOffset, SCALE_BLOCK_UB_OFFSET, blkM, dataSize, nScaleSize, SCALE_STORE_STRIDE);
     } else if (isOdd == 1) {
@@ -218,31 +321,46 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
         uint64_t scaleOffset = mIdx * nScaleSize + nkIdx;
         ClearScaleBlock(blkM);
         PadScale(nKRatio, nkIdx, blkM);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(writebackEventId_);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(writebackEventId_);
         CopyOutputFromUbToGm(yOffset, 1, mnSize, 0);
         CopyPadScaleFromUbToGm(scaleOffset, nKRatio, nkIdx, blkM);
     } else {
         uint64_t scaleOffset = offset * Gemm::CeilDiv<int64_t>(k, GROUP_SIZE);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(writebackEventId_);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(writebackEventId_);
         CopyOutputFromUbToGm(yOffset, 1, mnSize, 0);
         uint32_t scaleSize = Gemm::CeilDiv<uint32_t>(mnSize, GROUP_SIZE);
         CopyScaleFromUbToGm(scaleOffset, SCALE_UB_OFFSET, 1, scaleSize, 0, scaleSize);
     }
 
-    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(writebackEventId_);
+    if (deferWriteback_) {
+        // The other workspace can execute Vector work while this slot is written to GM.
+        pendingWriteback_[writebackEventId_] = true;
+    } else {
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(writebackEventId_);
+    }
 }
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
 __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::operator()(
     const BlockShape& blockShape, const BlockCoord& blockCoord)
 {
-    int64_t blkM = asc::te::get<Gemm::MNK_M>(blockShape);
-    int64_t k = asc::te::get<Gemm::MNK_K>(blockShape);
-    uint64_t offset = asc::te::get<Gemm::MNK_M>(blockCoord) * shape_.b + asc::te::get<Gemm::MNK_B>(blockCoord);
-    Quant(offset, blkM, k);
+    const uint32_t slot = WaitForFixpipe();
+    SetWorkspace(slot * ubSlotBytes_, slot);
+    DrainWorkspace(slot);
+    const int64_t fullM = asc::te::get<Gemm::MNK_M>(blockShape);
+    const int64_t rowsPerAiv = splitM_ ? Gemm::CeilDiv(fullM, int64_t{2}) : fullM;
+    const int64_t rowStart = static_cast<int64_t>(AscendC::GetSubBlockIdx()) * rowsPerAiv;
+    const int64_t localRows = Gemm::Max(int64_t{0}, Gemm::Min(rowsPerAiv, fullM - rowStart));
+    if (localRows > 0) {
+        const int64_t k = asc::te::get<Gemm::MNK_N>(blockShape);
+        const uint64_t offset = (asc::te::get<Gemm::MNK_M>(blockCoord) + rowStart) * shape_.b +
+                                asc::te::get<Gemm::MNK_B>(blockCoord);
+        Quant(offset, localRows, k);
+    }
+    ReleaseFixpipe(slot, localRows > 0);
 }
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
@@ -297,7 +415,8 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
 {
     auto ubLayout = Gemm::MakeNDExtLayout<int8_t>(rows, columns, srcRowPitch);
     auto gmLayout = Gemm::MakeNDExtLayout<int8_t>(rows, columns, dstRowPitch);
-    auto src = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(srcUbOffset), ubLayout);
+    auto src = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + srcUbOffset),
+                                    ubLayout);
     auto output = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(dst), gmLayout);
     asc::te::copy(asc::te::make_copy(asc::te::copy_ub_to_gm{}), output, src);
 }
@@ -369,18 +488,18 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
                                                     static_cast<int64_t>(totalDataInUB));
     auto scaleLayout = Gemm::MakeNDExtLayout<int8_t>(1, static_cast<int64_t>(totalScale),
                                                      static_cast<int64_t>(totalScale));
-    auto srcTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(X_UB_OFFSET),
-                                          dataLayout);
-    auto quantYTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(Y_UB_OFFSET),
-                                             dataLayout);
-    auto limitTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(LIMIT_UB_OFFSET),
-                                            scaleLayout);
-    auto maxExpTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, uint16_t>(MAX_EXP_UB_OFFSET),
-                                             scaleLayout);
-    auto yScaleTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(SCALE_UB_OFFSET),
-                                             scaleLayout);
+    auto srcTensor = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(ubBaseOffset_ + X_UB_OFFSET), dataLayout);
+    auto quantYTensor = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + Y_UB_OFFSET), dataLayout);
+    auto limitTensor = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(ubBaseOffset_ + LIMIT_UB_OFFSET), scaleLayout);
+    auto maxExpTensor = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, uint16_t>(ubBaseOffset_ + MAX_EXP_UB_OFFSET), scaleLayout);
+    auto yScaleTensor = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + SCALE_UB_OFFSET), scaleLayout);
     auto reciprocalTensor = asc::te::make_tensor(
-        asc::te::make_mem_ptr<asc::te::location::ub, uint16_t>(RECIPROCAL_UB_OFFSET), scaleLayout);
+        asc::te::make_mem_ptr<asc::te::location::ub, uint16_t>(ubBaseOffset_ + RECIPROCAL_UB_OFFSET), scaleLayout);
 
     // MxQuantConfig 由 Init 阶段解析的普通成员在调用点组装（tile 类型不得出现在类作用域）
     // zeroScaleOnZeroExp=false: rotate/gelu_tanh 阵营（sharedExp 判定，仅清零 reciprocal）
@@ -426,8 +545,8 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
 {
     uint32_t count = blkM * SCALE_STORE_STRIDE;
     auto layout = Gemm::MakeNDExtLayout<int8_t>(1, count, count);
-    auto scaleBlock = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(SCALE_BLOCK_UB_OFFSET),
-                                           layout);
+    auto scaleBlock = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + SCALE_BLOCK_UB_OFFSET), layout);
     Gemm::Tile::FillUb<int8_t>::FillWithValue(scaleBlock, 0);
 }
 
@@ -439,13 +558,13 @@ BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::
     // scale 布局: (M, scaleBlockN) -> (M, 32B 行块)，供 MTE 按行距 SCALE_STORE_STRIDE 搬运
     auto srcLayout = Gemm::MakeNDExtLayout<int8_t>(static_cast<int64_t>(mSize), static_cast<int64_t>(scaleBlockN),
                                                    static_cast<int64_t>(scaleBlockN));
-    auto srcTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(SCALE_UB_OFFSET),
-                                          srcLayout);
+    auto srcTensor = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + SCALE_UB_OFFSET), srcLayout);
     auto dstLayout = Gemm::MakeNDExtLayout<int8_t>(static_cast<int64_t>(mSize),
                                                    static_cast<int64_t>(AscendC::ONE_BLK_SIZE),
                                                    static_cast<int64_t>(AscendC::ONE_BLK_SIZE));
-    auto dstTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(SCALE_BLOCK_UB_OFFSET),
-                                          dstLayout);
+    auto dstTensor = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + SCALE_BLOCK_UB_OFFSET), dstLayout);
     Tile::MxQuant<DataTypeOut> mx;
     mx.TransScaleLayout(srcTensor, dstTensor, mSize, scaleBlockN);
 }
@@ -457,8 +576,10 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     uint32_t packedBytes = kSize / 2;
     auto srcLayout = Gemm::MakeNDExtLayout<int8_t>(mSize, packedBytes, Gemm::Align16(packedBytes));
     auto dstLayout = Gemm::MakeNDExtLayout<int8_t>(mSize, packedBytes, Gemm::Align32(packedBytes));
-    auto src = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(Y_UB_OFFSET), srcLayout);
-    auto dst = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(X_UB_OFFSET), dstLayout);
+    auto src = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + Y_UB_OFFSET),
+                                    srcLayout);
+    auto dst = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + X_UB_OFFSET),
+                                    dstLayout);
     Tile::MxQuant<DataTypeOut> mx;
     mx.TransFp4OutLayout(src, dst, mSize, kSize);
 }
@@ -472,9 +593,10 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     }
     auto srcLayout = Gemm::MakeNDExtLayout<int8_t>(1, blkM, blkM);
     auto dstLayout = Gemm::MakeNDExtLayout<int8_t>(1, blkM * SCALE_STORE_STRIDE, blkM * SCALE_STORE_STRIDE);
-    auto src = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(SCALE_UB_OFFSET), srcLayout);
-    auto dst = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(SCALE_BLOCK_UB_OFFSET),
-                                    dstLayout);
+    auto src = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + SCALE_UB_OFFSET), srcLayout);
+    auto dst = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + SCALE_BLOCK_UB_OFFSET), dstLayout);
     uint16_t firstNum = (nKRatio - nkIdx <= blkM) ? nKRatio - nkIdx : blkM;
     uint16_t rowLoopNum = (firstNum < blkM) ? (blkM - firstNum) / nKRatio : 0;
     uint16_t lastNum = (firstNum < blkM) ? (blkM - firstNum) % nKRatio : 0;

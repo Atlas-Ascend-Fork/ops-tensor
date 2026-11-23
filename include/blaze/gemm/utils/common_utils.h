@@ -104,6 +104,8 @@ constexpr uint64_t OP_TYPE_ADD = 1UL;
 constexpr uint64_t OP_TYPE_MUL = 2UL;
 constexpr uint64_t OP_TYPE_RELU = 5UL;
 constexpr uint64_t OP_TYPE_GELU = 6UL;
+// Select the quantization epilogue that consumes the Fixpipe result from UB.
+constexpr uint64_t OP_TYPE_QUANT = 7UL;
 constexpr uint64_t BLOCK_BYTE_SIZE = 32UL;
 
 constexpr uint64_t IDX_M_TILEIDX = 0UL;
