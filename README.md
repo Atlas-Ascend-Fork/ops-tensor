@@ -2,6 +2,8 @@
 
 ## 🔥Latest News
 
+- [2026/10] 支持 `TransposeQuantBatchMatmul`（TQBMM，新增 HIFP8 数据类型与 FP8 per-token 反量化 MIX 路径）、`RotateQuant`（旋转量化，支持分组量化）算子，新增 `FlatQuant` 样例；`FusedMatMul`（FMM）支持 ReLU 激活，`QuantBatchMatmul`（QBMM）MX 支持 FP8/FP4 ScaleNZ 布局，新增 SiLU + MXFP8、A4W4 BF16 WeightNZ SwiGLU 量化 epilogue，GM→L1 搬运使能 PreAllocate，examples 新增 torch 调用路径。
+- [2026/09] 支持 `GemmSyrk`（对称秩K更新 SYRK）、`GroupedMatmulFinalizeRouting`（GMMFR，MXFP4/MXFP8 + WeightNZ）算子；`GroupedMatmul`（GMM）非量化支持稀疏与 GELU 后处理融合，`QuantGroupedMatmul`（QGMM）SwiGLU MX 支持 weight NZ/ZN 布局，`WeightQuantBatchMatmul`（WQBMM）支持 A16W8 量化，`QuantBatchMatmul`（QBMM）新增伪量化 A8W4 PerGroup 量化，`BatchMatMul` 新增 IterBatch 模板，SwiGLU MX epilogue 支持 BLAS scale。
 - [2026/08] 支持 `FusedMatMul`（MatMul + Scale + Add 融合矩阵乘）、`WeightQuantBatchMatmul`（Weight-only 量化）、`QuantGroupedMatmul`（QGMM）Swiglu 激活量化融合（GMMSGQ），`GroupedMatmul`（GMM）支持 S8S4/S4S4 量化。
 - [2026/07] 支持 `TransposeBatchMatMul`（TBMM）、`QuantGroupedMatmul`（QGMM）算子。
 - [2026/06] 支持 `GroupedMatmul`（GMM）算子。
