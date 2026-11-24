@@ -34,13 +34,28 @@ namespace Gemm {
 namespace Sync {
 
 // 同步模式与 syncID 定义集中于此。
+// 注意：以下数值仅为本文内部模板分发的 tag，并非硬件 ffts mode 字段值
+// （硬件： inter=0, subblock=1, block=2； intra 走 set_intra_block 指令，不占用 ffts mode）。
+// 块内广播：AIC 通知本 AI Core(block) 内全部 AIV，适用 __mix__(1, N) 任务；
+//   arrive 走 ffts(mode=2)，wait 走 wait_flag_dev，须与 arrive 配对同一 flag_id。
 constexpr uint16_t SYNC_MODE_BLOCK = 0; // 对应 asc_sync_block_arrive / asc_sync_block_wait
+// 跨 block 通知：信号发给本 block 之外的 AI Core/AIV，适用多核分块协同
+//   （如 StreamK 分块间依赖）；arrive 走 ffts(mode=0)，wait 走 wait_flag_dev。
 constexpr uint16_t SYNC_MODE_INTER = 2; // 对应 asc_sync_inter_arrive / asc_sync_inter_wait
+// 块内点对点：AIC 与单个 AIV 之间的握手，直接走 set_intra_block/wait_intra_block 指令，
+//   不经过 ffts；Blaze 中 AIC<->AIV 同步的默认模式（fixpipe slot 握手等）。
 constexpr uint16_t SYNC_MODE_INTRA = 4; // 对应 asc_sync_intra_arrive / asc_sync_intra_wait
 
-constexpr uint16_t MIX_AIC_SYNC_AIV_FLAG = 0;
-constexpr uint16_t MIX_AIV_SYNC_AIC_FLAG = 1;
-constexpr uint16_t MIX_FLAG_ID_MAX = 16;
+// AIC<->AIV 握手的自定义 flag（通道）ID。数值本身无硬件含义，0~15 任意取值皆可
+// （ffts flag 字段 4 bit；intra 的 sync_id 更宽，但沿用同一约定）。仅要求遵守：
+//   1) 同一次握手的 arrive/wait 两侧必须传同一 id（下方默认形参已按方向绑定）；
+//   2) AIC->AIV 与 AIV->AIC 两个方向必须用不同 id，否则会互相误唤醒；
+//   3) 16~31 保留给 3510 CV1/CV2 混布场景的重复信号（isMixCV1V2 时按
+//      id + MIX_FLAG_ID_MAX 再发一份）；自定义 id 请用 0~15，并避开
+//      FIXPIPE_* 握手已占用的 4~7。
+constexpr uint16_t MIX_AIC_SYNC_AIV_FLAG = 0; // 通道 0：AIC -> AIV（NotifyVector / WaitForCube 默认 id）
+constexpr uint16_t MIX_AIV_SYNC_AIC_FLAG = 1; // 通道 1：AIV -> AIC（NotifyCube / WaitForVector 默认 id）
+constexpr uint16_t MIX_FLAG_ID_MAX = 16;      // id 空间分界：[0,15] 用户段；[16,31] CV1V2 复制段
 
 // Fixpipe L0C->UB producer-consumer handshake. The slot index is added to each base flag.
 constexpr uint16_t FIXPIPE_AIV_ACK_FLAG_BASE = 4;   // AIV -> AIC: the UB slot can be reused.
