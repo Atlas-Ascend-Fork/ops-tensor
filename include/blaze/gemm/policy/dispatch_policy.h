@@ -20,8 +20,11 @@ namespace Blaze {
 namespace Gemm {
 
 /* block schedule policies */
-struct KernelMmadWithScaleMx {};                       // Multi-block with Mx scale
-struct KernelGroupedMmadWithScaleMx {};                // Grouped multi-block with Mx scale
+struct KernelMmadWithScaleMx {};        // Multi-block with Mx scale
+struct KernelGroupedMmadWithScaleMx {}; // Grouped multi-block with Mx scale
+// Grouped MX schedule with FP32 partials exchanged between AIC and AIV.
+struct KernelGroupedMmadWithDualLevelScaleMx {};
+
 struct KernelMmadWithScaleMxWithoutBatch {};           // Multi-block with Mx scale, without batch broadcast
 struct KernelGroupedMmadWithScaleMxActivationQuant {}; // Grouped Mx matmul with AIV activation and quantization
 struct KernelMmadWithScaleMxActivationQuant {}; // Multi-block with Mx scale, AIC+AIV fusion (gelu/swiglu + mx quant)

@@ -71,8 +71,20 @@ public:
     static constexpr uint64_t SCALE_N_BLOCK = 16;
     static constexpr uint64_t MAX_SCALE_DMA_BLOCKS = 0xffffUL;
     static constexpr uint64_t SPLIT_M_ALIGN = 2;
+    // 双级部分和生产路径单次 MMAD 的 M/N 基本块上限。
+    static constexpr int64_t DUAL_LEVEL_L0_BASE_M = 128;
+    static constexpr int64_t DUAL_LEVEL_L0_BASE_N = 128;
     static constexpr uint64_t CONCAT_N_FACTOR = 2UL;
     static constexpr uint16_t CONCAT_MATRIX_NUM = 2U;
+
+    __aicore__ static constexpr bool SupportsDualLevelK(uint32_t segmentK, uint32_t scaleWindow)
+    {
+        return segmentK != 0 && segmentK % MXFP_DIVISOR_SIZE == 0 && scaleWindow >= segmentK &&
+               scaleWindow % segmentK == 0 &&
+               ElementsToBytes<AType>(DUAL_LEVEL_L0_BASE_M * segmentK) <=
+                   AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT &&
+               ElementsToBytes<BType>(DUAL_LEVEL_L0_BASE_N * segmentK) <= AscendC::TOTAL_L0B_SIZE / DOUBLE_BUFFER_COUNT;
+    }
 
     struct Params {
         GM_ADDR aGmAddr{nullptr};
@@ -169,6 +181,14 @@ public:
     }
 
 private:
+    template <class Tensor_, uint32_t BufferCount, class PartialTiles_>
+    struct PartialBuffers {
+        const Tensor_ (&views)[BufferCount];
+        uint64_t totalK;
+        uint64_t segmentK;
+    };
+
+    static constexpr bool DUAL_LEVEL = AscendC::Std::is_same_v<ScheduleType_, KernelGroupedMmadWithDualLevelScaleMx>;
     template <typename TensorAL1, typename TensorScaleAL1, typename CopyL12L0A, typename CopyL12L0ScaleA>
     __aicore__ inline auto CopyNoBiasAToL0(const TensorAL1& tensorAL1, const TensorScaleAL1& tensorBlockScaleAL1,
                                            const CopyL12L0A& copyL12L0A, const CopyL12L0ScaleA& copyL12L0ScaleA,
@@ -289,6 +309,30 @@ public:
         RunImpl(gmA, gmB, gmScaleA, gmScaleB, gmBias, gmC, blockShape);
     }
 
+    template <class PartialTiles_, class TensorA_, class TensorB_, class TensorScaleA_, class TensorScaleB_,
+              class TensorPartial_, uint32_t BufferCount, class Channel_>
+    __aicore__ inline void operator()(const TensorA_& gmA, const TensorB_& gmB, const TensorScaleA_& gmScaleA,
+                                      const TensorScaleB_& gmScaleB,
+                                      const TensorPartial_ (&partialBuffers)[BufferCount], const BlockShape& blockShape,
+                                      uint64_t totalK, uint64_t segmentK, Channel_& channel)
+    {
+        static_assert(DUAL_LEVEL, "Partial production requires the dual-level MX policy.");
+        const int64_t rows = asc::te::get<MNK_M>(blockShape);
+        const int64_t cols = asc::te::get<MNK_N>(blockShape);
+        static_assert(AscendC::Std::is_same_v<asc::te::get_mem_location<TensorPartial_>, asc::te::location::ub>,
+                      "Dual-level partial tensors must be located in UB.");
+        using PartialType = asc::te::get_attribute_element_type<typename TensorPartial_::element_type*>;
+        static_assert(AscendC::Std::is_same_v<PartialType, float>,
+                      "Dual-level partial tensors must contain FP32 elements.");
+        // Reuse the ordinary L1 traversal, carrying the caller-owned UB buffer views.
+        const PartialBuffers<TensorPartial_, BufferCount, PartialTiles_> outputs{partialBuffers, totalK, segmentK};
+        auto noBias = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::gm>(static_cast<__gm__ float*>(nullptr)),
+            asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1L, cols));
+        // Both L1 strips cover one complete level0 segment.
+        RunL1AOuter(gmA, gmB, gmScaleA, gmScaleB, noBias, outputs, rows, cols, &channel);
+    }
+
     template <typename TensorA, typename TensorB, typename TensorScaleA, typename TensorScaleB, typename TensorBias,
               typename TensorC>
     __aicore__ inline void operator()(const TensorA& gmA, const TensorB& gmB, const TensorScaleA& gmScaleA,
@@ -334,6 +378,52 @@ public:
     }
 
 private:
+    template <class TensorA_, class TensorB_, class ScaleA_, class ScaleB_, class TensorPartial_, class Channel_>
+    __aicore__ inline void RunDualLevelMicro(TensorA_ a, TensorB_ b, ScaleA_ sa, ScaleB_ sb, int64_t m, int64_t n,
+                                             int64_t rows, int64_t cols, uint64_t segmentK, uint64_t scaleOffset,
+                                             const TensorPartial_& partial, Channel_& channel)
+    {
+        const uint64_t l0Slot = l0PingPong_ & 1UL;
+        const uint64_t l0Offset = l0Slot * (AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT);
+        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0Slot + M_MTE1_FLAG_0);
+        auto al0 = CopyNoBiasAToL0(a.slice(asc::te::make_coord(m, 0L), asc::te::make_shape(rows, segmentK)),
+                                   sa.slice(asc::te::make_coord(m, 0L), asc::te::make_shape(rows, scaleKL1Span_)),
+                                   asc::te::make_copy(asc::te::copy_l1_to_l0a{}),
+                                   asc::te::make_copy(asc::te::copy_l1_to_l0scalea{}), rows, segmentK,
+                                   GetScaleSpan(segmentK), scaleOffset, 0, 0, l0Offset);
+        auto bl0 = CopyNoBiasBToL0(b.slice(asc::te::make_coord(0L, n), asc::te::make_shape(segmentK, cols)),
+                                   sb.slice(asc::te::make_coord(0L, n), asc::te::make_shape(scaleKL1Span_, cols)),
+                                   asc::te::make_copy(asc::te::copy_l1_to_l0b{}),
+                                   asc::te::make_copy(asc::te::copy_l1_to_l0scaleb{}), cols, segmentK,
+                                   GetScaleSpan(segmentK), scaleOffset, 0, 0, l0Offset);
+        AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(l0Slot);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(l0Slot);
+        constexpr uint64_t L0C_TILE_BYTES = DUAL_LEVEL_L0_BASE_M * DUAL_LEVEL_L0_BASE_N * sizeof(float);
+        // Three L0C slots keep Cube production ahead of the two UB consumer slots.
+        constexpr uint64_t L0C_SLOTS = TRIPLE_BUFFER_COUNT;
+        static_assert(L0C_TILE_BYTES * L0C_SLOTS <= AscendC::TOTAL_L0C_SIZE);
+        auto c = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::l0c, float>(l0cPingPong_ % L0C_SLOTS * L0C_TILE_BYTES),
+            asc::te::make_frame_layout<asc::te::nz_layout_ptn, AscendC::Std::Int<C0_SIZE_L0C>>(
+                CeilAlign(rows, static_cast<int64_t>(SPLIT_M_ALIGN)), cols));
+        auto mmadAtom = asc::te::make_mmad(asc::te::mmad_operation{}, Tile::MmadTraitMX{});
+        asc::te::mmad_params mmadParams{};
+        mmadParams.m = static_cast<uint16_t>(rows);
+        mmadParams.k = static_cast<uint16_t>(CeilAlign(segmentK, MX_MMAD_K_ALIGNMENT));
+        mmadParams.n = static_cast<uint16_t>(cols);
+        mmadParams.unit_flag = asc::te::unit_flag_mode::enable_update;
+        mmadParams.init_with_zero = true;
+        asc::te::mmad(mmadAtom.with(mmadParams), c, al0, bl0);
+        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0Slot + M_MTE1_FLAG_0);
+        ++l0PingPong_;
+        // Credits protect UB reuse while allowing the next Cube MMAD to run.
+        channel.Acquire();
+        auto fixpipe = asc::te::make_copy(asc::te::copy_l0c_to_ub{}, Tile::CopyL0C2UBTraitSplitM{});
+        asc::te::copy(fixpipe.with(asc::te::l0c_to_ub_params(asc::te::unit_flag_mode::enable_update)), partial, c);
+        ++l0cPingPong_;
+        channel.Publish();
+    }
+
     static constexpr bool
         IS_FINALIZE_ROUTING = AscendC::Std::is_same_v<ScheduleType_, Blaze::Gemm::KernelQgmmMxMixFinalizeRouting>;
     static constexpr bool NEED_A_SET_L1_K_ZERO = AscendC::Std::is_one_of_v<AType, fp8_e5m2_t, fp8_e4m3fn_t> ||
@@ -659,6 +749,27 @@ private:
         return tensorBiasL1;
     }
 
+    template <class TensorA_, class TensorB_, class ScaleA_, class ScaleB_, class TensorPartial_, uint32_t BufferCount,
+              class PartialTiles_, class Channel_>
+    __aicore__ inline void IterateDualLevel(TensorA_ tensorAL1, TensorB_ tensorBL1, ScaleA_ tensorScaleAL1,
+                                            ScaleB_ tensorScaleBL1, uint64_t curM, uint64_t curN, uint64_t kStart,
+                                            uint64_t segmentK,
+                                            const PartialBuffers<TensorPartial_, BufferCount, PartialTiles_>& outputs,
+                                            Channel_& channel)
+    {
+        // L1 strips remain resident across the entire producer K loop.
+        PartialTiles_ partials(curM, curN);
+        typename PartialTiles_::Tile partial;
+        while (partials.Next(partial)) {
+            const auto& buffer = outputs.views[channel.BufferIndex()];
+            auto target = buffer.slice(asc::te::make_coord(0L, 0L),
+                                       asc::te::make_shape(CeilAlign(partial.rows, static_cast<int64_t>(SPLIT_M_ALIGN)),
+                                                           DUAL_LEVEL_L0_BASE_N));
+            RunDualLevelMicro(tensorAL1, tensorBL1, tensorScaleAL1, tensorScaleBL1, partial.m, partial.n, partial.rows,
+                              partial.cols, segmentK, GetScaleOffset(kStart % scaleKL1_), target, channel);
+        }
+    }
+
     template <typename TensorL0C, typename TensorAL1, typename TensorBL1, typename TensorScaleAL1,
               typename TensorScaleBL1, typename TensorBiasL1>
     __aicore__ inline void Iterate(TensorL0C tensorL0C, TensorAL1 tensorAL1, TensorBL1 tensorBL1,
@@ -758,6 +869,67 @@ private:
         }
     }
 
+    __aicore__ inline void ReleaseScaleWindow(uint64_t nextK, uint64_t slot)
+    {
+        if (nextK % scaleKL1_ == 0 || nextK >= k_) {
+            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(static_cast<uint16_t>(l1BufferStage_ * SCALE_BUFFER_NUM) +
+                                                            slot);
+            ++scaleLoopCnt_;
+        }
+    }
+
+    template <class TensorA_, class TensorB_, class ScaleA_, class ScaleB_, class Bias_, class TensorC_,
+              class Channel_ = void>
+    __aicore__ inline void RunL1AOuter(TensorA_ gmA, TensorB_ gmB, ScaleA_ gmScaleA, ScaleB_ gmScaleB, Bias_ gmBias,
+                                       TensorC_ tensorL0C, uint64_t curM, uint64_t curN, Channel_* channel = nullptr)
+    {
+        uint64_t totalK = k_;
+        uint64_t stepA = kAL1_;
+        uint64_t stepB = kBL1_;
+        if constexpr (DUAL_LEVEL) {
+            totalK = tensorL0C.totalK;
+            stepA = tensorL0C.segmentK;
+            stepB = stepA;
+        }
+        // A-major: kAL1 >= kBL1, so A is reused across the inner B K strips.
+        for (uint64_t kOuter = 0; kOuter < totalK; kOuter += stepA) {
+            uint64_t scaleL1BufId = scaleLoopCnt_ & 1UL;
+            uint64_t aL1BufId = GetL1BufId(aL1LoopCnt_);
+            uint64_t nextKOuter = kOuter + stepA;
+            uint64_t curGmAKL1 = Min(stepA, totalK - kOuter);
+            // Copy scales once per scaleKL1 window; this may be a no-op inside the window.
+            auto scalePair = CopyScalesInL1(gmScaleA, gmScaleB, curM, curN, kOuter, scaleL1BufId);
+            auto& tensorScaleAL1 = scalePair.scaleA;
+            auto& tensorScaleBL1 = scalePair.scaleB;
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(aL1BufId);
+            auto tensorAL1 = CopyAInL1(gmA, curM, curGmAKL1, aL1BufId, kOuter);
+            // Bias is consumed only by the first effective K tile.
+            auto tensorBiasL1 = CopyBiasInL1(gmBias, curN, scaleL1BufId, NeedBias(kOuter));
+
+            // Walk B K strips under the current A strip, then stage A/B/scale to L0 and MMAD.
+            for (uint64_t kInner = kOuter; kInner < Min(nextKOuter, totalK); kInner += stepB) {
+                uint64_t bL1BufId = GetL1BufId(bL1LoopCnt_);
+                uint64_t curGmBKL1 = Min(stepB, totalK - kInner);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(static_cast<uint16_t>(l1BufferStage_) + bL1BufId);
+                auto tensorBL1 = CopyBInL1(gmB, curN, curGmBKL1, bL1BufId, kInner);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(bL1BufId);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(bL1BufId);
+                if constexpr (DUAL_LEVEL) {
+                    IterateDualLevel(tensorAL1, tensorBL1, tensorScaleAL1, tensorScaleBL1, curM, curN, kInner,
+                                     curGmBKL1, tensorL0C, *channel);
+                } else {
+                    Iterate(tensorL0C, tensorAL1, tensorBL1, tensorScaleAL1, tensorScaleBL1, tensorBiasL1, curM, curN,
+                            curGmAKL1, curGmBKL1, scaleL1BufId, kOuter, kInner, kInner - kOuter, 0);
+                }
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(static_cast<uint16_t>(l1BufferStage_) + bL1BufId);
+                bL1LoopCnt_++;
+            }
+            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(aL1BufId);
+            ReleaseScaleWindow(nextKOuter, scaleL1BufId);
+            aL1LoopCnt_++;
+        }
+    }
+
     template <bool PanelOutput = false, typename TensorA, typename TensorB, typename TensorScaleA,
               typename TensorScaleB, typename TensorBias, typename TensorC>
     __aicore__ inline void RunImpl(const TensorA& gmA, const TensorB& gmB, const TensorScaleA& gmScaleA,
@@ -767,6 +939,7 @@ private:
     {
         constexpr bool isUbOutput = AscendC::Std::is_same_v<asc::te::get_mem_location<TensorC>, asc::te::location::ub>;
         constexpr bool isGmOutput = AscendC::Std::is_same_v<asc::te::get_mem_location<TensorC>, asc::te::location::gm>;
+        static_assert(!DUAL_LEVEL, "Dual-level MMAD requires the partial-buffer overload.");
         static_assert(isUbOutput || isGmOutput, "Block MMAD output tensor must be located in GM or UB.");
 
         // Current output tile shape.
@@ -787,43 +960,7 @@ private:
                                               layoutL0C);
 
         if (orderAL1BL1_) {
-            // A-major: kAL1 >= kBL1, so A is reused across the inner B K strips.
-            for (uint64_t kOuter = 0; kOuter < k_; kOuter += kAL1_) {
-                uint64_t scaleL1BufId = scaleLoopCnt_ & 1UL;
-                uint64_t aL1BufId = GetL1BufId(aL1LoopCnt_);
-                uint64_t nextKOuter = kOuter + kAL1_;
-                uint64_t curGmAKL1 = (nextKOuter > k_) ? (k_ - kOuter) : kAL1_;
-                // Copy scales once per scaleKL1 window; this may be a no-op inside the window.
-                auto scalePair = CopyScalesInL1(gmScaleA, gmScaleB, curM, curN, kOuter, scaleL1BufId);
-                auto& tensorScaleAL1 = scalePair.scaleA;
-                auto& tensorScaleBL1 = scalePair.scaleB;
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(aL1BufId);
-                auto tensorAL1 = CopyAInL1(gmA, curM, curGmAKL1, aL1BufId, kOuter);
-                // Bias is consumed only by the first effective K tile.
-                auto tensorBiasL1 = CopyBiasInL1(gmBias, curN, scaleL1BufId, NeedBias(kOuter));
-
-                // Walk B K strips under the current A strip, then stage A/B/scale to L0 and MMAD.
-                for (uint64_t kInner = kOuter; kInner < Min(kOuter + kAL1_, k_); kInner += kBL1_) {
-                    uint64_t bL1BufId = GetL1BufId(bL1LoopCnt_);
-                    uint64_t curGmBKL1 = (kInner + kBL1_ > k_) ? (k_ - kInner) : kBL1_;
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(static_cast<uint16_t>(l1BufferStage_) + bL1BufId);
-                    auto tensorBL1 = CopyBInL1(gmB, curN, curGmBKL1, bL1BufId, kInner);
-                    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(bL1BufId);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(bL1BufId);
-                    Iterate(tensorL0C, tensorAL1, tensorBL1, tensorScaleAL1, tensorScaleBL1, tensorBiasL1, curM, curN,
-                            curGmAKL1, curGmBKL1, scaleL1BufId, kOuter, kInner, kInner - kOuter, 0);
-                    AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(static_cast<uint16_t>(l1BufferStage_) + bL1BufId);
-                    bL1LoopCnt_++;
-                }
-                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(aL1BufId);
-                // Release the scale buffer when the copied scale window has been fully consumed.
-                if ((nextKOuter % scaleKL1_) == 0 || nextKOuter >= k_) {
-                    AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(
-                        static_cast<uint16_t>(l1BufferStage_ * SCALE_BUFFER_NUM) + scaleL1BufId);
-                    scaleLoopCnt_++;
-                }
-                aL1LoopCnt_++;
-            }
+            RunL1AOuter(gmA, gmB, gmScaleA, gmScaleB, gmBias, tensorL0C, curM, curN);
         } else {
             // B-major: kBL1 > kAL1, so B is reused across the inner A K strips.
             for (uint64_t kOuter = 0; kOuter < k_; kOuter += kBL1_) {

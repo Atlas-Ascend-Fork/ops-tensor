@@ -8,6 +8,7 @@
 
 | 组件名 | 描述 |
 | :----------------------------------------------------------- | :------: |
+| [block_epilogue_dual_level_scale](./block/block_epilogue_dual_level_scale.md) | MXFP4 双级缩放、FP32 分段累加、可选 bias 与 FP16/BF16 输出 |
 | [block_epilogue_empty](./block/block_epilogue_empty.md) | 空后处理组件，用于不支持后处理的 Kernel |
 | [block_epilogue_streamk](./block/block_epilogue_matmul_streamk.md) | StreamK 后处理组件，支持 workspace 汇聚、类型转换、ReLU |
 | [block_epilogue_dequant](./block/block_epilogue_dequant.md) | MIX 模板 dequant 向量后处理，AIV 侧 int32→fp32 × scale + bias → bf16/fp16/fp32 |

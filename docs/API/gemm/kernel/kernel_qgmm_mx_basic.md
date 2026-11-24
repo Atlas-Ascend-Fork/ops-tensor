@@ -383,3 +383,30 @@ kernel(params);
 - group 间 `m` 或 `k` 动态变化
 - 需要 sparse group list / tail split 的 grouped matmul 场景
 - 需要将各 K 分组的结果累加到 FP32 YRef 的场景
+
+## 双级 MXFP4 策略
+
+`GroupedMatmulWithScaleMx<0,false,KernelGroupedMmadWithDualLevelScaleMx>` 使用同一个
+`GemmUniversal`，与 `BlockEpilogueDualLevelScale` 组合执行。该策略要求 X 为 E2M1 ND，
+weight 为 E2M1 NZ/ZN，沿 M 分组，level1 scale 为 ND，输出为 FP16/BF16。
+Host 在生成 tiling 前校验逻辑 K 和 level0 段长。调用方须保证 K 大于 2 且为偶数，并将 `baseK`、`kAL1` 和 `kBL1` 都设为 level0 段长，将 `scaleKAL1` 和 `scaleKBL1` 设为同一个 level1 scale L1 K 窗口。Kernel 在初始化跨核同步前校验 L1 条带等于 level0 段长、段长满足 MX 对齐及 L0 缓冲区容量约束，且 scale 窗口长度是段长的正整数倍。
+Kernel 由 `gmmParams.k` 和 `gmmParams.baseK` 计算包含尾段的段数，用于 level0 scale 偏移和 AIV 侧的 Epilogue 初始化。在 AIC 侧向 BlockMmad 传入逻辑 K 长度和完整 K 段长度。二级量化调用方在 `epilogueParams` 中提供两路 level0 scale 地址，在 `mmadParams` 中提供 bias 和输出地址。Kernel 使用这四个地址、基本块配置和段数构造 Epilogue 的初始化参数。
+Kernel 将 BlockMmad 的 L0 基本块行列上限和行对齐作为 Epilogue `Init` 的模板参数，使 AIC 的 UB 写入视图和 AIV 的读取布局使用同一份定义。
+Kernel 将 `DOUBLE_BUFFER_COUNT` 传给 Epilogue 初始化，并用同一数量校验 UB 视图数组。私有嵌套类 `DualLevelPartialChannel` 按该数量管理连续序号、初始 credit 与最终 drain。
+在 AIC 从 Epilogue 的 `GetAccumulatorTensor` 获取UB 接收 Tensor 视图数组并传给 MMAD 的 `operator()`，
+在 AIV 调用 Epilogue 的 `operator()`。BlockMmad 和 Epilogue 通过模板参数使用通道，不包含 Kernel 头文件。
+单块内的微块遍历器 `DualLevelPartialTiles` 同样为 Kernel 私有嵌套类。Kernel 在
+BlockMmad 和 Epilogue 的 `operator()<PartialTiles_>` 中显式指定相同类型，统一生产与消费顺序，
+不将单块内部的微块遍历纳入 BlockScheduler 的多核任务分配职责。
+两侧共享 partial 微块遍历规则；AIV 不经过 MMAD 的 L1/L0 循环。
+Kernel 将专家与全局输出坐标转换为当前块的两侧 level0 scale、bias 和输出偏移。
+Epilogue 管理 partial 布局，通道管理 ready/credit。
+
+level1 E8M0 scale 每 32 K 生效。每个 level0 K 段产生的 FP32 partial 在 epilogue 中应用两侧
+level0 FP32 scale 后跨段累加，最后加可选 bias 并转换输出。
+`groupListType` 支持 0（结束位置）、1（行数）和 2（专家编号/行数）；type=2 的
+输入形状为 `(E,2)`。调用方须保证专家编号有效、各组行数非负且总和等于 M。
+非零行组在前，零行组在后，两类分组内部均按专家编号递增排列。
+普通 MX 策略保持 AIC 执行和原有调用接口。
+完整组件约束见 [双级 epilogue](../../epilogue/block/block_epilogue_dual_level_scale.md)，
+组装示例见 [dual_level_grouped_matmul](../../../../examples/acl/grouped_matmul/dual_level_grouped_matmul/README.md)。

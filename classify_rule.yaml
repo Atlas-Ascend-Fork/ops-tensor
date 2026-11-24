@@ -11,6 +11,7 @@ matmul@ops-tensor:
     release:
       style:
         - ops/ops-tensor/include/blaze/epilogue/block/block_epilogue_compat.h
+        - ops/ops-tensor/include/blaze/epilogue/block/block_epilogue_dual_level_scale.h
         - ops/ops-tensor/include/blaze/epilogue/block/block_epilogue_empty.h
         - ops/ops-tensor/include/blaze/epilogue/block/block_epilogue_types.h
         - ops/ops-tensor/include/blaze/epilogue/block/block_epilogue_fixpipe.h

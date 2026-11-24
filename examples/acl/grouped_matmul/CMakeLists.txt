@@ -18,3 +18,6 @@ ops_example_add_executable(quant_grouped_matmul_inplace_add VER ascend950
     quant_grouped_matmul_inplace_add/quant_grouped_matmul_inplace_add.cpp)
 ops_example_add_executable(quant_grouped_matmul_mx_a8w4 VER ascend960
     quant_grouped_matmul_mx_a8w4/quant_grouped_matmul_mx_a8w4.cpp)
+
+ops_example_add_executable(dual_level_grouped_matmul VER ascend950
+    dual_level_grouped_matmul/dual_level_grouped_matmul.cpp)

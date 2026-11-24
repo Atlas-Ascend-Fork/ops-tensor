@@ -2,7 +2,7 @@
 > [代码位置](../../../../include/blaze/gemm/block/block_mmad_qgmm_mx.h)
 
 ## 功能说明
-MX 量化 Grouped Matmul 的 Block 组件，基于 Tensor API 实现，仅支持 AIC 计算。
+MX 量化 Grouped Matmul 的 Block 组件，基于 Tensor API 实现。普通 MX 由 AIC 计算；双级量化使用 AIC/AIV 协同执行。
 组件负责单核 block 内的 A/B、ScaleA/ScaleB 搬运与 L0 tile 级 MX Mmad 计算，并处理 bias；
 融合 SwiGLU 路径还可同时计算权重左右两个 N 半区，并将两个结果拼接写入 UB。
 
@@ -47,7 +47,7 @@ enable = (aBytes + bBytes < 128 KiB) || (K <= 1024)
 为 `false` 时使用默认搬运模式。同位宽 MXFP8/MXFP4、DN A / ND B InplaceAdd 和 SwiGLU 拼接路径使用默认搬运模式。
 
 ### 计算模式
-仅支持 AIC 模式，不支持 AIV 计算。
+普通 MX 的 MMAD 在 AIC 执行；双级量化策略下，AIC 生成分段 partial，AIV 通过 epilogue 完成外层 scale、FP32 累加、bias 和输出。
 
 ### 输出目标
 默认将结果直接输出到 GM；当 `TensorC` 位于 UB 时，使用 MIX Split-M copy trait 将 float
@@ -196,22 +196,40 @@ __aicore__ inline void UpdateParamsForNextProblem(const ProblemShape& problemSha
 - 保持同一个 block 组件在不同 group 间复用
 
 ### operator() 函数
+
 ```cpp
 template <typename TensorA, typename TensorB, typename TensorScaleA,
           typename TensorScaleB, typename TensorBias, typename TensorC>
 __aicore__ inline void operator()(
-    const TensorA& gmA,
-    const TensorB& gmB,
-    const TensorScaleA& gmScaleA,
-    const TensorScaleB& gmScaleB,
-    const TensorBias& gmBias,
-    const TensorC& gmC,
-    const BlockShape& blockShape)
+    const TensorA& gmA, const TensorB& gmB,
+    const TensorScaleA& gmScaleA, const TensorScaleB& gmScaleB,
+    const TensorBias& gmBias, const TensorC& gmC,
+    const BlockShape& blockShape);
 ```
 
-功能：
-- 处理一个单核 block 的 MX grouped matmul 计算
-- 输入 tensor 由 kernel 层完成 slice 后传入
+普通 MX 使用原有接口处理一个单核 block；输入 tensor 由 kernel 完成 slice。普通 MX 的 bias、最终输出与面板输出行为保持不变。
+
+### operator() 重载（双级 MX）
+
+```cpp
+template <class PartialTiles_, class TensorA_, class TensorB_, class TensorScaleA_, class TensorScaleB_,
+          class TensorPartial_, uint32_t BufferCount, class Channel_>
+__aicore__ inline void operator()(
+    const TensorA_& gmA, const TensorB_& gmB,
+    const TensorScaleA_& gmScaleA, const TensorScaleB_& gmScaleB,
+    const TensorPartial_ (&partialBuffers)[BufferCount],
+    const BlockShape& blockShape, uint64_t totalK, uint64_t segmentK, Channel_& channel);
+```
+
+`PartialTiles_` 由 Kernel 显式指定，要求支持 `(rows,cols)` 构造、嵌套 `Tile` 类型和 `Next(Tile&)`；`Tile` 提供 `m/n/rows/cols`。Kernel 将同一个私有遍历器类型传给生产端和消费端，保证微块顺序一致。BlockMmad 不依赖 BlockScheduler 或具体 Kernel 类型。
+
+`Channel_` 通过模板推导，要求提供 `BufferIndex/Acquire/Publish`。`Publish` 发出 ready 后推进本地通道序号。`partialBuffers` 是 Kernel 从 Epilogue 获取的 FP32 UB Tensor 视图数组，包含 128×128 微块和 split-M 所需的行对齐。BlockMmad 按缓冲区编号选择视图，并按微块行数切片，UB 地址及列 pitch 由 Epilogue 确定。
+
+仅由双级策略的 AIC 调用。接口复用 `RunL1AOuter` 的 L1 循环、搬运和 scale 缓存，使用 Kernel 下发的 `totalK` 和 `segmentK` 决定 K 范围及 A/B 条带长度。每段按 N/M 顺序生成最多 128×128 的 FP32 partial，跨段归约由 Epilogue 完成。
+
+通道维护两个 UB 部分和缓冲区 的 credit 和 ready/ack。BlockMmad 用自身计数器轮转三路 L0C。两个计数各自跨输出块和专家延续。Kernel 在 AIV 初始化通道 credit，在 AIC 完成后回收 credit。Epilogue 管理 partial 布局、level0 scale、FP32 跨段归约、最终 bias 和 cast。
+
+初始化、scale 与同步接口见 [BlockEpilogueDualLevelScale](../../epilogue/block/block_epilogue_dual_level_scale.md)。
 
 ### SwiGLU 拼接 operator() 函数
 

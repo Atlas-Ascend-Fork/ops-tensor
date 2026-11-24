@@ -17,6 +17,7 @@
 
 cmake_minimum_required(VERSION 3.16)
 project(ops_tensor_examples LANGUAGES CXX)
+include(CTest)
 
 ##############################################################################
 # 1. ASC Compiler Discovery

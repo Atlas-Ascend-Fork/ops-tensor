@@ -19,7 +19,9 @@
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
 #include "blaze/gemm/utils/common_utils.h"
 #include "blaze/gemm/utils/layout_utils.h"
+#include "blaze/gemm/utils/sync.h"
 #include "blaze/gemm/kernel/kernel_universal_decl.h"
+#include "blaze/gemm/policy/dispatch_policy.h"
 #include "tensor_api/tensor.h"
 
 namespace Blaze {
@@ -28,10 +30,100 @@ namespace Gemm {
 namespace Kernel {
 
 template <class ProblemShape, class BlockMmad, class BlockEpilogue, class BlockScheduler>
-class GemmUniversal<ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler,
-                    AscendC::Std::enable_if_t<AscendC::Std::is_same_v<
-                        KernelGroupedMmadWithScaleMx, typename BlockMmad::DispatchPolicy::ScheduleType>>> {
+class GemmUniversal<
+    ProblemShape, BlockMmad, BlockEpilogue, BlockScheduler,
+    AscendC::Std::enable_if_t<
+        AscendC::Std::is_same_v<KernelGroupedMmadWithScaleMx, typename BlockMmad::DispatchPolicy::ScheduleType> ||
+        AscendC::Std::is_same_v<KernelGroupedMmadWithDualLevelScaleMx,
+                                typename BlockMmad::DispatchPolicy::ScheduleType>>> {
 private:
+    struct Level0ScaleAddresses {
+        using Params = Level0ScaleAddresses;
+
+        GM_ADDR level0ScaleAGmAddr{nullptr};
+        GM_ADDR level0ScaleBGmAddr{nullptr};
+    };
+
+    // Both processors enumerate one K segment in N-major, then M-major order.
+    // This is independent of the producer's L1 traversal and the consumer's scales.
+    class DualLevelPartialTiles {
+    public:
+        struct Tile {
+            int64_t m;
+            int64_t n;
+            int64_t rows;
+            int64_t cols;
+        };
+
+        __aicore__ inline DualLevelPartialTiles(int64_t rows, int64_t cols) : rows_(rows), cols_(cols) {}
+
+        __aicore__ inline bool Next(Tile& tile)
+        {
+            if (rows_ <= 0 || n_ >= cols_) {
+                return false;
+            }
+            tile = {m_, n_, Min(BlockMmad::DUAL_LEVEL_L0_BASE_M, rows_ - m_),
+                    Min(BlockMmad::DUAL_LEVEL_L0_BASE_N, cols_ - n_)};
+            m_ += BlockMmad::DUAL_LEVEL_L0_BASE_M;
+            if (m_ >= rows_) {
+                m_ = 0;
+                n_ += BlockMmad::DUAL_LEVEL_L0_BASE_N;
+            }
+            return true;
+        }
+
+    private:
+        int64_t rows_;
+        int64_t cols_;
+        int64_t m_{0};
+        int64_t n_{0};
+    };
+
+    // Kernel owns the lifetime. Each processor keeps the same local sequence across
+    // output tiles and experts. The channel owns only sequencing and credits.
+    class DualLevelPartialChannel {
+    public:
+        __aicore__ inline uint32_t BufferIndex() const { return sequence_ % DOUBLE_BUFFER_COUNT; }
+
+        __aicore__ inline void InitConsumer() const
+        {
+            for (uint32_t slot = 0; slot < DOUBLE_BUFFER_COUNT; ++slot) {
+                Sync::NotifyCube(Sync::FIXPIPE_AIV_ACK_FLAG_BASE + slot);
+            }
+        }
+        __aicore__ inline void Acquire() const
+        {
+            Sync::WaitForVector(Sync::FIXPIPE_AIV_ACK_FLAG_BASE + BufferIndex(), true);
+        }
+        __aicore__ inline void Publish()
+        {
+            Sync::NotifyVector(Sync::FIXPIPE_AIC_READY_FLAG_BASE + BufferIndex(), true);
+            ++sequence_;
+        }
+        __aicore__ inline void WaitReady() const
+        {
+            Sync::WaitForCube(Sync::FIXPIPE_AIC_READY_FLAG_BASE + BufferIndex());
+        }
+        __aicore__ inline void Release()
+        {
+            Sync::NotifyCube(Sync::FIXPIPE_AIV_ACK_FLAG_BASE + BufferIndex());
+            ++sequence_;
+        }
+        __aicore__ inline void DrainProducer() const
+        {
+            for (uint32_t slot = 0; slot < DOUBLE_BUFFER_COUNT; ++slot) {
+                Sync::WaitForVector(Sync::FIXPIPE_AIV_ACK_FLAG_BASE + slot, true);
+            }
+        }
+
+    private:
+        static_assert(DOUBLE_BUFFER_COUNT > 0 && DOUBLE_BUFFER_COUNT <= Sync::FIXPIPE_MAX_SLOT_COUNT,
+                      "Partial buffers require one pair of synchronization flags each.");
+        uint64_t sequence_{0};
+    };
+
+    static constexpr bool DUAL_LEVEL = AscendC::Std::is_same_v<KernelGroupedMmadWithDualLevelScaleMx,
+                                                               typename BlockMmad::DispatchPolicy::ScheduleType>;
     static constexpr uint64_t GROUP_LIST_TYPE_OFFSET = 0UL;
     static constexpr uint64_t GROUP_LIST_TYPE_LENGTH = 1UL;
     static constexpr uint64_t GROUP_LIST_TYPE_SPARSE = 2UL;
@@ -69,7 +161,9 @@ public:
     using LayoutScaleB = typename BlockMmad::LayoutScaleB;
     using LayoutBias = typename BlockMmad::LayoutBias;
 
-    static constexpr bool ENABLE_UB_INPLACE_ADD = !AscendC::Std::is_same_v<BlockEpilogue, Block::BlockEpilogueEmpty>;
+    static constexpr bool HAS_EPILOGUE = !AscendC::Std::is_same_v<BlockEpilogue, Block::BlockEpilogueEmpty>;
+    static constexpr bool ENABLE_UB_INPLACE_ADD = !DUAL_LEVEL && HAS_EPILOGUE;
+    static_assert(!DUAL_LEVEL || HAS_EPILOGUE, "Dual-level MX requires a partial-sum epilogue.");
     static constexpr bool ENABLE_ATOMIC_ADD = DispatchPolicy::IS_ATOMIC_ADD;
     static constexpr bool ENABLE_INPLACE_ADD = ENABLE_UB_INPLACE_ADD || ENABLE_ATOMIC_ADD;
     static_assert(!ENABLE_ATOMIC_ADD || AscendC::Std::is_same_v<BlockEpilogue, Block::BlockEpilogueEmpty>,
@@ -108,9 +202,14 @@ public:
     static constexpr bool TRANS_B = IsTrans<LayoutB>::value;
     static constexpr bool WEIGHT_NZ = IsWeightNz<LayoutB>::value;
     static constexpr bool SCALE_NZ = IsScaleNz<LayoutScaleB>::value;
+    static_assert(!DUAL_LEVEL || (!TRANS_A && WEIGHT_NZ && !SCALE_NZ && AscendC::Std::is_same_v<AType, fp4x2_e2m1_t> &&
+                                  AscendC::Std::is_same_v<BType, fp4x2_e2m1_t>),
+                  "Dual-level GMM requires split-M, E2M1 NZ weight and ND MX scales.");
 
     using BlockMmadParams = typename BlockMmad::Params;
-    using BlockEpilogueParams = typename BlockEpilogue::Params;
+    // Dual-level callers provide the level0 scale addresses. Run assembles the epilogue configuration.
+    using BlockEpilogueParams = typename AscendC::Std::conditional_t<DUAL_LEVEL, Level0ScaleAddresses,
+                                                                     BlockEpilogue>::Params;
     using L1Params = typename BlockMmad::L1Params;
 
     using BlockShape = typename BlockMmad::BlockShape;
@@ -218,13 +317,51 @@ private:
 
     __aicore__ inline void Run(const Params& params)
     {
-        if constexpr (!ENABLE_UB_INPLACE_ADD) {
+        if (params.gmmParams.groupNum == 0) {
+            return;
+        }
+        if constexpr (DUAL_LEVEL) {
+            const auto& gmm = params.gmmParams;
+            if (gmm.k <= 0 || gmm.kAL1 != gmm.baseK || gmm.kBL1 != gmm.baseK || gmm.scaleKAL1 != gmm.scaleKBL1 ||
+                !BlockMmad::SupportsDualLevelK(gmm.baseK, gmm.scaleKAL1)) {
+                ASCENDC_ASSERT(false, {
+                    KERNEL_LOG(KERNEL_ERROR,
+                               "Invalid dual-level K partition: K=%ld, baseK=%u, kAL1=%u, kBL1=%u, scaleKAL1=%u, "
+                               "scaleKBL1=%u",
+                               gmm.k, gmm.baseK, gmm.kAL1, gmm.kBL1, gmm.scaleKAL1, gmm.scaleKBL1);
+                });
+                return;
+            }
+            const auto segmentCount = static_cast<int64_t>(CeilDiv<uint64_t>(gmm.k, gmm.baseK));
+            if ASCEND_IS_AIV {
+                partialChannel_.InitConsumer();
+            }
+            const typename BlockEpilogue::Params epilogueParams{
+                reinterpret_cast<__gm__ float*>(params.epilogueParams.level0ScaleAGmAddr),
+                reinterpret_cast<__gm__ float*>(params.epilogueParams.level0ScaleBGmAddr),
+                reinterpret_cast<__gm__ float*>(params.mmadParams.biasGmAddr),
+                reinterpret_cast<__gm__ CType*>(params.mmadParams.cGmAddr),
+                gmm.n,
+                gmm.baseM,
+                gmm.baseN,
+                segmentCount};
+            epilogueOp_.template Init<BlockMmad::DUAL_LEVEL_L0_BASE_M, BlockMmad::DUAL_LEVEL_L0_BASE_N,
+                                      BlockMmad::SPLIT_M_ALIGN, DOUBLE_BUFFER_COUNT>(epilogueParams);
+            RunGroups(params, segmentCount);
+            if ASCEND_IS_AIC {
+                partialChannel_.DrainProducer();
+            }
+        } else {
+            RunGroups(params, 0);
+        }
+    }
+
+    __aicore__ inline void RunGroups(const Params& params, int64_t segmentCount)
+    {
+        if constexpr (!HAS_EPILOGUE) {
             if ASCEND_IS_AIV {
                 return;
             }
-        }
-        if (params.gmmParams.groupNum == 0) {
-            return;
         }
         Init(params);
         const int64_t groupListSize = static_cast<int64_t>(groupNum_) *
@@ -260,7 +397,7 @@ private:
             }
             BaseMBalance(scheduler, problemM, gmmParams.baseM);
             scheduler.UpdateNextProblem(SchedulerProblemShape{problemM, problemN, problemK, 0});
-            ProcessSingleGroup<false>(scheduler, groupIdx);
+            ProcessSingleGroup<false>(scheduler, groupIdx, gmmParams.baseK, segmentCount);
         }
 
         uint32_t groupIdx = lastGroupIdx;
@@ -276,9 +413,9 @@ private:
             scheduler.UpdateNextProblem(SchedulerProblemShape{problemM, problemN, problemK, 0});
             if (IsLastGroupAndNeedSplit(scheduler)) {
                 scheduler.UpdateTailTile();
-                ProcessSingleGroup<true>(scheduler, groupIdx);
+                ProcessSingleGroup<true>(scheduler, groupIdx, gmmParams.baseK, segmentCount);
             } else {
-                ProcessSingleGroup<false>(scheduler, groupIdx);
+                ProcessSingleGroup<false>(scheduler, groupIdx, gmmParams.baseK, segmentCount);
             }
         }
         if constexpr (ENABLE_ATOMIC_ADD) {
@@ -320,7 +457,7 @@ private:
         }
 
         if ASCEND_IS_AIV {
-            return; // Both sides need group/address metadata; only AIC initializes MMAD resources.
+            return; // Only the producer owns L1/L0 resources.
         }
         const BlockShape l0Shape{static_cast<int64_t>(gmmParams.baseM), static_cast<int64_t>(gmmParams.baseN),
                                  static_cast<int64_t>(gmmParams.baseK), 0};
@@ -333,7 +470,7 @@ private:
         }
         const L1Params l1Params{static_cast<uint64_t>(gmmParams.kAL1), static_cast<uint64_t>(gmmParams.kBL1), scaleKL1};
         const typename BlockMmad::MmadParams mmadParams{
-            l0Shape, l1Params, isBias_, gmmParams.dbL0C == DOUBLE_BUFFER_COUNT, gmmParams.l1BufferStage};
+            l0Shape, l1Params, isBias_ && !DUAL_LEVEL, gmmParams.dbL0C == DOUBLE_BUFFER_COUNT, gmmParams.l1BufferStage};
         mmadOp_.Init(initProblemShape, mmadParams);
     }
 
@@ -446,7 +583,8 @@ private:
     }
 
     template <bool isLastGroupAndNeedSplit, bool UseUb = ENABLE_UB_INPLACE_ADD>
-    __aicore__ inline void ProcessSingleGroup(BlockScheduler& scheduler, uint32_t groupIdx)
+    __aicore__ inline void ProcessSingleGroup(BlockScheduler& scheduler, uint32_t groupIdx, uint32_t segmentK,
+                                              int64_t segmentCount)
     {
         if constexpr (UseUb) {
             // Match PR14161's per-group K policy; the host only knows total K.
@@ -458,7 +596,7 @@ private:
                     AscendC::SetAtomicAdd<float>();
                 }
                 // Both processors must advance the same scheduler and group offsets.
-                ProcessSingleGroup<isLastGroupAndNeedSplit, false>(scheduler, groupIdx);
+                ProcessSingleGroup<isLastGroupAndNeedSplit, false>(scheduler, groupIdx, segmentK, segmentCount);
                 if ASCEND_IS_AIC {
                     AscendC::PipeBarrier<PIPE_FIX>();
                     AscendC::SetAtomicNone();
@@ -543,7 +681,27 @@ private:
             auto gmBlockBias = gmBias.slice(asc::te::make_coord(static_cast<int64_t>(0), nPos),
                                             asc::te::make_shape(static_cast<int64_t>(1), blockN));
             auto gmBlockC = gmC.slice(asc::te::make_coord(mPos, nPos), asc::te::make_shape(blockM, blockN));
-            if constexpr (UseUb) {
+            if constexpr (DUAL_LEVEL) {
+                if ASCEND_IS_AIC {
+                    constexpr auto rows = BlockMmad::DUAL_LEVEL_L0_BASE_M;
+                    constexpr auto cols = BlockMmad::DUAL_LEVEL_L0_BASE_N;
+                    const decltype(epilogueOp_.GetAccumulatorTensor({rows, cols, 0})) partialBuffers[]{
+                        epilogueOp_.GetAccumulatorTensor({rows, cols, 0}),
+                        epilogueOp_.GetAccumulatorTensor({rows, cols, 1})};
+                    static_assert(sizeof(partialBuffers) / sizeof(partialBuffers[0]) == DOUBLE_BUFFER_COUNT,
+                                  "Kernel must provide one view per epilogue partial buffer.");
+                    mmadOp_.template operator()<DualLevelPartialTiles>(
+                        gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, partialBuffers, blockShape,
+                        static_cast<uint64_t>(problemK), segmentK, partialChannel_);
+                }
+                if ASCEND_IS_AIV {
+                    const int64_t globalRow = preOffset_ - problemM + mPos;
+                    const int64_t expertBase = static_cast<int64_t>(groupIdx) * problemN;
+                    epilogueOp_.template operator()<DualLevelPartialTiles>(
+                        blockShape, globalRow * segmentCount, expertBase * segmentCount + nPos, expertBase + nPos,
+                        globalRow * problemN + nPos, isBias_, partialChannel_);
+                }
+            } else if constexpr (UseUb) {
                 auto ubPing = epilogueOp_.GetAccumulatorTensor({blockM, blockN, 0});
                 auto ubPong = epilogueOp_.GetAccumulatorTensor({blockM, blockN, 1});
                 const int64_t panelM = static_cast<int64_t>(asc::te::get<0, 1>(ubPing.layout().shape()));
@@ -577,6 +735,9 @@ private:
 private:
     BlockMmad mmadOp_;
     BlockEpilogue epilogueOp_;
+    // Empty for ordinary MX so that its object/state layout stays lightweight.
+    struct NoPartialChannel {};
+    AscendC::Std::conditional_t<DUAL_LEVEL, DualLevelPartialChannel, NoPartialChannel> partialChannel_;
     uint64_t inplacePanelIndex_{0};
     ProblemShape problemShape_{};
     __gm__ AType* aBasePtr_{nullptr};
