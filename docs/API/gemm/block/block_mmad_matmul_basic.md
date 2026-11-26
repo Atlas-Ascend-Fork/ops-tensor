@@ -23,6 +23,16 @@
 ### 输出目标
 结果直接输出到 GM，不支持 workspace。
 
+### 输出模式（MatmulOutputMode）
+通过模板参数 `OutputMode_` 控制 L0C → GM 搬出行为：
+- `MatmulOutputMode::OVERWRITE`（默认）：覆盖写 GM，普通矩阵乘输出。
+- `MatmulOutputMode::INPLACE_ADD`：原地累加输出。L0C → GM 搬出时使能 fixpipe atomic add
+  （`AscendC::SetAtomicAdd<float>()`），结果累加到 GM 上已存在的值（GM = 原值 + A@B），
+  适用于 GemmV3 等 `out = C + A@B` 的 C 原地累加场景。约束：
+  - 输出 `CType` 仅支持 FP32（编译期 `static_assert`）；
+  - 需保证输出 GM 初始值即 C（或与 C 共用内存），否则累加结果语义不成立；
+  - atomic add 读改写会增加输出搬出开销，仅在确实需要原地累加时使用。
+
 ### Layout Trait
 使用 `IsTrans` 和 `IsWeightNz` traits 判断 Layout：
 - `IsTrans<LayoutA>::value`：判断 A 矩阵是否转置

@@ -401,11 +401,32 @@ private:
         return AscendC::Std::make_tuple(tensorAL0, tensorBL0, tensorBiasL0);
     }
 
+    // INPLACE_ADD（GemmV3 原地累加）场景：C 与 Y 同址，L0C 搬出需使能 atomic add，
+    // 使 GM 结果 = 原 C 值 + A@B。仅支持 FP32 输出。
+    __aicore__ inline void EnableInplaceAdd() const
+    {
+        if constexpr (DispatchPolicy::OUTPUT_MODE == MatmulOutputMode::INPLACE_ADD) {
+            static_assert(AscendC::Std::is_same_v<CType, float>, "GemmV3 inplace add only supports FP32 output");
+            // L0C→GM 搬出为异步 fixpipe，切换 atomic 模式前需与 FIX 流水同步
+            AscendC::PipeBarrier<PIPE_FIX>();
+            AscendC::SetAtomicAdd<float>();
+        }
+    }
+
+    __aicore__ inline void DisableInplaceAdd() const
+    {
+        if constexpr (DispatchPolicy::OUTPUT_MODE == MatmulOutputMode::INPLACE_ADD) {
+            AscendC::PipeBarrier<PIPE_FIX>();
+            AscendC::DisableDmaAtomic();
+        }
+    }
+
     template <typename TensorC, typename TensorL0C>
     __aicore__ inline void CopyL0CToGM(TensorC& gmC, TensorL0C& tensorL0C)
     {
         asc::te::l0c_to_gm_params fixpParams{asc::te::unit_flag_mode::enable_update};
         auto copyL0C2GM = asc::te::make_copy(asc::te::copy_l0c_to_gm{});
+        EnableInplaceAdd();
         if constexpr (IS_INT8_OUT) {
             auto layoutScaleL1 = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, curNOut_);
             auto tensorScaleL1 = asc::te::make_tensor(
@@ -423,6 +444,7 @@ private:
                 asc::te::copy(copyL0C2GM.with(fixpParams), gmC, tensorL0C);
             }
         }
+        DisableInplaceAdd();
     }
 
     template <typename TensorA, typename TensorB, typename TensorBias, typename TensorC>
