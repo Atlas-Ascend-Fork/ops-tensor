@@ -233,7 +233,7 @@ __global__ __aicore__ void QuantBatchMatmulMxKernel(GM_ADDR aGm, GM_ADDR bGm, GM
          asc::te::make_shape(static_cast<int64_t>(baseM), static_cast<int64_t>(baseN),
                              static_cast<int64_t>(tileShapeKL1), static_cast<int64_t>(tileShapeScaleKL1)),
          asc::te::make_shape(static_cast<int64_t>(baseM), static_cast<int64_t>(baseN), static_cast<int64_t>(baseK)),
-         l1BufferNum, biasElements != 0U},
+         l1BufferNum, biasElements != 0U, l1BufferNum},
         {bGm, biasGm, kBubSize, nBubSize},
         {baseM, baseN, 1U, 1U, 1U, 1U, 0U, 0U}};
     Kernel kernel;
