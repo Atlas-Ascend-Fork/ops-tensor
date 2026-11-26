@@ -563,10 +563,14 @@ run_kernel_ut() {
         local test_result=$?
         set -e
 
-        if [ $test_result -ge 124 ]; then
+        if [ "$test_result" -eq 124 ]; then
             log_error "${exe} timeout (${TEST_TIMEOUT}s exceeded)"
             failed=$((failed + 1))
-        elif [ $test_result -ne 0 ]; then
+        elif [ "$test_result" -eq 137 ]; then
+            # timeout -k and an external SIGKILL share the same exit status.
+            log_error "${exe} killed (exit code: 137; timeout escalation or external SIGKILL)"
+            failed=$((failed + 1))
+        elif [ "$test_result" -ne 0 ]; then
             log_error "${exe} failed (exit code: $test_result)"
             failed=$((failed + 1))
         else
