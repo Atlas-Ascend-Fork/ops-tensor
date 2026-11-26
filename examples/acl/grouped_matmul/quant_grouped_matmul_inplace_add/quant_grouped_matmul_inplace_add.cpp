@@ -20,6 +20,10 @@
 
 #include "acl/acl.h"
 #include "kernel_basic_intf.h"
+
+using AscendC::DT_FLOAT;
+using AscendC::DT_FLOAT16;
+
 #include "blaze/epilogue/block/block_epilogue_dequant.h"
 #include "blaze/gemm/block/block_mmad.h"
 #include "blaze/gemm/block/block_scheduler_gmm_swat_with_tail_split.h"
@@ -141,6 +145,10 @@ __global__ __aicore__ void InplaceAddCube(GM_ADDR a, GM_ADDR b, GM_ADDR scale1, 
     tiling.groupType = SPLIT_K;
     tiling.singleW = SINGLE_TENSOR;
     tiling.dbL0C = Blaze::Gemm::DOUBLE_BUFFER_COUNT;
+    if constexpr (std::is_same_v<InputType, fp4x2_e2m1_t>) {
+        // B uses a 64-column NZ fractal in L1.
+        tiling.baseN = Blaze::Gemm::C0_SIZE_B4;
+    }
     if constexpr (IS_HIFLOAT8) {
         tiling.singleX = SINGLE_TENSOR;
         tiling.singleY = SINGLE_TENSOR;
