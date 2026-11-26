@@ -39,6 +39,9 @@
 | [kernel_matmul_with_epilogue](./kernel_matmul_with_epilogue.md) | 公共 Matmul Kernel，AIC 矩阵乘 + 可替换 AIV epilogue，支持 sigmoid、scale_add 等后处理 |
 | [kernel_matmul_iterbatch](./kernel_matmul_iterbatch.md) | IterBatch MatMul Kernel，多 batch 驻留 L1 流水计算，支持 ON_THE_FLY（AIC 直出）和 ND_FIXPIPE_1_2（AIC+AIV）两种输出 |
 | [kernel_grouped_matmul](./kernel_grouped_matmul.md) | 非量化 Grouped Matmul Kernel，支持 M/K 轴分组、不分组、cumsum/count/sparse groupList、ND/NZ weight |
+| [kernel_matmul_syrk](./kernel_matmul_syrk.md) | 对称秩 k 更新 `C = alpha*(A@A^T) + beta*C`，只遍历上三角槽位，镜像 tile 转置写出，每个槽位单条 Mmad 链 |
+| [kernel_tbmm_basic](./kernel_tbmm_basic.md) | TBMM 基础 Kernel，在 MatmulBasic 上扩展 Batch 维度调度、batchSplitFactor 切分与 A 矩阵 Batch 维转置（PERM_X1 非连续） |
+| [kernel_tqbmm](./kernel_tqbmm.md) | TQBMM 三个 GemmUniversal 特化（MX / FP8 Mix / HIFP8 Fixpipe Quant），共享 3D batch 循环与 `perm_x1=[1,0,2]` 非连续遍历 |
 
 ## 公共框架
 
