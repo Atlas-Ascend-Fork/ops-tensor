@@ -19,6 +19,7 @@
 | [kernel_qbmm_mx](./kernel_qbmm_mx.md) | 支持多 Batch 的 MX 量化 Matmul，支持 MxFP4/MxFP8 |
 | [kernel_qbmm_mx_without_batch](./kernel_qbmm_mx_without_batch.md) | Batch 固定为 1 的 MX 量化 Matmul，不处理多 Batch 广播 |
 | [kernel_qbmm_mx_activation_quant](./kernel_qbmm_mx_activation_quant.md) | 支持多 Batch 的 MX 量化 Matmul，融合 GELU/SwiGLU/Swish 激活和动态 MX 量化 |
+| [kernel_rotate_dual_level_quant](./kernel_rotate_dual_level_quant.md) | 普通及 M 轴分组旋转，融合可选 clamp、FP32 一级归一化和 FP4/FP8 MX 量化 |
 | [kernel_qbmm_mix](./kernel_qbmm_mix.md) | 支持多 Batch 的 A8W8 MIX Matmul，AIC 计算、AIV 反量化 |
 | [kernel_qbmm_mix_without_batch](./kernel_qbmm_mix_without_batch.md) | Batch 固定为 1 的 A8W8 MIX Matmul，不处理多 Batch 广播 |
 | [kernel_qgmm_mx_basic](./kernel_qgmm_mx_basic.md) | MX 量化 Grouped Matmul，支持 group list、tail split 和按 K 分组的 FP32 原地累加（MX A8W8、MX A4W4 或 FP8 × FP4/HiFloat4） |

@@ -63,9 +63,10 @@ struct KernelQgmmMxMixFinalizeRouting {};          // MIX AIC+AIV schedule for G
 // MIX AIC+AIV schedule for GroupedMatmulFinalizeRouting per-token dequant (INT8/FP8/HIFLOAT8
 // full-quantization, L0C -> UB splitM -> vector dequant + logit muls + routing scatter).
 struct KernelQgmmMixPertokenFinalizeRouting {};
-struct KernelGroupedMmadNoQuant {};      // Grouped multi-block without quantization
-struct KernelWqgmmMixAntiquant {};       // Grouped vector antiquant
-struct KernelMmadAPrefetchBAntiquant {}; // AIV weight dequantization and AIC matrix multiplication
+struct KernelGroupedMmadNoQuant {};       // Grouped multi-block without quantization
+struct KernelWqgmmMixAntiquant {};        // Grouped vector antiquant
+struct KernelMmadAPrefetchBAntiquant {};  // AIV weight dequantization and AIC matrix multiplication
+struct KernelMmadRotateDualLevelQuant {}; // Rotation matmul with dual-level quantization
 
 enum class MatmulOutputMode : std::uint8_t { OVERWRITE = 0, INPLACE_ADD = 1 };
 enum class MatMulL0C2Out : std::uint8_t { ON_THE_FLY = 0, ND_FIXPIPE_1_1 = 1, ND_FIXPIPE_1_2 = 2 };

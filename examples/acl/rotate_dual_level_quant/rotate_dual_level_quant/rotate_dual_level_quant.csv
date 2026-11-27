@@ -1,0 +1,6 @@
+casename,mode,input_dtype,output_dtype,rotations,clamp
+ordinary_shared_fp4,ordinary,bfloat16,fp4,shared,0
+grouped_count_fp4_clamp,count,float16,fp4,shared,1
+grouped_cumsum_e4m3_clamp,cumsum,float16,e4m3,per_block,1
+grouped_count_e5m2,count,bfloat16,e5m2,per_block,0
+all_groups_empty,empty_groups,bfloat16,fp4,shared,0

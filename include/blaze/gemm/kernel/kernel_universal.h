@@ -59,4 +59,5 @@
 #include "blaze/gemm/kernel/kernel_wqgmm_mix_antiquant.h"
 #include "blaze/gemm/kernel/kernel_wqmm_mix_antiquant.h"
 #include "blaze/gemm/kernel/kernel_wqmm_mix_pergroup.h"
+#include "blaze/gemm/kernel/kernel_rotate_dual_level_quant.h"
 #include "blaze/gemm/kernel/kernel_qgmm_mix_pertoken_finalize_routing.h"

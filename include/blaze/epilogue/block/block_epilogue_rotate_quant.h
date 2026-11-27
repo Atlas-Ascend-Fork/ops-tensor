@@ -33,14 +33,20 @@ namespace Epilogue {
 namespace Block {
 
 template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_,
-          typename FusionOp_ = Fusion::DefaultFusion<DataTypeOut_, DataTypeIn_>>
+          typename FusionOp_ = Fusion::DefaultFusion<DataTypeOut_, DataTypeIn_>, bool EnableLevel0_ = false>
 class BlockEpilogueRotateQuant {
 public:
     using DataTypeIn = DataTypeIn_;
     using DataTypeOut = DataTypeOut_;
     using DataTypeScale = DataTypeScale_;
     using FusionOp = FusionOp_;
+    static constexpr bool ENABLE_LEVEL0 = EnableLevel0_;
 
+    // The dual-level kernel reserves this complete MX workspace in each AIV.
+    // Its collect and FP32 level0 scale buffers must be placed after this region.
+    static constexpr uint32_t NORMALIZED_COLS = 512;
+    static constexpr uint32_t MAX_NORMALIZED_ROWS = 32;
+    static constexpr uint32_t NORMALIZED_WORKSPACE_BYTES = 54 * 1024;
     static_assert(AscendC::IsSameType<DataTypeIn, bfloat16_t>::value,
                   "BlockEpilogueRotateQuant requires BF16 input from Fixpipe.");
     static_assert(sizeof(DataTypeScale) == sizeof(int8_t), "RotateQuant requires one-byte MX scales.");
@@ -54,7 +60,8 @@ public:
     using BlockCoord = AscendC::Te::Coord<int64_t, int64_t, int64_t, int64_t>;
     using ProblemShape = AscendC::Te::Shape<int64_t, int64_t, int64_t, int64_t>;
 
-    struct Params {
+private:
+    struct MxParams {
         GM_ADDR outGmAddr{nullptr};
         GM_ADDR scaleGmAddr{nullptr};
         AscendC::Te::Shape<int64_t, int64_t, int64_t, int64_t> problemShape{};
@@ -69,6 +76,27 @@ public:
         bool splitM{false};
     };
 
+    struct Level0Params {
+        GM_ADDR scaleGmAddr{nullptr};
+        int64_t scalesPerRow{0};
+        uint32_t tileRows{0};
+        uint32_t rotK{0};
+        uint32_t workspaceBase{0}; // Byte offset of the private workspace within this AIV's UB.
+        uint32_t inputPitch{0};    // BF16 elements between rows in a Fixpipe slot.
+        uint32_t collectUbOffset{0};
+        uint32_t level0ScaleUbOffset{0};
+        bfloat16_t alpha{0.0f};
+        bool needClamp{false};
+    };
+
+    struct DualLevelParams {
+        MxParams mx{};
+        Level0Params level0{};
+    };
+
+public:
+    using Params = AscendC::Std::conditional_t<EnableLevel0_, DualLevelParams, MxParams>;
+
     using AccumulatorTensorParams = Blaze::Epilogue::Block::AccumulatorTensorParams;
 
     __aicore__ inline BlockEpilogueRotateQuant();
@@ -78,9 +106,20 @@ public:
     __aicore__ inline void operator()(const BlockShape& blockShape, const BlockCoord& blockCoord);
 
 private:
-    __aicore__ inline uint32_t WaitForFixpipe() const;
-    __aicore__ inline void ReleaseFixpipe(uint32_t slot, bool hasMte3Dependency);
-    __aicore__ inline void Drain();
+    // Original matrix coordinates for this AIV's quantization tile.
+    struct RotateQuantTileContext {
+        int64_t mStart;
+        int64_t nStart;
+        uint32_t rows;
+        uint32_t validCols;
+    };
+
+    __aicore__ inline void ConfigureMx(const MxParams& params);
+    __aicore__ inline void RunLevel0Tile(const RotateQuantTileContext& tile, const Level0Params& level0);
+    __aicore__ inline void NormalizeTile(const RotateQuantTileContext& tile, const Level0Params& level0);
+    __aicore__ inline void StoreLevel0Scale(const RotateQuantTileContext& tile, const Level0Params& level0);
+    __aicore__ inline void ComputeNormalizedTile(const RotateQuantTileContext& tile);
+    __aicore__ inline void StoreNormalizedTile(const RotateQuantTileContext& tile);
 
     __aicore__ inline static constexpr uint32_t WorkspaceBytes(uint32_t maxRows)
     {
@@ -88,6 +127,9 @@ private:
                SCALE_STORE_STRIDE;
     }
 
+    __aicore__ inline uint32_t WaitForFixpipe() const;
+    __aicore__ inline void ReleaseFixpipe(uint32_t slot, bool hasMte3Dependency);
+    __aicore__ inline void Drain();
     __aicore__ inline void SetWorkspace(uint32_t ubBaseOffset, uint32_t writebackEventId);
     static constexpr uint32_t WORKSPACE_COUNT = 2;
     static constexpr int64_t MODE_RINT = 4;
@@ -110,13 +152,20 @@ private:
     static constexpr float SEVEN_FLOAT = 7.0f;
     static constexpr uint32_t SCALE_STORE_STRIDE = 32;
 
+    static_assert(MAX_NORMALIZED_ROWS * NORMALIZED_COLS <= MN_SIZE,
+                  "Normalized tiles must fit the existing MX input buffer.");
+    static_assert(MAX_NORMALIZED_ROWS * (NORMALIZED_COLS / GROUP_SIZE) <= EMAX_SIZE,
+                  "Normalized tiles must fit the existing MX scale buffers.");
+    static_assert(SCALE_BLOCK_UB_OFFSET + MAX_NORMALIZED_ROWS * SCALE_STORE_STRIDE + 512 <= NORMALIZED_WORKSPACE_BYTES,
+                  "Reserve scale rows and a readable vector guard inside the MX workspace.");
+
     static constexpr uint16_t FP4_E2M1_MAX_EXP = 0x0100;
     static constexpr uint16_t FP8_E4M3_MAX_EXP = 0x0400;
     static constexpr uint16_t FP8_E5M2_MAX_EXP = 0x0780;
     static constexpr uint16_t ADD_VALUE_FOR_BF16_MAN1 = 0x003f;
     static constexpr uint16_t ADD_VALUE_FOR_BF16_MAN2 = 0x001f;
 
-    __aicore__ inline void InitGlobalBuffer(Params const& params);
+    __aicore__ inline void InitGlobalBuffer(MxParams const& params);
     __aicore__ inline void InitProblemShape(const ProblemShape& problemShape);
     __aicore__ inline void InitQuantParams(bfloat16_t alpha, bool needClamp, int64_t axis, int64_t roundMode,
                                            int64_t scaleAlg, float dstTypeMax, float invDstTypeMax);
@@ -137,12 +186,263 @@ private:
     static __simd_vf__ inline void PadScaleVf(__ubuf__ int8_t* scaleAddr, __ubuf__ int8_t* scaleBlkAddr,
                                               uint32_t nKRatio, uint16_t firstNum, uint16_t lastNum,
                                               uint16_t rowLoopNum);
+    static __simd_vf__ inline void ZeroNormalizedPaddingVf(__ubuf__ uint8_t* scaleBlkAddr, uint16_t rows,
+                                                           uint16_t paddingColumn);
     static __simd_callee__ inline void DataCopyByCount(__ubuf__ int8_t* dstAddr, __ubuf__ int8_t* srcAddr,
                                                        uint32_t count);
 
+    __aicore__ inline void DrainWorkspace(uint32_t writebackEventId);
     __aicore__ inline void Quant(uint64_t offset, int64_t blkM, int64_t k);
 
-    __aicore__ inline void DrainWorkspace(uint32_t writebackEventId);
+    // Input READY/ACK use events 0 and 1. Event 2 orders all three private-workspace stores.
+    static constexpr uint16_t OUTPUT_EVENT = 2;
+    static constexpr uint32_t GROUPS_PER_BLOCK = NORMALIZED_COLS / GROUP_SIZE;
+    static constexpr uint32_t VECTOR_ELEMENTS = 128;
+    static constexpr uint32_t SCALE_ROW_BYTES = 32;
+    static constexpr uint16_t ABS_MASK = 0x7fff;
+    static constexpr uint16_t BF16_INF = 0x7f80;
+    static constexpr AscendC::Reg::DivSpecificMode DUAL_LEVEL_DIV_MODE = {AscendC::Reg::MaskMergeMode::ZEROING, false,
+                                                                          AscendC::DivAlgo::PRECISION_0ULP_FTZ_FALSE};
+    static constexpr uint32_t FP32_MIN_NORMAL = 0x00800000;
+    static constexpr float MAX_VALUE = AscendC::IsSameType<DataTypeOut, fp4x2_e2m1_t>::value ?
+                                           6.0f :
+                                           (AscendC::IsSameType<DataTypeOut, fp8_e4m3fn_t>::value ? 448.0f : 57344.0f);
+    static constexpr AscendC::Reg::CastTrait CAST_BF16_TO_FP32_ZERO = {
+        AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
+        AscendC::RoundMode::UNKNOWN};
+    static constexpr AscendC::Reg::CastTrait CAST_BF16_TO_FP32_ONE = {
+        AscendC::Reg::RegLayout::ONE, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
+        AscendC::RoundMode::UNKNOWN};
+    static constexpr AscendC::Reg::CastTrait CAST_FP32_TO_BF16 = {
+        AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT, AscendC::Reg::MaskMergeMode::ZEROING,
+        AscendC::RoundMode::CAST_RINT};
+
+    static __simd_vf__ inline void CollectSliceVf(__ubuf__ bfloat16_t* source, __ubuf__ bfloat16_t* collect,
+                                                  uint32_t rows, uint32_t inputPitch, uint32_t rotK)
+    {
+        AscendC::Reg::RegTensor<bfloat16_t> value;
+        for (uint32_t row = 0; row < rows; ++row) {
+            for (uint32_t col = 0; col < rotK; col += VECTOR_ELEMENTS) {
+                uint32_t remaining = rotK - col;
+                auto mask = AscendC::Reg::UpdateMask<bfloat16_t>(remaining);
+                AscendC::Reg::LoadAlign(value, source + row * inputPitch + col);
+                AscendC::Reg::StoreAlign(collect + row * rotK + col, value, mask);
+            }
+        }
+    }
+
+    static __simd_vf__ inline void GatherVf(__ubuf__ bfloat16_t* collect, __ubuf__ bfloat16_t* input, uint32_t rows,
+                                            uint32_t tileRows, uint32_t rotK, uint32_t validCols)
+    {
+        static_assert(!EnableLevel0_ || asc_get_vf_len() / sizeof(bfloat16_t) == VECTOR_ELEMENTS,
+                      "The 512-element level0 implementation requires A5 256-byte vector registers.");
+        AscendC::Reg::RegTensor<bfloat16_t> value;
+        for (uint32_t row = 0; row < rows; ++row) {
+            for (uint32_t block = 0; block < NORMALIZED_COLS / rotK; ++block) {
+                for (uint32_t column = 0; column < rotK; column += VECTOR_ELEMENTS) {
+                    uint32_t remaining = rotK - column;
+                    AscendC::Reg::MaskReg mask = AscendC::Reg::UpdateMask<bfloat16_t>(remaining);
+                    if (block * rotK < validCols) {
+                        AscendC::Reg::LoadAlign(value, collect + (block * tileRows + row) * rotK + column);
+                    } else {
+                        AscendC::Reg::Duplicate(value, static_cast<bfloat16_t>(0));
+                    }
+                    AscendC::Reg::StoreAlign(input + row * NORMALIZED_COLS + block * rotK + column, value, mask);
+                }
+            }
+        }
+    }
+
+    static __simd_vf__ inline void ClampVf(__ubuf__ bfloat16_t* input, __ubuf__ bfloat16_t* limits, uint32_t loopCount)
+    {
+        AscendC::Reg::RegTensor<bfloat16_t> value0, value1, limit, negLimit;
+        AscendC::Reg::RegTensor<uint16_t> signMask;
+        AscendC::Reg::MaskReg mask = AscendC::Reg::CreateMask<bfloat16_t, AscendC::Reg::MaskPattern::ALL>();
+        AscendC::Reg::Duplicate(signMask, static_cast<uint16_t>(0x8000));
+        for (uint32_t i = 0; i < loopCount; ++i) {
+            AscendC::Reg::LoadAlign<bfloat16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                    AscendC::Reg::LoadDist::DIST_DINTLV_B16>(value0, value1, input,
+                                                                             VECTOR_ELEMENTS * 2);
+            AscendC::Reg::LoadAlign<bfloat16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                    AscendC::Reg::LoadDist::DIST_E2B_B16>(limit, limits, 8);
+            AscendC::Reg::Xor(reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(negLimit),
+                              reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(limit), signMask, mask);
+            AscendC::Reg::Max(value0, value0, negLimit, mask);
+            AscendC::Reg::Max(value1, value1, negLimit, mask);
+            AscendC::Reg::Min(value0, value0, limit, mask);
+            AscendC::Reg::Min(value1, value1, limit, mask);
+            AscendC::Reg::Interleave(value0, value1, value0, value1);
+            AscendC::Reg::StoreAlign(input - VECTOR_ELEMENTS * 2, value0, mask);
+            AscendC::Reg::StoreAlign(input - VECTOR_ELEMENTS, value1, mask);
+        }
+    }
+
+    static __simd_callee__ inline void FiniteAbs(AscendC::Reg::RegTensor<uint16_t>& result,
+                                                 AscendC::Reg::RegTensor<bfloat16_t>& value,
+                                                 AscendC::Reg::RegTensor<uint16_t>& absMask,
+                                                 AscendC::Reg::RegTensor<uint16_t>& inf,
+                                                 AscendC::Reg::RegTensor<uint16_t>& zero, AscendC::Reg::MaskReg& mask)
+    {
+        AscendC::Reg::MaskReg nonFinite;
+        AscendC::Reg::And(result, reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(value), absMask, mask);
+        AscendC::Reg::Compare<uint16_t, AscendC::CMPMODE::GE>(nonFinite, result, inf, mask);
+        AscendC::Reg::Select<uint16_t>(result, zero, result, nonFinite);
+    }
+
+    static __simd_callee__ inline void NormalizeVector(__ubuf__ bfloat16_t* dst,
+                                                       AscendC::Reg::RegTensor<bfloat16_t>& value,
+                                                       AscendC::Reg::RegTensor<float>& scale)
+    {
+        AscendC::Reg::RegTensor<float> fp32Zero, fp32One;
+        AscendC::Reg::RegTensor<bfloat16_t> resultZero, resultOne, zero;
+        AscendC::Reg::MaskReg mask16 = AscendC::Reg::CreateMask<bfloat16_t, AscendC::Reg::MaskPattern::ALL>();
+        AscendC::Reg::MaskReg mask32 = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
+        AscendC::Reg::MaskReg zeroMask;
+        AscendC::Reg::Duplicate(zero, static_cast<bfloat16_t>(0));
+        AscendC::Reg::Compare<bfloat16_t, AscendC::CMPMODE::EQ>(zeroMask, value, zero, mask16);
+        AscendC::Reg::Cast<float, bfloat16_t, CAST_BF16_TO_FP32_ZERO>(fp32Zero, value, mask16);
+        AscendC::Reg::Cast<float, bfloat16_t, CAST_BF16_TO_FP32_ONE>(fp32One, value, mask16);
+        if constexpr (EnableLevel0_ && !AscendC::IsSameType<DataTypeOut, fp4x2_e2m1_t>::value) {
+            AscendC::Reg::Div<float, &DUAL_LEVEL_DIV_MODE>(fp32Zero, fp32Zero, scale, mask32);
+            AscendC::Reg::Div<float, &DUAL_LEVEL_DIV_MODE>(fp32One, fp32One, scale, mask32);
+        } else {
+            AscendC::Reg::Div(fp32Zero, fp32Zero, scale, mask32);
+            AscendC::Reg::Div(fp32One, fp32One, scale, mask32);
+        }
+        AscendC::Reg::Cast<bfloat16_t, float, CAST_FP32_TO_BF16>(resultZero, fp32Zero, mask32);
+        AscendC::Reg::Cast<bfloat16_t, float, CAST_FP32_TO_BF16>(resultOne, fp32One, mask32);
+        AscendC::Reg::Pack<uint16_t, uint32_t, AscendC::Reg::HighLowPart::LOWEST>(
+            reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(resultZero),
+            reinterpret_cast<AscendC::Reg::RegTensor<uint32_t>&>(resultZero));
+        AscendC::Reg::Pack<uint16_t, uint32_t, AscendC::Reg::HighLowPart::LOWEST>(
+            reinterpret_cast<AscendC::Reg::RegTensor<uint16_t>&>(resultOne),
+            reinterpret_cast<AscendC::Reg::RegTensor<uint32_t>&>(resultOne));
+        AscendC::Reg::Interleave(resultZero, resultOne, resultZero, resultOne);
+        // Restore the original signed zero instead of retaining the result of 0/0.
+        AscendC::Reg::Select<bfloat16_t>(resultZero, value, resultZero, zeroMask);
+        AscendC::Reg::StoreAlign(dst, resultZero, mask16);
+    }
+
+    // Stage 2 for dual FP4 with a custom denominator. The FP32 quotient decides the E8M0 boundary.
+    static __simd_vf__ inline void GenDualFp4CublasScaleVf(__ubuf__ uint16_t* maxima, __ubuf__ uint8_t* scales,
+                                                           __ubuf__ uint16_t* reciprocals, uint32_t totalScale,
+                                                           float dstTypeMax)
+    {
+        namespace Reg = AscendC::Reg;
+        constexpr uint32_t LANES = asc_get_vf_len() / sizeof(float);
+        constexpr int16_t FP32_MANTISSA_BITS = 23;
+        constexpr int16_t BF16_MANTISSA_BITS = 7;
+        Reg::RegTensor<float> maximum, divisor;
+        Reg::RegTensor<uint16_t> unpacked, packed;
+        Reg::RegTensor<uint32_t> exponent, fraction, nextExponent, code, inverse;
+        Reg::RegTensor<uint32_t> fractionMask, zero, nanCode, nanInverse, inverseBias;
+        Reg::MaskReg finite, nonzero, roundUp, predicate;
+        Reg::Duplicate(divisor, dstTypeMax);
+        Reg::Duplicate(fractionMask, 0x007fffffU);
+        Reg::Duplicate(zero, 0U);
+        Reg::Duplicate(nanCode, 0xffU);
+        Reg::Duplicate(nanInverse, 0x7f81U);
+        Reg::Duplicate(inverseBias, 0x7f00U);
+
+        for (uint32_t offset = 0; offset < totalScale; offset += LANES) {
+            uint32_t remaining = totalScale - offset;
+            uint32_t storeCount = remaining < LANES ? remaining : LANES;
+            auto storeMask = Reg::UpdateMask<uint16_t>(storeCount);
+            auto mask = Reg::UpdateMask<uint32_t>(remaining);
+            Reg::LoadAlign<uint16_t, Reg::LoadDist::DIST_UNPACK_B16>(unpacked, maxima + offset);
+            Reg::Cast<float, bfloat16_t, CAST_BF16_TO_FP32_ZERO>(
+                maximum, reinterpret_cast<Reg::RegTensor<bfloat16_t>&>(unpacked), mask);
+            auto& bits = reinterpret_cast<Reg::RegTensor<uint32_t>&>(maximum);
+            Reg::CompareScalar<uint32_t, AscendC::CMPMODE::LT>(finite, bits, 0x7f800000U, mask);
+            Reg::CompareScalar<uint32_t, AscendC::CMPMODE::NE>(nonzero, bits, 0U, mask);
+            Reg::Div<float, &DUAL_LEVEL_DIV_MODE>(maximum, maximum, divisor, mask);
+
+            Reg::ShiftRights(exponent, bits, FP32_MANTISSA_BITS, mask);
+            Reg::And(fraction, bits, fractionMask, mask);
+            // FP4 rounds up only normalized, in-range quotients with a nonzero fraction.
+            Reg::CompareScalar<uint32_t, AscendC::CMPMODE::GT>(roundUp, exponent, 0U, mask);
+            Reg::CompareScalar<uint32_t, AscendC::CMPMODE::LT>(predicate, exponent, 254U, mask);
+            Reg::MaskAnd(roundUp, roundUp, predicate, mask);
+            Reg::CompareScalar<uint32_t, AscendC::CMPMODE::NE>(predicate, fraction, 0U, mask);
+            Reg::MaskAnd(roundUp, roundUp, predicate, mask);
+            Reg::Adds(nextExponent, exponent, 1U, mask);
+            Reg::Select(code, nextExponent, exponent, roundUp);
+            Reg::Select(code, code, nanCode, finite);
+            Reg::Select(code, code, zero, nonzero);
+            Reg::Pack<uint16_t, uint32_t, Reg::HighLowPart::LOWEST>(packed, code);
+            Reg::StoreAlign<uint16_t, Reg::StoreDist::DIST_PACK_B16>(
+                reinterpret_cast<__ubuf__ uint16_t*>(scales + offset), packed, storeMask);
+
+            Reg::ShiftLefts(inverse, code, BF16_MANTISSA_BITS, mask);
+            Reg::Sub(inverse, inverseBias, inverse, mask);
+            Reg::Select(inverse, inverse, nanInverse, finite);
+            Reg::Select(inverse, inverse, zero, nonzero);
+            Reg::Pack<uint16_t, uint32_t, Reg::HighLowPart::LOWEST>(packed, inverse);
+            Reg::StoreAlign<uint16_t>(reciprocals + offset, packed, storeMask);
+        }
+    }
+
+    static __simd_vf__ inline void NormalizeVf(__ubuf__ bfloat16_t* input, __ubuf__ float* level0Scale, uint32_t rows)
+    {
+        AscendC::Reg::RegTensor<bfloat16_t> x0, x1, x2, x3;
+        AscendC::Reg::RegTensor<uint16_t> abs0, abs1, abs2, abs3, absMask, inf, zero16;
+        AscendC::Reg::RegTensor<uint32_t> minNormal, zero32;
+        AscendC::Reg::RegTensor<float> scale;
+        AscendC::Reg::MaskReg mask16 = AscendC::Reg::CreateMask<uint16_t, AscendC::Reg::MaskPattern::ALL>();
+        AscendC::Reg::MaskReg mask32 = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
+        AscendC::Reg::MaskReg underflow;
+        AscendC::Reg::Duplicate(absMask, ABS_MASK);
+        AscendC::Reg::Duplicate(inf, BF16_INF);
+        AscendC::Reg::Duplicate(zero16, static_cast<uint16_t>(0));
+        AscendC::Reg::Duplicate(zero32, static_cast<uint32_t>(0));
+        AscendC::Reg::Duplicate(minNormal, FP32_MIN_NORMAL);
+        constexpr bool useFp8Quotient = EnableLevel0_ && !AscendC::IsSameType<DataTypeOut, fp4x2_e2m1_t>::value;
+        AscendC::Reg::RegTensor<float> divisor;
+        if constexpr (useFp8Quotient) {
+            AscendC::Reg::Duplicate(divisor, MAX_VALUE);
+        }
+        for (uint32_t row = 0; row < rows; ++row) {
+            auto rowAddr = input + row * NORMALIZED_COLS;
+            AscendC::Reg::LoadAlign(x0, rowAddr);
+            AscendC::Reg::LoadAlign(x1, rowAddr + VECTOR_ELEMENTS);
+            AscendC::Reg::LoadAlign(x2, rowAddr + VECTOR_ELEMENTS * 2);
+            AscendC::Reg::LoadAlign(x3, rowAddr + VECTOR_ELEMENTS * 3);
+            // Follow DynamicDualLevelMxQuant: only the amax statistic excludes Inf/NaN.
+            FiniteAbs(abs0, x0, absMask, inf, zero16, mask16);
+            FiniteAbs(abs1, x1, absMask, inf, zero16, mask16);
+            FiniteAbs(abs2, x2, absMask, inf, zero16, mask16);
+            FiniteAbs(abs3, x3, absMask, inf, zero16, mask16);
+            AscendC::Reg::Max(abs0, abs0, abs1, mask16);
+            AscendC::Reg::Max(abs2, abs2, abs3, mask16);
+            AscendC::Reg::Max(abs0, abs0, abs2, mask16);
+            AscendC::Reg::Reduce<AscendC::Reg::ReduceType::MAX>(abs0, abs0, mask16);
+            AscendC::Reg::Cast<float, bfloat16_t, CAST_BF16_TO_FP32_ZERO>(
+                scale, reinterpret_cast<AscendC::Reg::RegTensor<bfloat16_t>&>(abs0), mask16);
+            if constexpr (useFp8Quotient) {
+                AscendC::Reg::Div<float, &DUAL_LEVEL_DIV_MODE>(scale, scale, divisor, mask32);
+            } else {
+                AscendC::Reg::Muls(scale, scale, 1.0f / MAX_VALUE, mask32);
+            }
+            AscendC::Reg::Compare<uint32_t, AscendC::CMPMODE::LT>(
+                underflow, reinterpret_cast<AscendC::Reg::RegTensor<uint32_t>&>(scale), minNormal, mask32);
+            AscendC::Reg::Select<float>(scale, reinterpret_cast<AscendC::Reg::RegTensor<float>&>(zero32), scale,
+                                        underflow);
+            auto scaleAddr = level0Scale + row * (SCALE_ROW_BYTES / sizeof(float));
+            AscendC::Reg::UnalignRegForStore unalign;
+            AscendC::Reg::StoreUnAlign<float, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(scaleAddr, scale, unalign,
+                                                                                           1);
+            AscendC::Reg::StoreUnAlignPost<float, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(scaleAddr, unalign, 0);
+            AscendC::Reg::Duplicate(scale, scale, mask32);
+            // All 512 original values are already in registers before any in-place write.
+            NormalizeVector(rowAddr, x0, scale);
+            NormalizeVector(rowAddr + VECTOR_ELEMENTS, x1, scale);
+            NormalizeVector(rowAddr + VECTOR_ELEMENTS * 2, x2, scale);
+            NormalizeVector(rowAddr + VECTOR_ELEMENTS * 3, x3, scale);
+        }
+    }
+
+    struct NoLevel0Params {};
+    AscendC::Std::conditional_t<EnableLevel0_, Level0Params, NoLevel0Params> level0_{};
 
     // ---- Shape ----
     struct RotateQuantShapeInfo {
@@ -171,28 +471,83 @@ private:
     uint32_t writebackEventId_ = 0;
     bool deferWriteback_ = false;
     bool pendingWriteback_[WORKSPACE_COUNT] = {false, false};
+    bool inputDoubleBuffered_{false};
     uint32_t ubSlotBytes_{AscendC::TOTAL_UB_SIZE};
     bool splitM_{false};
     uint64_t inputSequence_{0};
 };
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_,
-                                           FusionOp_>::BlockEpilogueRotateQuant()
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void
+BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_, EnableLevel0_>::ComputeNormalizedTile(
+    const RotateQuantTileContext& tile)
+{
+    if ASCEND_IS_AIC {
+        return;
+    }
+    if (tile.rows == 0 || tile.validCols == 0) {
+        return;
+    }
+
+    // Every row has a complete 512-value physical stride, including a zero tail.
+    // It is therefore safe to scan the tile linearly without mixing MX groups.
+    AscendC::PipeBarrier<PIPE_V>();
+    ComputeMxQuant(tile.rows * NORMALIZED_COLS);
+    AscendC::PipeBarrier<PIPE_V>();
+    ClearScaleBlock(tile.rows);
+    AscendC::PipeBarrier<PIPE_V>();
+    ComputeTransLayout(static_cast<uint16_t>(tile.rows), NORMALIZED_COLS / GROUP_SIZE);
+    AscendC::PipeBarrier<PIPE_V>();
+
+    const uint32_t scalesPerRow = Gemm::CeilDiv<int64_t>(shape_.n, GROUP_SIZE);
+    const uint32_t validScales = tile.validCols / GROUP_SIZE;
+    const bool padLastScale = tile.nStart + tile.validCols == shape_.n && (scalesPerRow & 1) != 0;
+    if (padLastScale) {
+        // A zero-valued padded MX group does not define the public padding byte.
+        // Set the byte explicitly after transposing the full 16-scale source rows.
+        asc_vf_call<ZeroNormalizedPaddingVf>(reinterpret_cast<__ubuf__ uint8_t*>(ubBaseOffset_ + SCALE_BLOCK_UB_OFFSET),
+                                             static_cast<uint16_t>(tile.rows), static_cast<uint16_t>(validScales));
+    }
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::StoreNormalizedTile(const RotateQuantTileContext& tile)
+{
+    if (tile.rows == 0 || tile.validCols == 0) {
+        return;
+    }
+    const uint32_t scalesPerRow = Gemm::CeilDiv<int64_t>(shape_.n, GROUP_SIZE);
+    const uint32_t storedScalesPerRow = scalesPerRow + (scalesPerRow & 1);
+    const uint32_t validScales = tile.validCols / GROUP_SIZE;
+    const bool padLastScale = tile.nStart + tile.validCols == shape_.n && (scalesPerRow & 1) != 0;
+    constexpr uint32_t ELEMENTS_PER_BYTE = AscendC::IsSameType<DataTypeOut, fp4x2_e2m1_t>::value ? 2 : 1;
+    const uint64_t yOffset = (static_cast<uint64_t>(tile.mStart) * shape_.n + tile.nStart) / ELEMENTS_PER_BYTE;
+    const uint64_t scaleOffset = static_cast<uint64_t>(tile.mStart) * storedScalesPerRow + tile.nStart / GROUP_SIZE;
+
+    CopyUbToGm(cGlobal_ + yOffset, Y_UB_OFFSET, static_cast<uint16_t>(tile.rows), tile.validCols / ELEMENTS_PER_BYTE,
+               NORMALIZED_COLS / ELEMENTS_PER_BYTE, static_cast<uint32_t>(shape_.n / ELEMENTS_PER_BYTE));
+    CopyScaleFromUbToGm(scaleOffset, SCALE_BLOCK_UB_OFFSET, static_cast<uint16_t>(tile.rows),
+                        validScales + static_cast<uint32_t>(padLastScale), storedScalesPerRow, SCALE_STORE_STRIDE);
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                           EnableLevel0_>::BlockEpilogueRotateQuant()
 {}
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_,
-                                           FusionOp_>::~BlockEpilogueRotateQuant()
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                           EnableLevel0_>::~BlockEpilogueRotateQuant()
 {
     if ASCEND_IS_AIV {
         Drain();
     }
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
 __aicore__ inline auto
-BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::GetAccumulatorTensor(
+BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_, EnableLevel0_>::GetAccumulatorTensor(
     const AccumulatorTensorParams& params) const
 {
     const int64_t alignN = Gemm::CeilAlign(params.cols, static_cast<int64_t>(Gemm::BLOCK_CUBE));
@@ -202,46 +557,62 @@ BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::
                                 asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(params.rows, alignN));
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::Init(
-    Params const& params)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::Init(Params const& params)
 {
-    const uint32_t slotBytes = params.ubDB == 2 ? AscendC::TOTAL_UB_SIZE / 2 : AscendC::TOTAL_UB_SIZE;
+    if constexpr (EnableLevel0_) {
+        level0_ = params.level0;
+        const uint32_t base = level0_.workspaceBase;
+        const bool validWorkspace = base % 32 == 0 &&
+                                    static_cast<uint64_t>(base) + NORMALIZED_WORKSPACE_BYTES <= AscendC::TOTAL_UB_SIZE;
+        ASCENDC_ASSERT(validWorkspace, { KERNEL_LOG(KERNEL_ERROR, "Invalid normalized MX workspace"); });
+        ubBaseOffset_ = base;
+        ConfigureMx(params.mx);
+    } else {
+        const uint32_t slotBytes = params.ubDB == 2 ? AscendC::TOTAL_UB_SIZE / 2 : AscendC::TOTAL_UB_SIZE;
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
-    const bool validInput = (params.ubDB == 1 || params.ubDB == 2) && !params.splitM;
+        const bool validInput = (params.ubDB == 1 || params.ubDB == 2) && !params.splitM;
 #else
-    const bool validInput = params.ubDB == 1 || params.ubDB == 2;
+        const bool validInput = params.ubDB == 1 || params.ubDB == 2;
 #endif
-    const bool validWorkspace = validInput && WorkspaceBytes(0) <= slotBytes;
-    ASCENDC_ASSERT(validWorkspace, { KERNEL_LOG(KERNEL_ERROR, "Invalid RotateQuant epilogue workspace"); });
-    ubSlotBytes_ = slotBytes;
-    splitM_ = params.splitM;
-    inputSequence_ = 0;
-    SetWorkspace(0, 0);
-    deferWriteback_ = params.ubDB == 2;
-    // 饱和模式由单指令设置生效
-    InitGlobalBuffer(params);
-    InitProblemShape(params.problemShape);
-    InitQuantParams(params.alpha, params.needClamp, params.axis, params.roundMode, params.scaleAlg, params.dstTypeMax,
-                    params.invDstTypeMax);
+        const bool validWorkspace = validInput && WorkspaceBytes(0) <= slotBytes;
+        ASCENDC_ASSERT(validWorkspace, { KERNEL_LOG(KERNEL_ERROR, "Invalid RotateQuant epilogue workspace"); });
+        SetWorkspace(0, 0);
+        ConfigureMx(params);
+    }
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline uint32_t
-BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::WaitForFixpipe() const
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::ConfigureMx(const MxParams& params)
 {
-    const uint32_t slot = deferWriteback_ ? inputSequence_ & 1U : 0U;
+    inputDoubleBuffered_ = params.ubDB == 2;
+    ubSlotBytes_ = inputDoubleBuffered_ ? AscendC::TOTAL_UB_SIZE / 2 : AscendC::TOTAL_UB_SIZE;
+    deferWriteback_ = inputDoubleBuffered_ && !EnableLevel0_;
+    splitM_ = params.splitM;
+    inputSequence_ = 0;
+    InitGlobalBuffer(params);
+    InitProblemShape(params.problemShape);
+    InitQuantParams(params.alpha, !EnableLevel0_ && params.needClamp, params.axis, params.roundMode, params.scaleAlg,
+                    params.dstTypeMax, params.invDstTypeMax);
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline uint32_t
+BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_, EnableLevel0_>::WaitForFixpipe() const
+{
+    const uint32_t slot = inputDoubleBuffered_ ? inputSequence_ & 1U : 0U;
     Gemm::Sync::WaitForCube<Gemm::Sync::SYNC_MODE_INTRA, PIPE_V>(Gemm::Sync::FIXPIPE_AIC_READY_FLAG_BASE + slot);
     return slot;
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::ReleaseFixpipe(
-    uint32_t slot, bool hasMte3Dependency)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::ReleaseFixpipe(uint32_t slot, bool hasMte3Dependency)
 {
-    // Zero-row consumers still need the V-to-MTE3 edge before returning the ACK.
-    // Quant already supplies this edge when it submits an actual GM writeback.
     if (!hasMte3Dependency) {
+        // Order Vector reads before ACK when no GM store already orders MTE3.
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(slot);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(slot);
     }
@@ -249,26 +620,28 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     ++inputSequence_;
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::SetWorkspace(
-    uint32_t ubBaseOffset, uint32_t writebackEventId)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::SetWorkspace(uint32_t ubBaseOffset,
+                                                                             uint32_t writebackEventId)
 {
     // The consumer advances once for every Fixpipe chunk, including zero-row lanes.
     ubBaseOffset_ = ubBaseOffset;
     writebackEventId_ = writebackEventId;
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::Drain()
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void
+BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_, EnableLevel0_>::Drain()
 {
     for (uint32_t eventId = 0; eventId < WORKSPACE_COUNT; ++eventId) {
         DrainWorkspace(eventId);
     }
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::DrainWorkspace(
-    uint32_t writebackEventId)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::DrainWorkspace(uint32_t writebackEventId)
 {
     if (pendingWriteback_[writebackEventId]) {
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(writebackEventId);
@@ -276,9 +649,9 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     }
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::Quant(
-    uint64_t offset, int64_t blkM, int64_t k)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::Quant(uint64_t offset, int64_t blkM, int64_t k)
 {
     DrainWorkspace(writebackEventId_);
     const bool validWorkspace = blkM > 0 && k > 0 &&
@@ -343,47 +716,57 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     }
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::operator()(
-    const BlockShape& blockShape, const BlockCoord& blockCoord)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::operator()(const BlockShape& blockShape,
+                                                                           const BlockCoord& blockCoord)
 {
-    const uint32_t slot = WaitForFixpipe();
-    SetWorkspace(slot * ubSlotBytes_, slot);
-    DrainWorkspace(slot);
     const int64_t fullM = asc::te::get<Gemm::MNK_M>(blockShape);
     const int64_t rowsPerAiv = splitM_ ? Gemm::CeilDiv(fullM, int64_t{2}) : fullM;
     const int64_t rowStart = static_cast<int64_t>(AscendC::GetSubBlockIdx()) * rowsPerAiv;
     const int64_t localRows = Gemm::Max(int64_t{0}, Gemm::Min(rowsPerAiv, fullM - rowStart));
-    if (localRows > 0) {
-        const int64_t k = asc::te::get<Gemm::MNK_N>(blockShape);
-        const uint64_t offset = (asc::te::get<Gemm::MNK_M>(blockCoord) + rowStart) * shape_.b +
-                                asc::te::get<Gemm::MNK_B>(blockCoord);
-        Quant(offset, localRows, k);
+    if constexpr (EnableLevel0_) {
+        const RotateQuantTileContext tile{asc::te::get<Gemm::MNK_M>(blockCoord) + rowStart,
+                                          asc::te::get<Gemm::MNK_N>(blockCoord), static_cast<uint32_t>(localRows),
+                                          static_cast<uint32_t>(asc::te::get<Gemm::MNK_N>(blockShape))};
+        RunLevel0Tile(tile, level0_);
+    } else {
+        const uint32_t slot = WaitForFixpipe();
+        SetWorkspace(slot * ubSlotBytes_, slot);
+        DrainWorkspace(slot);
+        if (localRows > 0) {
+            const int64_t k = asc::te::get<Gemm::MNK_N>(blockShape);
+            const uint64_t offset = (asc::te::get<Gemm::MNK_M>(blockCoord) + rowStart) * shape_.b +
+                                    asc::te::get<Gemm::MNK_B>(blockCoord);
+            Quant(offset, localRows, k);
+        }
+        ReleaseFixpipe(slot, localRows > 0);
     }
-    ReleaseFixpipe(slot, localRows > 0);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::InitGlobalBuffer(
-    Params const& params)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::InitGlobalBuffer(MxParams const& params)
 {
     cGlobal_ = reinterpret_cast<__gm__ int8_t*>(params.outGmAddr);
     scaleGlobal_ = reinterpret_cast<__gm__ int8_t*>(params.scaleGmAddr);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::InitProblemShape(
-    const ProblemShape& problemShape)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::InitProblemShape(const ProblemShape& problemShape)
 {
     shape_.m = asc::te::get<Gemm::MNK_M>(problemShape);
     shape_.n = asc::te::get<Gemm::MNK_N>(problemShape);
     shape_.b = asc::te::get<Gemm::MNK_B>(problemShape);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::InitQuantParams(
-    bfloat16_t alpha, bool needClamp, int64_t axis, int64_t roundMode, int64_t scaleAlg, float dstTypeMax,
-    float invDstTypeMax)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::InitQuantParams(bfloat16_t alpha, bool needClamp,
+                                                                                int64_t axis, int64_t roundMode,
+                                                                                int64_t scaleAlg, float dstTypeMax,
+                                                                                float invDstTypeMax)
 {
     alpha_ = alpha;
     needClamp_ = needClamp;
@@ -408,10 +791,11 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     }
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::CopyUbToGm(
-    __gm__ int8_t* dst, uint32_t srcUbOffset, uint16_t rows, uint32_t columns, uint32_t srcRowPitch,
-    uint32_t dstRowPitch)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::CopyUbToGm(__gm__ int8_t* dst, uint32_t srcUbOffset,
+                                                                           uint16_t rows, uint32_t columns,
+                                                                           uint32_t srcRowPitch, uint32_t dstRowPitch)
 {
     auto ubLayout = Gemm::MakeNDExtLayout<int8_t>(rows, columns, srcRowPitch);
     auto gmLayout = Gemm::MakeNDExtLayout<int8_t>(rows, columns, dstRowPitch);
@@ -421,10 +805,10 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     asc::te::copy(asc::te::make_copy(asc::te::copy_ub_to_gm{}), output, src);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_,
-                                                FusionOp_>::CopyOutputFromUbToGm(uint64_t offset, uint16_t blockCount,
-                                                                                 uint32_t dataSize, uint32_t dstStride)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void
+BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_, EnableLevel0_>::CopyOutputFromUbToGm(
+    uint64_t offset, uint16_t blockCount, uint32_t dataSize, uint32_t dstStride)
 {
     uint32_t srcUbOffset = Y_UB_OFFSET;
     uint32_t srcStride = dataSize;
@@ -441,20 +825,21 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     CopyUbToGm(cGlobal_ + offset, srcUbOffset, blockCount, dataSize, srcStride, dstStride == 0 ? dataSize : dstStride);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_,
-                                                FusionOp_>::CopyScaleFromUbToGm(uint64_t offset, uint32_t srcUbOffset,
-                                                                                uint16_t blockCount, uint32_t dataSize,
-                                                                                uint32_t dstStride, uint32_t srcStride)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void
+BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_, EnableLevel0_>::CopyScaleFromUbToGm(
+    uint64_t offset, uint32_t srcUbOffset, uint16_t blockCount, uint32_t dataSize, uint32_t dstStride,
+    uint32_t srcStride)
 {
     CopyUbToGm(scaleGlobal_ + offset, srcUbOffset, blockCount, dataSize, srcStride,
                dstStride == 0 ? dataSize : dstStride);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_,
-                                                FusionOp_>::CopyPadScaleFromUbToGm(uint64_t offset, uint32_t nKRatio,
-                                                                                   uint32_t nkIdx, uint32_t blkM)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::CopyPadScaleFromUbToGm(uint64_t offset,
+                                                                                       uint32_t nKRatio, uint32_t nkIdx,
+                                                                                       uint32_t blkM)
 {
     uint16_t firstNum = (nKRatio - nkIdx <= blkM) ? nKRatio - nkIdx : blkM;
     uint16_t rowLoopNum = (firstNum < blkM) ? (blkM - firstNum) / nKRatio : 0;
@@ -479,9 +864,9 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     }
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::ComputeMxQuant(
-    uint32_t totalDataInUB)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::ComputeMxQuant(uint32_t totalDataInUB)
 {
     const uint32_t totalScale = Gemm::CeilDiv<uint32_t>(totalDataInUB, GROUP_SIZE);
     auto dataLayout = Gemm::MakeNDExtLayout<int8_t>(1, static_cast<int64_t>(totalDataInUB),
@@ -512,7 +897,7 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
         cfg.alg = Tile::MxScaleAlg::OCP;
     } else if (dstTypeMax_ == SIX_FLOAT || dstTypeMax_ == SEVEN_FLOAT) {
         cfg.alg = Tile::MxScaleAlg::DYN_DTYPE_RANGE;
-    } else { // FP4 cuBLAS: dstTypeMax in [6, 12], excluding 6 and 7; reciprocal comes from host.
+    } else { // FP4 cuBLAS: dstTypeMax in [6, 12], excluding 6 and 7.
         cfg.alg = Tile::MxScaleAlg::CUBLAS;
     }
 
@@ -524,7 +909,27 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
         // useAbs: OCP 取指数字段，cuBLAS/Dyn 取绝对值位
         mx.GroupMaxExp(srcTensor, maxExpTensor, totalDataInUB, scaleAlg_ != 0);
     }
-    mx.GenScale(maxExpTensor, yScaleTensor, reciprocalTensor, cfg, totalScale);
+    if constexpr (EnableLevel0_) {
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+    if constexpr (EnableLevel0_ && AscendC::IsSameType<DataTypeOut, fp4x2_e2m1_t>::value) {
+        cfg.zeroScaleOnZeroExp = cfg.alg == Tile::MxScaleAlg::OCP;
+        if (cfg.alg == Tile::MxScaleAlg::CUBLAS) {
+            if ASCEND_IS_AIV {
+                asc_vf_call<GenDualFp4CublasScaleVf>(
+                    reinterpret_cast<__ubuf__ uint16_t*>(maxExpTensor.data().get()),
+                    reinterpret_cast<__ubuf__ uint8_t*>(yScaleTensor.data().get()),
+                    reinterpret_cast<__ubuf__ uint16_t*>(reciprocalTensor.data().get()), totalScale, dstTypeMax_);
+            }
+        } else {
+            mx.GenScale(maxExpTensor, yScaleTensor, reciprocalTensor, cfg, totalScale);
+        }
+    } else {
+        mx.GenScale(maxExpTensor, yScaleTensor, reciprocalTensor, cfg, totalScale);
+    }
+    if constexpr (EnableLevel0_) {
+        AscendC::PipeBarrier<PIPE_V>();
+    }
 
     Tile::MxQuantFp4RoundMode fp4RoundMode = Tile::MxQuantFp4RoundMode::RINT;
     if (roundMode_ == MODE_FLOOR) {
@@ -539,9 +944,9 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     }
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::ClearScaleBlock(
-    uint32_t blkM)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::ClearScaleBlock(uint32_t blkM)
 {
     uint32_t count = blkM * SCALE_STORE_STRIDE;
     auto layout = Gemm::MakeNDExtLayout<int8_t>(1, count, count);
@@ -550,10 +955,9 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     Gemm::Tile::FillUb<int8_t>::FillWithValue(scaleBlock, 0);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void
-BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::ComputeTransLayout(uint16_t mSize,
-                                                                                                   uint16_t scaleBlockN)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::ComputeTransLayout(uint16_t mSize, uint16_t scaleBlockN)
 {
     // scale 布局: (M, scaleBlockN) -> (M, 32B 行块)，供 MTE 按行距 SCALE_STORE_STRIDE 搬运
     auto srcLayout = Gemm::MakeNDExtLayout<int8_t>(static_cast<int64_t>(mSize), static_cast<int64_t>(scaleBlockN),
@@ -569,9 +973,9 @@ BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::
     mx.TransScaleLayout(srcTensor, dstTensor, mSize, scaleBlockN);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::TransFp4Output(
-    uint16_t mSize, uint16_t kSize)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::TransFp4Output(uint16_t mSize, uint16_t kSize)
 {
     uint32_t packedBytes = kSize / 2;
     auto srcLayout = Gemm::MakeNDExtLayout<int8_t>(mSize, packedBytes, Gemm::Align16(packedBytes));
@@ -584,9 +988,10 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
     mx.TransFp4OutLayout(src, dst, mSize, kSize);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::PadScale(
-    uint32_t nKRatio, uint32_t nkIdx, uint32_t blkM)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::PadScale(uint32_t nKRatio, uint32_t nkIdx,
+                                                                         uint32_t blkM)
 {
     if ASCEND_IS_AIC {
         return;
@@ -605,10 +1010,12 @@ __aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataT
                             rowLoopNum);
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__simd_vf__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_>::PadScaleVf(
-    __ubuf__ int8_t* scaleAddr, __ubuf__ int8_t* scaleBlkAddr, uint32_t nKRatio, uint16_t firstNum, uint16_t lastNum,
-    uint16_t rowLoopNum)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__simd_vf__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                 EnableLevel0_>::PadScaleVf(__ubuf__ int8_t* scaleAddr,
+                                                                            __ubuf__ int8_t* scaleBlkAddr,
+                                                                            uint32_t nKRatio, uint16_t firstNum,
+                                                                            uint16_t lastNum, uint16_t rowLoopNum)
 {
     // ClearScaleBlock provides the zero padding; each staged row starts at a 32-byte boundary.
     DataCopyByCount(scaleBlkAddr, scaleAddr, firstNum);
@@ -626,11 +1033,11 @@ __simd_vf__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, Data
     }
 }
 
-template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_>
-__simd_callee__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_,
-                                                     FusionOp_>::DataCopyByCount(__ubuf__ int8_t* dstAddr,
-                                                                                 __ubuf__ int8_t* srcAddr,
-                                                                                 uint32_t count)
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__simd_callee__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                     EnableLevel0_>::DataCopyByCount(__ubuf__ int8_t* dstAddr,
+                                                                                     __ubuf__ int8_t* srcAddr,
+                                                                                     uint32_t count)
 {
     constexpr uint32_t VF_LEN_8 = asc_get_vf_len() / sizeof(uint8_t);
     uint16_t loopNum = (count + VF_LEN_8 - 1) / VF_LEN_8;
@@ -642,6 +1049,114 @@ __simd_callee__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, 
         AscendC::Reg::LoadUnAlign(value, unalign, srcAddr + i * VF_LEN_8);
         AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::StoreDist::DIST_NORM_B8>(dstAddr + i * VF_LEN_8, value, mask);
     }
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__simd_vf__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                 EnableLevel0_>::ZeroNormalizedPaddingVf(__ubuf__ uint8_t* scaleBlkAddr,
+                                                                                         uint16_t rows,
+                                                                                         uint16_t paddingColumn)
+{
+    AscendC::Reg::RegTensor<uint8_t> zero;
+    AscendC::Reg::Duplicate(zero, 0);
+    for (uint16_t row = 0; row < rows; ++row) {
+        auto rowAddr = scaleBlkAddr + static_cast<uint32_t>(row) * SCALE_STORE_STRIDE + paddingColumn;
+        AscendC::Reg::UnalignRegForStore unalign;
+        AscendC::Reg::StoreUnAlign<uint8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(rowAddr, zero, unalign, 1);
+        AscendC::Reg::StoreUnAlignPost<uint8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(rowAddr, unalign, 0);
+    }
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::RunLevel0Tile(const RotateQuantTileContext& tile,
+                                                                              const Level0Params& level0)
+{
+    // Both AIVs consume one credit per K-wide slice, including the zero-row lane.
+    const uint32_t slices = tile.validCols / level0.rotK;
+    for (uint32_t slice = 0; slice < slices; ++slice) {
+        const uint32_t slot = WaitForFixpipe();
+        if (tile.rows != 0) {
+            auto src = reinterpret_cast<__ubuf__ bfloat16_t*>(slot * ubSlotBytes_);
+            auto dst = reinterpret_cast<__ubuf__ bfloat16_t*>(ubBaseOffset_ + level0.collectUbOffset) +
+                       slice * level0.tileRows * level0.rotK;
+            asc_vf_call<CollectSliceVf>(src, dst, tile.rows, level0.inputPitch, level0.rotK);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+        ReleaseFixpipe(slot, false);
+    }
+    if (tile.rows == 0 || tile.validCols == 0) {
+        return;
+    }
+
+    NormalizeTile(tile, level0);
+    ComputeNormalizedTile(tile);
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(OUTPUT_EVENT);
+    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(OUTPUT_EVENT);
+    StoreLevel0Scale(tile, level0);
+    StoreNormalizedTile(tile);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(OUTPUT_EVENT);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(OUTPUT_EVENT);
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::NormalizeTile(const RotateQuantTileContext& tile,
+                                                                              const Level0Params& level0)
+{
+    auto collectLayout = Gemm::MakeNDExtLayout<bfloat16_t>(1, level0.tileRows * NORMALIZED_COLS,
+                                                           level0.tileRows * NORMALIZED_COLS);
+    auto collect = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(ubBaseOffset_ + level0.collectUbOffset),
+        collectLayout);
+    auto inputLayout = Gemm::MakeNDExtLayout<bfloat16_t>(tile.rows, NORMALIZED_COLS, NORMALIZED_COLS);
+    auto input = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(ubBaseOffset_ + X_UB_OFFSET), inputLayout);
+    auto scaleLayout = Gemm::MakeNDExtLayout<float>(tile.rows, 1, SCALE_ROW_BYTES / sizeof(float));
+    auto scale = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, float>(ubBaseOffset_ + level0.level0ScaleUbOffset), scaleLayout);
+    auto inputAddr = reinterpret_cast<__ubuf__ bfloat16_t*>(input.data().get());
+
+    // The collect allocation includes a full vector read guard for K=32/64 loads.
+    asc_vf_call<GatherVf>(reinterpret_cast<__ubuf__ bfloat16_t*>(collect.data().get()), inputAddr, tile.rows,
+                          level0.tileRows, level0.rotK, tile.validCols);
+    AscendC::PipeBarrier<PIPE_V>();
+
+    if (level0.needClamp) {
+        auto groupLayout = Gemm::MakeNDExtLayout<int8_t>(1, tile.rows * GROUPS_PER_BLOCK, tile.rows * GROUPS_PER_BLOCK);
+        auto limit = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::ub, bfloat16_t>(ubBaseOffset_ + LIMIT_UB_OFFSET), groupLayout);
+        auto maxExp = asc::te::make_tensor(
+            asc::te::make_mem_ptr<asc::te::location::ub, uint16_t>(ubBaseOffset_ + MAX_EXP_UB_OFFSET), groupLayout);
+        Tile::MxQuant<DataTypeOut> mx;
+        // Only the BF16 limits are consumed here; MX computes its own exponents after level0.
+        mx.GroupMaxExp(input, maxExp, limit, tile.rows * NORMALIZED_COLS, level0.alpha, false);
+        AscendC::PipeBarrier<PIPE_V>();
+        asc_vf_call<ClampVf>(inputAddr, reinterpret_cast<__ubuf__ bfloat16_t*>(limit.data().get()), tile.rows * 2);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    asc_vf_call<NormalizeVf>(inputAddr, reinterpret_cast<__ubuf__ float*>(scale.data().get()), tile.rows);
+    // MX re-reads the BF16 normalization output from the same UB region.
+    AscendC::PipeBarrier<PIPE_V>();
+}
+
+template <typename DataTypeIn_, typename DataTypeOut_, typename DataTypeScale_, typename FusionOp_, bool EnableLevel0_>
+__aicore__ inline void BlockEpilogueRotateQuant<DataTypeIn_, DataTypeOut_, DataTypeScale_, FusionOp_,
+                                                EnableLevel0_>::StoreLevel0Scale(const RotateQuantTileContext& tile,
+                                                                                 const Level0Params& level0)
+{
+    const uint64_t gmOffset = (static_cast<uint64_t>(tile.mStart) * level0.scalesPerRow +
+                               tile.nStart / NORMALIZED_COLS) *
+                              sizeof(float);
+    auto ubLayout = Gemm::MakeNDExtLayout<int8_t>(tile.rows, sizeof(float), SCALE_ROW_BYTES);
+    auto gmLayout = Gemm::MakeNDExtLayout<int8_t>(tile.rows, sizeof(float), level0.scalesPerRow * sizeof(float));
+    auto src = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::ub, int8_t>(ubBaseOffset_ + level0.level0ScaleUbOffset), ubLayout);
+    auto dst = asc::te::make_tensor(
+        asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ int8_t*>(level0.scaleGmAddr) + gmOffset),
+        gmLayout);
+    asc::te::copy(asc::te::make_copy(asc::te::copy_ub_to_gm{}), dst, src);
 }
 
 } // namespace Block

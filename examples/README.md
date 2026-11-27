@@ -130,6 +130,7 @@ C++（ACL 直调）样例位于 `acl/` 下；Python（torch 接口）样例位�
 | `acl/transpose_quant_batch_matmul/`  | tqbmm_mx                                                                                     | 转置量化批量矩阵乘法样例                 |
 | `acl/gemm_syrk/`                      | [gemm_syrk_basic](acl/gemm_syrk/gemm_syrk_basic/README.md)                                        | 对称秩k更新（syrk）样例，单次搬运 + 上三角调度，C 原地更新 |
 | `acl/rotate_quant/` | [rotate_quant](acl/rotate_quant/rotate_quant/README.md) | 普通及 M 轴分组旋转量化，FP16/BF16 输入、MX-FP4 输出 |
+| `acl/rotate_dual_level_quant/` | [rotate_dual_level_quant](acl/rotate_dual_level_quant/rotate_dual_level_quant/README.md) | 普通及 M 轴分组旋转，FP16/BF16 输入、两级尺度和 FP4/FP8 输出 |
 | `torch/mat_mul/`                  | [blaze_mat_mul (torch 接口)](torch/mat_mul/README.md)                                          | 注册 torch 自定义算子，Python 侧经 `torch.ops.ops_tensor_examples.blaze_mat_mul` 直调 Blaze kernel（独立构建，需 torch/torch_npu） |
 
 
