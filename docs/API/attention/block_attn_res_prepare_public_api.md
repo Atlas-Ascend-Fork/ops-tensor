@@ -134,7 +134,7 @@ Scheduler 只负责 block 分配、`BlockInfo` 生成和 AIV 行切分。
 
 - `ReduceSquare<FirstTile>::Run(vTensor, sumSquareTensor)`：按行累计平方和；
 - `RmsSoftmax::Run(sumSquareTensor, dotTensor, maxTensor, sumTensor, reciprocalD, epsilon)`：RMS 归一化和 softmax；
-- `InitializeEmptySoftmax::Run(maxTensor, sumTensor)`：把空输入 max/sum 初始化为 0；
+- `InitializeEmptySoftmax::Run(maxTensor, sumTensor)` 将空输入的 max 初始化为 FP32 最小有限值，将 sum 初始化为 1。
 - `FillUb<float>::FillWithValue(tensor, 0.0F)`：复用通用 Tile，把空输入输出 Tensor 的有效区域置 0。
 
 Tile API 均以 Tensor 为参数，不暴露 UB 地址布局。
@@ -145,5 +145,5 @@ Tile API 均以 Tensor 为参数，不暴露 UB 地址布局。
 - `validBlocks` 为 UINT64，并裁剪到 `[0,N]`；
 - `0 < N <= VECTOR_REG_WIDTH / sizeof(float)`，当前 Ascend 950 为 `N <= 64`；
 - `D > 0`、`baseD > 0`、`dTileNum > 0`，且 `vUbBufferNum` 必须为 2；
-- `validBlocks == 0` 时不执行 Cube，`numerator`、`logitMax`、`expSum` 全部输出 0；
+- `validBlocks == 0` 时跳过 Cube，`numerator` 输出全 0，`logitMax` 输出 FP32 最小有限值，`expSum` 输出全 1。
 - 非空输入执行 `Q * V^T -> RMS/softmax -> E * V`。

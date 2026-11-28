@@ -51,7 +51,7 @@ private:
         AscendC::Reg::RegTensor<float> sumReg;
         AscendC::Reg::MaskReg oneMask = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::VL1>();
         AscendC::Reg::Duplicate(maxReg, FP32_LOWEST_FINITE, oneMask);
-        AscendC::Reg::Duplicate(sumReg, 0.0F, oneMask);
+        AscendC::Reg::Duplicate(sumReg, 1.0F, oneMask);
         AscendC::Reg::StoreAlign<float, AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(maxAddr, maxReg, oneMask);
         AscendC::Reg::StoreAlign<float, AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(sumAddr, sumReg, oneMask);
         AscendC::Reg::LocalMemBar<AscendC::Reg::MemType::VEC_STORE, AscendC::Reg::MemType::VEC_LOAD>();
