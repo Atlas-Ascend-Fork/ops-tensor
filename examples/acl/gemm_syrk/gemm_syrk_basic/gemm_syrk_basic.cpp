@@ -110,7 +110,7 @@ __global__ __aicore__ void gemm_syrk_kernel(GM_ADDR aGM, GM_ADDR cInGM, GM_ADDR 
     using LayoutA = std::conditional_t<TRANS, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
     using LayoutC = asc::te::nd_ext_layout_ptn;
     using ProblemShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
-    using DispatchPolicy = Blaze::Gemm::MatmulSyrk;
+    using DispatchPolicy = Blaze::Gemm::MatmulSyrk<>;
     // Compact upper-triangle scheduler: stride polling over triangle-only
     // slots keeps every core busy instead of locking onto column densities.
     using BlockScheduler = Blaze::Gemm::Block::BlockSchedulerSyrkTriangular<ProblemShape>;

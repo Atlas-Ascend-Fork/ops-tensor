@@ -55,14 +55,22 @@ namespace Blaze {
 namespace Gemm {
 namespace Block {
 
-template <class AType_, class LayoutA_, class CType_, class LayoutC_, class BiasType_, class LayoutBias_>
-class BlockMmad<MatmulSyrk, AType_, LayoutA_, AType_, LayoutA_, CType_, LayoutC_, BiasType_, LayoutBias_> {
+template <uint8_t FillMode_, class AType_, class LayoutA_, class CType_, class LayoutC_, class BiasType_,
+          class LayoutBias_>
+class BlockMmad<MatmulSyrk<FillMode_>, AType_, LayoutA_, AType_, LayoutA_, CType_, LayoutC_, BiasType_, LayoutBias_> {
 public:
+    // An illegal FillMode_ (outside FULL/UP/LOW) would fall into the kernel's
+    // FULL branch while SPLIT_M derives true: the split-M fixpipe halves the
+    // UB image rows but the full-mirror epilogue reads whole tiles, silently
+    // corrupting the output. Reject it at compile time.
+    static_assert(FillMode_ == SYRK_FILL_MODE_FULL || FillMode_ == SYRK_FILL_MODE_UP || FillMode_ == SYRK_FILL_MODE_LOW,
+                  "MatmulSyrk<FillMode_>: FillMode_ must be one of SYRK_FILL_MODE_FULL/UP/LOW (0/1/2)");
     using AType = AType_;
     using CType = CType_;
     using LayoutA = LayoutA_;
     using LayoutC = LayoutC_;
-    using DispatchPolicy = MatmulSyrk;
+    using DispatchPolicy = MatmulSyrk<FillMode_>;
+    static constexpr uint8_t FILL_MODE = FillMode_;
     using TupleShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using TileShape = asc::te::shape<int64_t, int64_t, int64_t>;
 
@@ -283,20 +291,48 @@ private:
     {
         asc::te::l0c_to_ub_params fixpParams{asc::te::unit_flag_mode::enable_keep, 0};
         uint64_t tileNAlign = Blaze::Gemm::CeilAlign(tileN, static_cast<uint64_t>(asc::te::c0_element<CType>));
-        auto layoutUB = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(curM, tileNAlign);
+        // DUAL_DST_SPLIT_M halves m_size between the two AIV UBs; the
+        // hardware rejects an odd m_size with AIC err 169 ("fixpipe
+        // instruction parameter is invalid"). Pad the odd tail-block M by
+        // one padding row on BOTH layouts (m_size = min(src, dst) rows) so
+        // the halves stay integral. The epilogue only reads the valid
+        // rows: its per-sub split ceil(curM/2) / ceil(curM/2)-1 already
+        // matches the padded halves, and curM+1 never leaves the L0C
+        // fractal block (curM+1 <= ceil16(curM) for every odd curM).
+        constexpr bool splitM = (FILL_MODE != SYRK_FILL_MODE_FULL);
+        const uint64_t fixpipeM = (splitM && (curM & 1UL) != 0UL) ? curM + 1UL : curM;
+        auto layoutUB = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(fixpipeM, tileNAlign);
         auto ubTensor = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub>(tensorC.data().get()),
                                              layoutUB);
         auto copyL0C2UB = asc::te::make_copy(asc::te::copy_l0c_to_ub{});
         Gemm::LockFix(L0C_BUFFER_ID_BASE);
-        asc::te::copy(copyL0C2UB.with(fixpParams), ubTensor, tensorL0C);
+        // Triangle-restricted output (compile-time fill mode): "up"/"low"
+        // produce only the (i, j) ND image and split its rows across the two
+        // AIVs (dual-dst fixpipe). "low" computes the transposed tile up front
+        // (kernel-level A/B tile swap), so no NZ2DN fixpipe is needed. "full"
+        // keeps both images: the ND (i, j) and the NZ2DN (j, i) mirror.
+        if constexpr (splitM) {
+            auto copyL0C2UBSplitM = asc::te::make_copy(asc::te::copy_l0c_to_ub{},
+                                                       Blaze::Gemm::Tile::CopyL0C2UBTraitSplitM{});
+            fixpParams = {asc::te::unit_flag_mode::enable_update};
+            auto layoutL0CPadded = asc::te::frame_layout_format<asc::te::nz_layout_ptn, asc::te::_16>{}(fixpipeM,
+                                                                                                        tileN);
+            auto tensorL0CPadded = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0c, float>(0),
+                                                        layoutL0CPadded);
+            asc::te::copy(copyL0C2UBSplitM.with(fixpParams), ubTensor, tensorL0CPadded);
+        } else {
+            asc::te::copy(copyL0C2UB.with(fixpParams), ubTensor, tensorL0C);
+        }
         // L0C2UB NZ2DN: the same L0C accumulator fixpiped a second time with
         // the hardware transposed (DN-layout) destination for the (j, i)
         // mirror tile consumed by AIV sub-block 1.
-        uint64_t curMAlign = Blaze::Gemm::CeilAlign(curM, static_cast<uint64_t>(asc::te::c0_element<CType>));
-        auto layoutUBT = asc::te::make_frame_layout<asc::te::dn_ext_layout_ptn>(curMAlign, tileN);
-        auto ubTensorT = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0), layoutUBT);
-        asc::te::l0c_to_ub_params fixpParamsT{asc::te::unit_flag_mode::enable_update, 1};
-        asc::te::copy(copyL0C2UB.with(fixpParamsT), ubTensorT, tensorL0C);
+        if constexpr (FILL_MODE == SYRK_FILL_MODE_FULL) {
+            uint64_t curMAlign = Blaze::Gemm::CeilAlign(curM, static_cast<uint64_t>(asc::te::c0_element<CType>));
+            auto layoutUBT = asc::te::make_frame_layout<asc::te::dn_ext_layout_ptn>(curMAlign, tileN);
+            auto ubTensorT = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, float>(0), layoutUBT);
+            asc::te::l0c_to_ub_params fixpParamsT{asc::te::unit_flag_mode::enable_update, 1};
+            asc::te::copy(copyL0C2UB.with(fixpParamsT), ubTensorT, tensorL0C);
+        }
         Gemm::UnLockFix(L0C_BUFFER_ID_BASE);
     }
 

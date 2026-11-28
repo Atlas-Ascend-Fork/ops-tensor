@@ -43,6 +43,14 @@ constexpr uint64_t NONE_FULL_LOAD_MODE = 0UL;
 constexpr bool ENABLE_SPLIT_SINGLE_CORE_K = true;
 constexpr bool NONE_SPLIT_SINGLE_CORE_K = false;
 
+// Symmetric-matrix output region (cublas uplo semantics), carried in the
+// tiling data / block params as a plain integer.
+enum SyrkFillMode : uint8_t {
+    SYRK_FILL_MODE_FULL = 0,
+    SYRK_FILL_MODE_UP = 1,
+    SYRK_FILL_MODE_LOW = 2,
+};
+
 constexpr int64_t WINDOW_LEN = 4UL;
 
 constexpr uint16_t DIMENSION_M = 0;

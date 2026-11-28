@@ -27,14 +27,15 @@ enum SyrkKernelType : int8_t {
     SYRK_KERNEL_SINGLE_FETCH = 0,
 };
 
-template <SyrkKernelType KERNEL_TYPE, bool TRANS, typename ElementType>
+template <SyrkKernelType KERNEL_TYPE, bool TRANS, typename ElementType,
+          uint8_t FILL_MODE = Blaze::Gemm::SYRK_FILL_MODE_FULL>
 __global__ __aicore__ void gemm_syrk_kernel_entry(GM_ADDR aGM, GM_ADDR cInGM, GM_ADDR cGM, GM_ADDR workspaceGM,
                                                   GM_ADDR tilingGM)
 {
     GemmSyrkUT::GemmSyrkTilingData tilingData;
     memcpy(&tilingData, tilingGM, sizeof(tilingData));
     if constexpr (KERNEL_TYPE == SYRK_KERNEL_SINGLE_FETCH) {
-        GemmSyrkUT::GemmSyrkSingleFetchWrapper<ElementType, TRANS>(aGM, cInGM, cGM, workspaceGM, tilingData);
+        GemmSyrkUT::GemmSyrkSingleFetchWrapper<ElementType, TRANS, FILL_MODE>(aGM, cInGM, cGM, workspaceGM, tilingData);
     } else {
         static_assert(DependentFalse<ElementType>::value, "Unsupported SyrkKernelType value");
     }

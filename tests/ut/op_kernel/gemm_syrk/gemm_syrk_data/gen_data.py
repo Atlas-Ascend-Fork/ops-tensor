@@ -34,15 +34,17 @@ def _cast_input(arr_fp32, dtype):
 
 
 def gen_gemm_syrk_data(
-    m, k, batch, dtype, alpha, beta, trans, output_dir="./", seed=42
+    m, k, batch, dtype, alpha, beta, trans, fill_mode="full", output_dir="./", seed=42
 ):
     """Generate gemm_syrk test data: C = alpha * (A @ A^T) + beta * C.
 
     The logical A is [batch, m, k]; with trans the stored input_a.bin is the
     transposed [batch, k, m] layout (kernel computes alpha * (A^T @ A)).
-    C is [batch, m, m] and must be symmetric on input so that the in-place
-    output stays symmetric. The golden is computed in the fp32 domain from
-    the dtype-rounded inputs, then rounded back.
+    fill_mode "full" requires a symmetric input C (in-place output stays
+    symmetric); "up"/"low" write only the named triangle (incl. diagonal) and
+    keep the mirror untouched, so the mirror is poisoned with a sentinel to
+    surface any accidental write. The golden is computed in the fp32 domain
+    from the dtype-rounded inputs, then rounded back.
     """
     os.makedirs(output_dir, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -50,15 +52,29 @@ def gen_gemm_syrk_data(
     a, a_fp32 = _cast_input(
         rng.uniform(-1.0, 1.0, (batch, m, k)).astype(np.float32), dtype
     )
-    # Symmetric input C: average of a random matrix and its transpose.
     r = rng.uniform(-1.0, 1.0, (batch, m, m)).astype(np.float32)
-    c_sym = 0.5 * (r + np.transpose(r, (0, 2, 1)))
-    c, c_fp32 = _cast_input(c_sym, dtype)
+    if fill_mode == "full":
+        # Symmetric input C: average of a random matrix and its transpose.
+        c_sym = 0.5 * (r + np.transpose(r, (0, 2, 1)))
+        c, c_fp32 = _cast_input(c_sym, dtype)
+    else:
+        # "up"/"low": the mirror triangle is never written and must survive
+        # bit-exactly, so poison it with a distinctive sentinel.
+        ones = np.ones((m, m), dtype=bool)
+        mirror = np.tril(ones, -1) if fill_mode == "up" else np.triu(ones, 1)
+        c_dirty = np.where(mirror, np.float32(999.0), r)
+        c, c_fp32 = _cast_input(c_dirty, dtype)
 
     aat = np.matmul(a_fp32, np.transpose(a_fp32, (0, 2, 1)))
     # cuBLAS contract: beta == 0 -> C is not read (NaN/Inf in C must not
     # propagate); golden = alpha * A @ A^T.
     golden_fp32 = alpha * aat if beta == 0 else alpha * aat + beta * c_fp32
+    if fill_mode == "up":
+        # Only the upper triangle (incl. diagonal) is written; the lower
+        # triangle keeps the original C contents.
+        golden_fp32 = np.triu(golden_fp32) + np.tril(c_fp32, -1)
+    elif fill_mode == "low":
+        golden_fp32 = np.tril(golden_fp32) + np.triu(c_fp32, 1)
     golden = (
         golden_fp32.astype(np.float16)
         if dtype == "float16"
@@ -88,6 +104,13 @@ def main():
         action="store_true",
         help="Store input_a.bin transposed as [batch, k, m]",
     )
+    parser.add_argument(
+        "--fill_mode",
+        type=str,
+        default="full",
+        choices=["full", "up", "low"],
+        help="Output region written by the kernel",
+    )
     parser.add_argument("--output_dir", type=str, default="./")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -100,6 +123,7 @@ def main():
         args.alpha,
         args.beta,
         args.trans,
+        args.fill_mode,
         args.output_dir,
         args.seed,
     )

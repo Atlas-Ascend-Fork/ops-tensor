@@ -23,6 +23,15 @@
  * instantly, so the per-core work stays balanced while both GM->L1 traffic
  * and cube work are halved.
  *
+ * fill_mode (compile-time template parameter, carried by BlockMmad's
+ * DispatchPolicy): "full" writes both triangles as above; "up" writes only
+ * the (i, j) ND image; "low" fetches the two row blocks swapped so the cube
+ * accumulates the transposed tile directly and writes it at (coordN, coordM).
+ * "up"/"low" therefore produce a single ND image and split its rows across
+ * the two AIVs (DUAL_DST_SPLIT_M fixpipe, half the rows per sub-block,
+ * including the odd-M tail); the NZ2DN + dual-dst combination is not
+ * supported by the fixpipe.
+ *
  * Host tiling contract (see block_mmad_matmul_syrk.h): mL1 and nL1 both within
  * min(baseM, baseN), no per-core tail splitting (a single tail block per
  * axis), and baseM * baseN * sizeof(float) <= L0C_SIZE / 4 (UB hosts both
@@ -63,6 +72,8 @@ public:
     using LayoutA = typename BlockMmad::LayoutA;
     using LayoutC = typename BlockMmad::LayoutC;
     using BlockShape = typename BlockScheduler::BlockShape;
+    static constexpr uint8_t FILL_MODE = BlockMmad::DispatchPolicy::FILL_MODE;
+    static constexpr bool SPLIT_M = FILL_MODE != SYRK_FILL_MODE_FULL;
     using TupleShape = asc::te::shape<int64_t, int64_t, int64_t, int64_t>;
     using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<asc::te::c0_element<AType>>>;
     using MakeLayoutC = asc::te::frame_layout_format<LayoutC, AscendC::Std::Int<asc::te::c0_element<CType>>>;
@@ -135,6 +146,7 @@ private:
             const int64_t shapeK = asc::te::get<MNK_K>(blockShape);
             shapeN = AscendC::Std::min(shapeN, static_cast<int64_t>(n_) - coordN);
             const bool isDiagonal = (coordN == coordM);
+            const bool splitM = SPLIT_M;
             const int64_t shapeMA = AscendC::Std::min(shapeM, static_cast<int64_t>(m_) - coordM);
             if (shapeMA <= 0 || shapeN <= 0) {
                 continue;
@@ -162,27 +174,62 @@ private:
             const int64_t accBytes1 = static_cast<int64_t>(
                 Blaze::Gemm::CeilAlign(static_cast<uint64_t>(shapeN), M_ALIGN) *
                 Blaze::Gemm::CeilAlign(static_cast<uint64_t>(shapeMA), C0_ALIGN) * sizeof(float));
-            const int64_t staging0Base = accBytes0;
-            const int64_t staging0Bytes = static_cast<int64_t>(AscendC::TOTAL_UB_SIZE) - accBytes0 -
+            const int64_t splitRows0 = Blaze::Gemm::CeilAlign(Blaze::Gemm::CeilDiv(static_cast<uint64_t>(shapeMA), 2UL),
+                                                              M_ALIGN);
+            const int64_t splitRows1 = Blaze::Gemm::CeilAlign(Blaze::Gemm::CeilDiv(static_cast<uint64_t>(shapeN), 2UL),
+                                                              M_ALIGN);
+            const int64_t accBytes0Split = static_cast<int64_t>(
+                splitRows0 * Blaze::Gemm::CeilAlign(static_cast<uint64_t>(shapeN), C0_ALIGN) * sizeof(float));
+            const int64_t accBytes1Split = static_cast<int64_t>(
+                splitRows1 * Blaze::Gemm::CeilAlign(static_cast<uint64_t>(shapeMA), C0_ALIGN) * sizeof(float));
+            const int64_t accBase0 = splitM ? accBytes0Split : accBytes0;
+            const int64_t accBase1 = splitM ? accBytes1Split : accBytes1;
+            const int64_t staging0Base = accBase0;
+            const int64_t staging0Bytes = static_cast<int64_t>(AscendC::TOTAL_UB_SIZE) - accBase0 -
                                           UB_TOP_RESERVED_BYTES;
-            const int64_t staging1Base = accBytes1;
-            const int64_t staging1Bytes = static_cast<int64_t>(AscendC::TOTAL_UB_SIZE) - accBytes1 -
+            const int64_t staging1Base = accBase1;
+            const int64_t staging1Bytes = static_cast<int64_t>(AscendC::TOTAL_UB_SIZE) - accBase1 -
                                           UB_TOP_RESERVED_BYTES;
             auto ubTensorC = epilogueOp.GetAccumulatorTensor({shapeMA, shapeN});
             auto ubTensorCT = epilogueOp.GetAccumulatorTensor({shapeN, shapeMA});
             if ASCEND_IS_AIC {
                 Sync::WaitForVector<MIX_SYNC_MODE, PIPE_FIX>(AIV_SYNC_AIC_FLAG, true);
-                blockMmad(gmA, ubTensorC, tileShape, tileCoord, isDiagonal);
+                if constexpr (FILL_MODE == SYRK_FILL_MODE_LOW) {
+                    // "low" writes C^T at (coordN, coordM): fetch the two row
+                    // blocks swapped so the cube accumulates the transposed
+                    // tile directly, then the ND fixpipe can split its rows
+                    // across the AIVs (NZ2DN + dual-dst is unsupported).
+                    TupleShape tileShapeT{shapeN, shapeMA, shapeK, 1};
+                    TupleShape tileCoordT{coordN, coordM, 0, batchIdx};
+                    blockMmad(gmA, ubTensorCT, tileShapeT, tileCoordT, isDiagonal);
+                } else {
+                    blockMmad(gmA, ubTensorC, tileShape, tileCoord, isDiagonal);
+                }
                 Sync::NotifyVector<MIX_SYNC_MODE, PIPE_FIX>(AIC_SYNC_AIV_FLAG, true);
             }
             if ASCEND_IS_AIV {
-                if (AscendC::GetSubBlockIdx() == 0) {
-                    epilogueOp(ubTensorC, tileShape, offsetC, false, params.schParams.block, params.schParams.block,
-                               staging0Base, staging0Bytes);
+                // "up"/"low" always run the DUAL_DST_SPLIT_M epilogue (SPLIT_M
+                // is compile-time true here); the single-dst sub-0 fallback
+                // is dead code and intentionally dropped.
+                if constexpr (FILL_MODE == SYRK_FILL_MODE_UP) {
+                    const uint8_t triMask = isDiagonal ? 1 : 0;
+                    epilogueOp(ubTensorC, tileShape, offsetC, true, params.schParams.block, params.schParams.block,
+                               staging0Base, staging0Bytes, false, triMask);
+                } else if constexpr (FILL_MODE == SYRK_FILL_MODE_LOW) {
+                    const TupleShape tileShapeT{shapeN, shapeMA, shapeK, 1};
+                    const uint8_t triMask = isDiagonal ? 2 : 0;
+                    epilogueOp(ubTensorCT, tileShapeT, offsetCTransposed, true, params.schParams.block,
+                               params.schParams.block, staging1Base, staging1Bytes, false, triMask);
                 } else {
-                    TupleShape tileShapeT{shapeN, shapeMA, shapeK, 1};
-                    epilogueOp(ubTensorCT, tileShapeT, offsetCTransposed, false, params.schParams.block,
-                               params.schParams.block, staging1Base, staging1Bytes, isDiagonal);
+                    if (AscendC::GetSubBlockIdx() == 0) {
+                        epilogueOp(ubTensorC, tileShape, offsetC, false, params.schParams.block, params.schParams.block,
+                                   staging0Base, staging0Bytes, false, 0);
+                    } else {
+                        const TupleShape tileShapeT{shapeN, shapeMA, shapeK, 1};
+                        const bool diagonalSkip = isDiagonal;
+                        epilogueOp(ubTensorCT, tileShapeT, offsetCTransposed, false, params.schParams.block,
+                                   params.schParams.block, staging1Base, staging1Bytes, diagonalSkip, 0);
+                    }
                 }
             }
         }

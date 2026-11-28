@@ -447,8 +447,10 @@ struct MatmulWithWeightAntiquant {
  * pairs (i, j) / (j, i) share the two row-block fetches, halving the total
  * GM->L1 traffic versus a generic matmul composition.
  */
+template <uint8_t FillMode_ = SYRK_FILL_MODE_FULL>
 struct MatmulSyrk {
     using ScheduleType = KernelMmadSyrk;
+    static constexpr uint8_t FILL_MODE = FillMode_;
 };
 
 } // namespace Gemm

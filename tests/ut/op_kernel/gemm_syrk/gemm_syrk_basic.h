@@ -35,7 +35,7 @@
 
 namespace GemmSyrkUT {
 
-template <typename ElementType, bool TRANS>
+template <typename ElementType, bool TRANS, uint8_t FILL_MODE = Blaze::Gemm::SYRK_FILL_MODE_FULL>
 __aicore__ inline void GemmSyrkSingleFetchWrapper(GM_ADDR aGM, GM_ADDR cInGM, GM_ADDR cGM, GM_ADDR workspaceGM,
                                                   const GemmSyrkTilingData& tilingData)
 {
@@ -45,7 +45,7 @@ __aicore__ inline void GemmSyrkSingleFetchWrapper(GM_ADDR aGM, GM_ADDR cInGM, GM
     using LayoutA = AscendC::Std::conditional_t<TRANS, AscendC::Te::DNExtLayoutPtn, AscendC::Te::NDExtLayoutPtn>;
     using LayoutC = AscendC::Te::NDExtLayoutPtn;
     using ProblemShape = AscendC::Te::Shape<int64_t, int64_t, int64_t, int64_t>;
-    using DispatchPolicy = Blaze::Gemm::MatmulSyrk;
+    using DispatchPolicy = Blaze::Gemm::MatmulSyrk<FILL_MODE>;
     using BlockScheduler = Blaze::Gemm::Block::BlockSchedulerSyrkTriangular<ProblemShape>;
     using BlockMmad = Blaze::Gemm::Block::BlockMmad<DispatchPolicy, ElementType, LayoutA, ElementType, LayoutA, AccType,
                                                     LayoutC, ElementType, LayoutC>;
