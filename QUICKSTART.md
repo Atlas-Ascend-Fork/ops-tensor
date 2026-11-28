@@ -103,17 +103,18 @@ cd ops-tensor
 
 ### 编译项目
 
-ops-tensor 提供一键式编译能力，使用 `build.sh` 脚本：
+ops-tensor 是 header-only 库，不提供独立编译产物。
+`build.sh` 提供 Kernel UT、Examples 与 Package 三个构建入口：
 
 ```bash
-# 默认模式：配置并构建 header-only 库（不编译任何算子/样例二进制）
-./build.sh
-
-# 指定编译线程数（默认 8）
-./build.sh -j16
+# 构建 Kernel UT（加 -u 表示构建后执行；-j16 指定编译线程数，默认 8）
+./build.sh --opkernel -u -j16
 
 # 编译并运行样例
 ./build.sh --examples
+
+# 配置根工程并把 include/ 打包为 .run 自解压安装包（CI 编译入口，不支持 --ops）
+./build.sh --pkg --soc=ascend950
 
 # 仅编译指定样例（不运行、不验证）
 bash examples/acl/common/run.sh --ops=mat_mul --target=mat_mul_streamk --build-only

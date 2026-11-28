@@ -52,7 +52,7 @@ __global__ __aicore__ void mat_mul_kernel_entry(GM_ADDR x1GM, GM_ADDR x2GM, GM_A
 
     if constexpr (OP_TYPE == OP_TYPE_MATMUL_STREAMK) {
         MatMulV3UT::MatMulStreamKWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, L0C2OUT_MODE, FUSED_OP_TYPE>(
-            x1GM, x2GM, biasGM, yGM, workspaceGM, tilingData);
+            x1GM, x2GM, biasGM, yGM, workspaceGM, tilingData, tilingData.batch);
     } else if constexpr (OP_TYPE == OP_TYPE_MATMUL_BASIC) {
         MatMulV3UT::MatMulBasicWrapper<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, NON_CONTIGUOUS_TYPE>(
             x1GM, x2GM, biasGM, yGM, workspaceGM, tilingData);

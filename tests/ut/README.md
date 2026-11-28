@@ -46,7 +46,7 @@ tests/
 | 入口 | 命令 | 说明 |
 | ---- | ---- | ---- |
 | build.sh（推荐） | `bash build.sh --opkernel -u` | 独立构建目录 `build/kernel_ut/`，自动 submodule → cmake → 编译 → 运行 |
-| build.sh 主路径 | `bash build.sh --run` | `--run`/`-u` 统一委托 Kernel UT 流程（仓库唯一测试套件） |
+| build.sh（仅构建） | `bash build.sh --opkernel` | 同上，但只构建不执行测试 |
 | 根 CMake | `cmake -DBUILD_TESTING=ON ..` | 根工程 `BUILD_TESTING` 选项委托 `add_subdirectory(tests/ut/op_kernel)` |
 | 单独 cmake | `cmake -S tests/ut/op_kernel -B build/kernel_ut` | 独立工程，不依赖根 CMake |
 

@@ -222,7 +222,7 @@ private:
         m_ = asc::te::get<MNK_M>(params.problemShape);
         n_ = asc::te::get<MNK_N>(params.problemShape);
         k_ = asc::te::get<MNK_K>(params.problemShape);
-        batch_ = asc::te::get<MNK_B>(params.problemShape);
+        batch_ = AscendC::Std::max(asc::te::get<MNK_B>(params.problemShape), 1L);
         aGmAddr_ = reinterpret_cast<__gm__ AType*>(blockMmadParams.aGmAddr);
         bGmAddr_ = reinterpret_cast<__gm__ BType*>(blockMmadParams.bGmAddr);
         cGmAddr_ = reinterpret_cast<__gm__ CType*>(blockMmadParams.cGmAddr);

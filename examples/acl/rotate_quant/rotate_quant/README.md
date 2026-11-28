@@ -91,7 +91,7 @@ data_dir=examples/acl/rotate_quant/rotate_quant/output
 python3 examples/acl/rotate_quant/scripts/gen_data.py \
   --m 65 --n 384 --k 128 --b 3 --dtype float16 \
   --group-list-type 0 --group-list '17;17;40;65' --alpha 0.5 --output-dir "$data_dir"
-examples/build/acl/rotate_quant/rotate_quant \
+examples/acl/build/acl/rotate_quant/rotate_quant \
   65 384 128 3 float16 0 '17;17;40;65' 0.5 "$data_dir"
 python3 examples/acl/rotate_quant/scripts/verify_result.py \
   --golden-dir "$data_dir" --actual-dir "$data_dir" --m 65 --n 384

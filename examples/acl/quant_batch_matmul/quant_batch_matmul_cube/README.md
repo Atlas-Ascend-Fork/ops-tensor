@@ -107,7 +107,7 @@ python3 examples/acl/quant_batch_matmul/scripts/gen_data_cube.py \
 对应的可执行文件调用为：
 
 ```bash
-./examples/build/acl/quant_batch_matmul/quant_batch_matmul_cube \
+./examples/acl/build/acl/quant_batch_matmul/quant_batch_matmul_cube \
   2 128 256 128 hifloat8_t hifloat8_t bfloat16_t 0 float \
   false false default perchannel uint64_t \
   256 256 128 128 2 false batch data/tc_nd_batch

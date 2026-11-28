@@ -128,6 +128,7 @@ public:
         for (uint64_t iter0 = 0; iter0 < curKL1Iter; ++iter0) {
             uint64_t curKL1 = (iter0 + 1 == curKL1Iter) ? (curSingleCoreK - iter0 * kL1_) : kL1_;
             uint64_t l1BufId = abL1LoopCnt_ & (l1Stages_ - 1);
+            uint64_t btBufId = abL1LoopCnt_ & 0x1;
 
             TripleShape l1Shape{curML1, curNL1, static_cast<int64_t>(curKL1)};
             // Copy L1 From GM
@@ -145,7 +146,7 @@ public:
                 bool needBias = NeedProcessBias(iter0, iter1, kCntIndex);
                 // Copy L0 From L1
                 auto l0TensorTuple = CopyL0FromL1(tensorAL1, tensorBL1, tensorBiasL1, l0Shape, l0BufferId,
-                                                  baseK_ * iter1, needBias, l1BufId, kCntIndex);
+                                                  baseK_ * iter1, needBias, l1BufId, kCntIndex, btBufId);
 
                 auto tensorAL0 = asc::te::get<0>(l0TensorTuple);
                 auto tensorBL0 = asc::te::get<1>(l0TensorTuple);
@@ -222,7 +223,8 @@ private:
     template <typename TensorA, typename TensorB, typename TensorBias>
     __aicore__ inline auto CopyL0FromL1(const TensorA& tensorAL1, const TensorB& tensorBL1,
                                         const TensorBias& tensorBiasL1, const TripleShape& l0Shape, uint16_t l0BufferId,
-                                        uint64_t kIdx, bool needBias, uint16_t l1BufferId, int64_t kCntIndex)
+                                        uint64_t kIdx, bool needBias, uint16_t l1BufferId, int64_t kCntIndex,
+                                        uint16_t btBufferId)
     {
         static constexpr uint64_t HALF_L0_SIZE = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT;
         uint64_t l0Offset = HALF_L0_SIZE * l0BufferId;
@@ -243,7 +245,7 @@ private:
 
         uint64_t nL1Align = Blaze::Gemm::CeilAlign(curN, static_cast<uint64_t>(AscendC::BLOCK_CUBE));
         auto layoutBiasL0 = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(1UL, nL1Align);
-        auto offsetBiasL0 = nL1_ * l1BufferId * sizeof(float);
+        auto offsetBiasL0 = nL1_ * btBufferId * sizeof(float);
         auto tensorBiasL0 = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::bias, float>(offsetBiasL0),
                                                  layoutBiasL0);
         if (needBias) {

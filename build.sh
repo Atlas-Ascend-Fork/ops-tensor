@@ -12,49 +12,44 @@
 ##############################################################################
 # ops-tensor Build Script
 #
+# 本仓库为 header-only 库（include/blaze/，无 src/ 算子目录），
+# 构建入口保留以下三种模式：
+#   1. Kernel UT：构建（可选执行）tests/ut/op_kernel/ 下的算子内核单元测试
+#   2. Examples ：构建并运行 examples/acl/ 下的端到端样例
+#   3. Package ：配置根工程并将 include/ 打包为 .run 自解压安装包（CI 编译入口）
+#
 # 使用方法:
 #   ./build.sh [OPTIONS]
 #
-# 选项:
-#   --ops=OP_LIST       指定要编译的算子列表 (逗号分隔)
-#   --run               编译后执行测试
-#   --pkg               编译并打包成 .run 文件
-#   --soc=SOC           指定目标 SoC 型号（支持小写与逗号分隔多值）
+# 模式（必选其一）:
+#   --opkernel [-u]     构建 Kernel UT；-u 表示构建后执行测试
+#   --examples          构建并运行 Examples（内置 shape，自动初始化 tensor_api submodule）
+#   --pkg               配置根工程并打包 header-only 库为 .run 安装包（不支持 --ops）
+#
+# 通用选项:
+#   --ops=OP_LIST       指定算子列表 (逗号分隔)
+#                       Kernel UT 模式: tests/ut/op_kernel/ 下子目录名 (如 mat_mul)
+#                       Examples 模式:  examples/acl/ 下子目录名 (如 mat_mul)
+#   --target=TARGET     指定 Example 名称，逗号分隔 (仅 --examples 模式)
+#   --soc=SOC           指定目标 SoC 型号（支持小写与逗号分隔多值，默认 Ascend950）
 #   -j[N]               编译线程数，默认为 8，例如: -j16
-#   --test-timeout=N    测试超时时间（秒），默认为 300
+#   --test-timeout=N    Kernel UT 测试超时时间（秒），默认为 300
+#   --cov               开启代码覆盖率统计（仅 --opkernel 模式）
 #   --force-submodule   强制更新 tensor_api submodule 至 superproject 记录的 pinned commit
-#                       （默认已初始化时跳过；配合 --opkernel -u / --examples 使用）
+#                       （默认已初始化时跳过）
+#   --cann_3rd_lib_path=PATH  指定三方库路径（默认 third_party/）
+#   -v, --verbose       详细输出
+#   --make_clean        清理构建目录
 #   -h, --help          显示帮助信息
 #
-# 行为说明:
-#   无参数                编译所有算子，不执行测试
-#   --ops=add             只编译 add 算子，不执行测试
-#   --ops=add,sub         编译 add 和 sub 算子，不执行测试
-#   --run                 编译所有算子，并执行所有算子的测试
-#   --ops=add --run       编译 add 算子，并执行 add 算子的测试
-#   --ops=add,sub --run   编译 add,sub 算子，并执行这些算子的测试
-#   --pkg                 编译所有算子并打包成 .run 文件 (默认 SoC: Ascend950)
-#   --ops=add --pkg       编译 add 算子并打包成 .run 文件
-#   --soc=ascend950 --pkg  为 Ascend950 芯片打包 (支持小写)
-#   -j16                  使用 16 个线程编译
-#   --opkernel -u          构建并执行 Kernel UT (必须组合使用)
-#                          执行前会自动初始化 tensor_api submodule（使用 pinned commit）
-#   --opkernel -u --ops=OP 构建并执行指定算子的 Kernel UT (tests/ut/op_kernel/ 下子目录名)
-#
 # 示例:
-#   ./build.sh                        # 编译所有算子 (默认 8 线程)
-#   ./build.sh --ops=add              # 只编译 add 算子
-#   ./build.sh -j16                   # 使用 16 线程编译所有算子
-#   ./build.sh --run                  # 编译所有算子并执行测试
-#   ./build.sh --ops=add --run        # 编译 add 算子并执行测试
-#   ./build.sh --pkg                  # 编译所有算子并打包 (默认: Ascend950)
-#   ./build.sh --ops=add --pkg        # 编译 add 算子并打包
-#   ./build.sh --soc=ascend950 --pkg  # 为 Ascend950 打包 (支持小写输入)
-#   ./build.sh --opkernel -u --ops=mat_mul              # 构建并执行 mat_mul Kernel UT
-#   ./build.sh --opkernel -u                            # 构建并执行所有 Kernel UT
-#
-# 支持的 SoC 型号:
-#   Ascend950 (默认)
+#   ./build.sh --opkernel -u                             # 构建并执行所有 Kernel UT
+#   ./build.sh --opkernel -u --ops=mat_mul               # 构建并执行 mat_mul Kernel UT
+#   ./build.sh --opkernel -u --ops=mat_mul,quant_batch_matmul
+#   ./build.sh --opkernel                                # 仅构建所有 Kernel UT（不执行）
+#   ./build.sh --examples                                # 构建并运行所有样例
+#   ./build.sh --examples --ops=mat_mul                  # mat_mul 的所有样例
+#   ./build.sh --examples --ops=mat_mul --target=mat_mul_streamk  # 单个样例
 ##############################################################################
 
 set -e
@@ -69,7 +64,6 @@ NC='\033[0m' # No Color
 # 默认参数
 BUILD_OPERATORS="all"
 RUN_TESTS=false
-ENABLE_PACKAGE=false
 SOC_NAME="Ascend950"
 SOC_EXPLICIT=false
 BUILD_DIR="build"
@@ -78,12 +72,12 @@ THREAD_NUM=8  # 默认编译线程数
 THREAD_EXPLICIT=false  # 用户是否显式指定 -j（examples 模式仅显式时透传，否则 run.sh 自适应）
 CORE_NUMS=$(cat /proc/cpuinfo | grep "processor" | wc -l 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 TEST_TIMEOUT=300  # 默认测试超时时间（秒）
-BUILD_OUT_DIR=build_out
 VERBOSE=""
 FORCE_SUBMODULE=false  # 强制更新 tensor_api submodule 至 pinned commit
 CANN_3RD_LIB_PATH="${SCRIPT_DIR}/third_party"
 OP_KERNEL_MODE=false
 EXAMPLES_MODE=false
+PKG_MODE=false
 EXAMPLE_TARGET=""
 COV=false  # 代码覆盖率（仅 Kernel UT 模式支持）
 
@@ -101,41 +95,6 @@ normalize_soc_name() {
     local soc="$1"
     # 转换为小写，然后首字母大写
     echo "${soc}" | sed 's/.*/\L&/; s/^./\U&/; s/.$/\U&/'
-}
-
-# SoC 名称映射到完整的 SOC_VERSION（CANN ASC 编译器要求的格式）
-get_soc_version() {
-    local soc_name="$1"
-    local soc_lower=$(echo "$soc_name" | tr '[:upper:]' '[:lower:]')
-
-    # 映射表：友好名称 -> CANN 期望的完整版本标识
-    case "$soc_lower" in
-        "ascend950")
-            echo "ascend950dt_9595"
-            ;;
-        "ascend960"|"ascend960dt"|"ascend960_dt")
-            echo "ascend960dt_968b7"
-            ;;
-        "ascend910b"|"ascend910_b")
-            echo "ascend910b3"
-            ;;
-        "ascend910_93")
-            echo "ascend910_93"
-            ;;
-        "ascend910")
-            echo "ascend910"
-            ;;
-        "ascend310p"|"ascend310_p")
-            echo "ascend310p"
-            ;;
-        "ascend310b"|"ascend310_b")
-            echo "ascend310b"
-            ;;
-        *)
-            # 如果没有映射，直接使用小写名称
-            echo "$soc_lower"
-            ;;
-    esac
 }
 
 # 检查 ASCEND 环境变量
@@ -210,111 +169,60 @@ log_verbose() { log verbose "$1"; }
 # 显示帮助信息
 show_help() {
     cat << EOF
-Usage: $(basename "$0") [OPTIONS]
+Usage: $(basename "$0") [OPTIONS] (--opkernel [-u] | --examples | --pkg)
 
-Options:
-  --ops=OP_LIST       Specify operators to build (comma-separated)
-  --run               Run tests after build
-  --pkg               Build package (.run file)
-  --soc=SOC           Target SoC model (default: Ascend950, case-insensitive)
-                      Also selects the chip version for --examples (run.sh --soc)
-  -j[N]               Number of compile threads (default: 8), e.g., -j16
-  --test-timeout=N    Test timeout in seconds (default: 300)
-  --force-submodule   Force update tensor_api submodule to the pinned commit
-                      recorded in the superproject (instead of skipping when
-                      already initialized). Used with --opkernel -u / --examples.
-  -h, --help          Show this help message
-  -v, --verbose       Verbose output
-  --make_clean        Clean build artifacts"
+Build modes (exactly one required):
+  --opkernel           Build kernel unit tests (tests/ut/op_kernel/)
+  -u                   With --opkernel: also run the tests after build
+  --examples           Build and run examples (examples/acl/, built-in shapes)
+                       Both modes automatically initialize the tensor_api
+                       submodule before build (pinned commit)
+  --pkg                Configure the root project and package the header-only
+                       library (include/) into a self-extracting .run
+                       installer (default SoC: Ascend950; --ops not supported)
 
-Supported SoC models:
-  Ascend950    (dav-3510, default)
+Common options:
+  --ops=OP_LIST        Operators (comma-separated)
+                       Kernel UT: subdirectories under tests/ut/op_kernel/
+                       Examples:  subdirectories under examples/acl/
+  --target=TARGET      Example name(s), comma-separated (--examples only)
+  --soc=SOC            Target SoC model (default: Ascend950, case-insensitive)
+  -j[N]                Number of compile threads (default: 8), e.g., -j16
+  --test-timeout=N     Kernel UT test timeout in seconds (default: 300)
+  --cov                Enable code coverage for kernel UT (--opkernel only)
+  --force-submodule    Force update tensor_api submodule to the pinned commit
+                       recorded in the superproject (instead of skipping when
+                       already initialized)
+  --cann_3rd_lib_path=PATH
+                       Third-party lib path (default: third_party/)
+  -v, --verbose        Verbose output
+  --make_clean         Clean build artifacts
+  -h, --help           Show this help message
 
-Note: Other SoC models (Ascend910B, Ascend910_93, Ascend910, Ascend310P, Ascend310B, etc.)
-      are not supported in the current version. Support for more models will be added in future releases.
-
-Examples:
-  $(basename "$0")                          # Build all operators (default 8 threads)
-  $(basename "$0") --ops=add                # Build only 'add' operator
-  $(basename "$0") --ops=add,sub            # Build 'add' and 'sub' operators
-  $(basename "$0") -j16                     # Build with 16 threads
-  $(basename "$0") --run                    # Build all and run tests
-  $(basename "$0") --ops=add --run          # Build 'add' and run tests
-  $(basename "$0") --pkg                    # Build package (default SoC: Ascend950)
-  $(basename "$0") --ops=add --pkg          # Build 'add' and package
-  $(basename "$0") --soc=Ascend950 --pkg    # Build package for Ascend950
-  $(basename "$0") --soc=ascend950 --pkg    # Build package (lowercase also works)
-  $(basename "$0") --test-timeout=600 --run  # Run tests with 600s timeout
-  $(basename "$0") --make_clean             # Clean build artifacts
-
-Kernel UT:
-  --opkernel -u          Build and run kernel unit tests (required combination)
-                         Automatically initializes tensor_api submodule before build
-  --opkernel -u --ops=OP Build and run kernel UT for specified operators
-                         Operators are subdirectories under tests/ut/op_kernel/
-                         Examples: mat_mul, quant_batch_matmul
-  --cov                Enable code coverage for kernel UT (must be used with --opkernel -u)
-
-Kernel UT Examples:
-  $(basename "$0") --opkernel -u --ops=mat_mul
+Kernel UT examples:
+  $(basename "$0") --opkernel -u                            # Build and run all kernel UTs
+  $(basename "$0") --opkernel -u --ops=mat_mul              # Build and run mat_mul kernel UT
   $(basename "$0") --opkernel -u --ops=mat_mul,quant_batch_matmul
-  $(basename "$0") --opkernel -u
+  $(basename "$0") --opkernel -u --soc=ascend950 --ops=mat_mul
+  $(basename "$0") --opkernel                               # Build only (no run)
+  $(basename "$0") --opkernel -u --test-timeout=600         # Run with 600s timeout
 
-Examples Mode:
-  --examples              Build and run all examples (uses built-in shapes)
-                           Automatically initializes tensor_api submodule before build
-  --ops=X                 Specify operator for examples (e.g., mat_mul)
-  --target=Y              Specify example for examples (e.g., mat_mul_streamk)
-  -j[N]                   (optional) Parallel build jobs in examples mode.
-                           Default (no -j): auto = min(cores, targets, ~RAM/16GB)
-
+Examples mode:
   $(basename "$0") --examples                                    # All examples
   $(basename "$0") --examples --ops=mat_mul                      # mat_mul all examples
   $(basename "$0") --examples --ops=mat_mul --target=mat_mul_streamk  # Single example
 
+Package mode:
+  $(basename "$0") --pkg                                         # Package for Ascend950 (default)
+  $(basename "$0") --soc=ascend950 --pkg                        # Package for Ascend950 (explicit)
+
+Note:
+  This repository is a header-only library (include/blaze/, no src/ directory).
+  Kernel UT is the single entry for kernel-level verification; Examples is the
+  entry for end-to-end feature verification; --pkg only configures the root
+  project and packages the headers (CI compile entry). The legacy normal-build
+  and --run entries have been removed.
 EOF
-}
-
-# 解析逗号分隔的算子列表
-parse_operators() {
-    local ops_str=$1
-    if [ "$ops_str" = "all" ]; then
-        echo "all"
-    else
-        IFS=',' read -ra OPS <<< "$ops_str"
-        printf '%s\n' "${OPS[@]}"
-    fi
-}
-
-# 获取所有可用的算子
-get_available_operators() {
-    find "$SCRIPT_DIR/src" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" 2>/dev/null | sort
-}
-
-# 验证指定的算子是否存在
-validate_operators() {
-    local ops=($1)
-    local available_ops=($(get_available_operators))
-    local invalid_ops=()
-
-    for op in "${ops[@]}"; do
-        local found=false
-        for avail_op in "${available_ops[@]}"; do
-            if [ "$op" = "$avail_op" ]; then
-                found=true
-                break
-            fi
-        done
-        if [ "$found" = false ]; then
-            invalid_ops+=("$op")
-        fi
-    done
-
-    if [ ${#invalid_ops[@]} -gt 0 ]; then
-        log_error "Invalid operators: ${invalid_ops[*]}"
-        log_info "Available operators: ${available_ops[*]}"
-        exit 1
-    fi
 }
 
 get_available_kernel_ut_operators() {
@@ -355,38 +263,26 @@ clean_build() {
     else
         log_warning "Build directory does not exist, nothing to clean"
     fi
-}
-
-clean_build_out() {
-    if [ -d "${BUILD_OUT_DIR}" ]; then
-        rm -rf "${BUILD_OUT_DIR}"
+    if [ -d "${SCRIPT_DIR}/build_out" ]; then
+        rm -rf "${SCRIPT_DIR}/build_out"
         log_success "build_out directory cleaned"
     else
         log_info "build_out directory does not exist, nothing to clean"
     fi
 }
 
-# 构建项目
+# 配置根工程（header-only，无编译目标；作用是走一遍根工程 CMake 配置，
+# 校验工程配置链路可用并与 CI 既有 --pkg 打包链路保持一致）
 build_project() {
     log_info "Starting build..."
 
-    # 创建构建目录
     mkdir -p "$BUILD_DIR"
     cd "$BUILD_DIR"
 
-    # 配置CMake
     log_info "Configuring CMake..."
     local cmake_args=()
 
-    if [ "$BUILD_OPERATORS" != "all" ]; then
-        cmake_args+=(-DENABLED_OPERATORS="${BUILD_OPERATORS}")
-        log_info "Enabled operators: ${BUILD_OPERATORS}"
-    else
-        log_info "All operators enabled"
-    fi
-
-    # 如果需要打包，启用打包
-    if [ "$ENABLE_PACKAGE" = true ]; then
+    if [ "$PKG_MODE" = true ]; then
         cmake_args+=(-DENABLE_PACKAGE=ON)
         log_info "Package generation: ENABLED"
     fi
@@ -407,7 +303,6 @@ build_project() {
 
     cmake "${cmake_args[@]}" ..
 
-    # 编译
     log_info "Compiling with ${THREAD_NUM} threads..."
     cmake --build . -j${THREAD_NUM} ${VERBOSE}
 
@@ -421,7 +316,7 @@ build_project() {
     cd "$SCRIPT_DIR"
 }
 
-# 打包
+# 打包 header-only 库：include/ → 自解压 .run 安装包
 build_package() {
     log_info "Building package..."
 
@@ -430,17 +325,13 @@ build_package() {
 
     mkdir -p "${BUILD_OUT_DIR}"
 
-    # 创建临时目录
     local TMP_DIR=$(mktemp -d)
     log_info "Working directory: ${TMP_DIR}"
 
-    # 准备目录结构
     mkdir -p "${TMP_DIR}/ops_tensor"
 
-    # 复制 include 目录
     cp -r "${SCRIPT_DIR}/include" "${TMP_DIR}/ops_tensor/"
 
-    # 创建安装脚本
     cat > "${TMP_DIR}/install.sh" << 'EOF'
 #!/bin/bash
 set -e
@@ -466,17 +357,14 @@ exit 0
 __ARCHIVE_BELOW__
 EOF
 
-    # 打包成 tar.gz
     cd "${TMP_DIR}"
     tar -czf archive.tar.gz ops_tensor
 
-    # 合成 .run 文件
     cat "${TMP_DIR}/install.sh" "${TMP_DIR}/archive.tar.gz" > "${BUILD_OUT_DIR}/${PKG_NAME}"
     chmod +x "${BUILD_OUT_DIR}/${PKG_NAME}"
 
-    # 清理
     rm -rf "${TMP_DIR}"
-    cd "${SCRIPT_DIR}"
+    cd "$SCRIPT_DIR"
 
     if [ -f "${BUILD_OUT_DIR}/${PKG_NAME}" ]; then
         log_success "Package created: ${BUILD_OUT_DIR}/${PKG_NAME}"
@@ -484,13 +372,6 @@ EOF
         log_error "Package creation failed"
         exit 1
     fi
-}
-
-# 运行测试
-# 仓库唯一的测试套件是 Kernel UT（tests/ut/op_kernel），
-# 统一委托 build_kernel_ut 完成构建与执行（RUN_TESTS=true 时自动运行）
-run_tests() {
-    build_kernel_ut
 }
 
 collect_coverage() {
@@ -717,14 +598,6 @@ parse_arguments() {
                 BUILD_OPERATORS="${1#*=}"
                 shift
                 ;;
-            --run)
-                RUN_TESTS=true
-                shift
-                ;;
-            --pkg)
-                ENABLE_PACKAGE=true
-                shift
-                ;;
             --soc=*)
                 SOC_INPUT="${1#*=}"
                 SOC_NAME=$(normalize_soc_name "${SOC_INPUT}")
@@ -767,7 +640,6 @@ parse_arguments() {
                 ;;
             --make_clean)
                 clean_build
-                clean_build_out
                 exit 0
                 ;;
             -v|--verbose)
@@ -792,6 +664,10 @@ parse_arguments() {
                 ;;
             --examples)
                 EXAMPLES_MODE=true
+                shift
+                ;;
+            --pkg)
+                PKG_MODE=true
                 shift
                 ;;
             --force-submodule)
@@ -844,8 +720,10 @@ check_dependencies() {
         log_success "g++ is installed ($gcc_version)"
     fi
 
-    # 检查ASC编译器（Kernel UT 不需要 bisheng）
-    if [ "$OP_KERNEL_MODE" != true ]; then
+    # 检查ASC编译器（Kernel UT 不需要 bisheng，Examples 需要）
+    if [ "$OP_KERNEL_MODE" = true ]; then
+        log_info "Skipping bisheng compiler check (Kernel UT mode)"
+    else
         if ! command -v bisheng &> /dev/null; then
             log_error "bisheng compiler (bisheng) is not installed"
             missing_deps=$((missing_deps + 1))
@@ -853,8 +731,6 @@ check_dependencies() {
             local asc_version=$(bisheng --version | head -n1)
             log_success "bisheng compiler is installed ($asc_version)"
         fi
-    else
-        log_info "Skipping bisheng compiler check (Kernel UT mode)"
     fi
 
     # 检查Python (用于测试脚本)
@@ -894,32 +770,50 @@ main() {
 
     parse_arguments "$@"
 
-    # --opkernel validation
-    if [ "$OP_KERNEL_MODE" = true ]; then
-        if [ "$RUN_TESTS" != true ]; then
-            log_error "--opkernel requires -u (only --opkernel -u is supported)"
-            exit 1
-        fi
-        if [ "$ENABLE_PACKAGE" = true ]; then
-            log_error "--opkernel cannot be used with --pkg"
-            exit 1
-        fi
+    # 模式校验：必须显式选择 --opkernel、--examples 或 --pkg
+    if [ "$OP_KERNEL_MODE" != true ] && [ "$EXAMPLES_MODE" != true ] && [ "$PKG_MODE" != true ]; then
+        log_error "No build mode specified"
+        log_info "Use '--opkernel [-u]' for Kernel UT, '--examples' for examples, or '--pkg' for packaging"
+        log_info "Run '$(basename "$0") --help' for details"
+        exit 1
     fi
 
-    # --examples validation
-    if [ "$EXAMPLES_MODE" = true ]; then
-        if [ "$RUN_TESTS" = true ]; then
-            log_error "--examples cannot be used with --run"
-            exit 1
-        fi
-        if [ "$ENABLE_PACKAGE" = true ]; then
-            log_error "--examples cannot be used with --pkg"
-            exit 1
-        fi
-        if [ "$OP_KERNEL_MODE" = true ]; then
-            log_error "--examples cannot be used with --opkernel"
-            exit 1
-        fi
+    # --opkernel / --examples / --pkg 互斥
+    if [ "$OP_KERNEL_MODE" = true ] && [ "$EXAMPLES_MODE" = true ]; then
+        log_error "--opkernel cannot be used with --examples"
+        exit 1
+    fi
+    if [ "$OP_KERNEL_MODE" = true ] && [ "$PKG_MODE" = true ]; then
+        log_error "--opkernel cannot be used with --pkg"
+        exit 1
+    fi
+    if [ "$EXAMPLES_MODE" = true ] && [ "$PKG_MODE" = true ]; then
+        log_error "--examples cannot be used with --pkg"
+        exit 1
+    fi
+
+    # --ops 仅对 --opkernel / --examples 有效（--pkg 为全库打包，不支持按算子过滤）
+    if [ "$BUILD_OPERATORS" != "all" ] && [ "$PKG_MODE" = true ]; then
+        log_error "--ops cannot be used with --pkg (package always contains the whole include/)"
+        exit 1
+    fi
+
+    # -u 仅对 --opkernel 有效
+    if [ "$RUN_TESTS" = true ] && [ "$OP_KERNEL_MODE" != true ]; then
+        log_error "-u only works with --opkernel (Kernel UT mode)"
+        exit 1
+    fi
+
+    # --target 仅对 --examples 有效
+    if [ -n "$EXAMPLE_TARGET" ] && [ "$EXAMPLES_MODE" != true ]; then
+        log_error "--target only works with --examples"
+        exit 1
+    fi
+
+    # --cov 仅对 --opkernel 有效
+    if [ "$COV" = true ] && [ "$OP_KERNEL_MODE" != true ]; then
+        log_error "--cov only works with --opkernel (Kernel UT mode)"
+        exit 1
     fi
 
     # 依赖检查
@@ -931,14 +825,10 @@ main() {
         THREAD_NUM=$CORE_NUMS
     fi
 
-    # 验证算子
-    if [ "$BUILD_OPERATORS" != "all" ]; then
+    # 验证算子（Kernel UT 模式在 build.sh 校验；Examples 模式由 run.sh 校验）
+    if [ "$BUILD_OPERATORS" != "all" ] && [ "$OP_KERNEL_MODE" = true ]; then
         IFS=',' read -ra OPS <<< "$BUILD_OPERATORS"
-        if [ "$OP_KERNEL_MODE" = true ]; then
-            validate_kernel_ut_operators "${OPS[*]}"
-        elif [ "$EXAMPLES_MODE" != true ]; then
-            validate_operators "${OPS[*]}"
-        fi
+        validate_kernel_ut_operators "${OPS[*]}"
     fi
 
     # 显示执行计划
@@ -962,31 +852,24 @@ main() {
         else
             log_info "Run Kernel UT tests: NO (build only)"
         fi
+        if [ "$COV" = true ]; then
+            log_info "Code coverage: YES"
+        fi
+    elif [ "$PKG_MODE" = true ]; then
+        log_info "Build mode: Package (header-only)"
+        log_success "Build package: YES"
+        log_info "Target SoC: ${SOC_NAME}"
     else
+        log_info "Build mode: Examples"
         if [ "$BUILD_OPERATORS" = "all" ]; then
-            log_info "Build operators: all"
+            log_info "Examples operators: all"
         else
-            log_info "Build operators: ${BUILD_OPERATORS}"
+            log_info "Examples operators: ${BUILD_OPERATORS}"
         fi
-
-        if [ "$RUN_TESTS" = true ]; then
-            log_success "Run tests: YES"
-            log_info "Test timeout: ${TEST_TIMEOUT}s"
-            if [ "$BUILD_OPERATORS" != "all" ]; then
-                log_info "Test operators: ${BUILD_OPERATORS}"
-            else
-                log_info "Test operators: all built operators"
-            fi
-        else
-            log_info "Run tests: NO"
+        if [ -n "$EXAMPLE_TARGET" ]; then
+            log_info "Examples targets: ${EXAMPLE_TARGET}"
         fi
-
-        if [ "$ENABLE_PACKAGE" = true ]; then
-            log_success "Build package: YES"
-            log_info "Target SoC: ${SOC_NAME}"
-        else
-            log_info "Build package: NO"
-        fi
+        log_info "Examples chip version: $(echo "${SOC_NAME}" | tr '[:upper:]' '[:lower:]')"
     fi
     echo "=================================="
     echo ""
@@ -997,19 +880,14 @@ main() {
         exit 0
     fi
 
-    if [ "$OP_KERNEL_MODE" = true ]; then
-        build_kernel_ut
-    else
+    if [ "$PKG_MODE" = true ]; then
         build_project
-
-        if [ "$RUN_TESTS" = true ]; then
-            run_tests
-        fi
-
-        if [ "$ENABLE_PACKAGE" = true ]; then
-            build_package
-        fi
+        build_package
+        log_success "All operations completed!"
+        return
     fi
+
+    build_kernel_ut
 
     log_success "All operations completed!"
 }

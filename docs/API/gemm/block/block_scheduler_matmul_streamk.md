@@ -62,7 +62,27 @@ int64_t batch = Get<3>(problemShape);
 - **多 Batch 场景**：`batch > 1`，Kernel 层会进行 Batch 循环处理
 - StreamK 调度器会根据 ProblemShape 计算 tile 切分和 DP+SK 混合策略
 
-## 特殊约束
+## 准入条件
+StreamK 调度器的 DP+SK 划分依赖核心不变量：**`tailMNBlockNums != 0`（存在真实的 SK 块）**。
+`CheckIsSkScene` 以"最后一核轮 = 尾部 SK 块"作为判定依据，当 MN 块数可整除核数时该假设不成立，tiling 侧必须保证不进入此场景。
+
+| 准入条件 | 表达式 | 违反后果 |
+|----------|--------|----------|
+| 非整除约束（必需） | `(mBlockNums × nBlockNums) % usedCoreNum != 0` 且 `mBlockNums × nBlockNums >= usedCoreNum` | 整除时不存在 SK 块，末轮 DP 块被误判为 SK（结果写 workspace 且 AIV 拒绝回写），输出整片全零（无兜底） |
+| 多 batch 口径（必需） | `(mBlockNums × nBlockNums × batch) % usedCoreNum != 0`（SK 块存在时） | AIV 侧 `lastLoopTotalCnt` 按**含 batch** 口径计算，整除时 AIV 全部早退，workspace 结果不被汇聚回写 |
+| 尾轮长度约束（DPSK 推荐） | `totalMNCnt % aicNum <= aicNum / 2` | 尾部 SK 轮长度超过 DP 轮一半，负载失衡，性能劣化 |
+
+两个推荐准入窗口：
+
+- **纯 SK 场景（MN 小、K 大切 K）**：
+  - `totalMNCnt = mBlockNums × nBlockNums <= aicNum / 2`（单轮约束，多轮直接退回非 StreamK 模板）
+  - `kCnt = aicNum / totalMNCnt >= 2`，`singleCoreK = CeilDiv(k, kCnt)`
+  - 该窗口下 `usedCoreNum > totalMNCnt` 恒成立，`tailMNBlockNums = totalMNCnt != 0`
+- **DP+SK 混合场景（MN 大）**：
+  - `totalMNCnt >= aicNum`
+  - `totalMNCnt % aicNum != 0` 且 `totalMNCnt % aicNum <= aicNum / 2`
+  - `kCnt = aicNum / (totalMNCnt % aicNum)`（依赖余数非零，整除会导致除零）
+
 ### DP+SK 混合策略
 StreamK 调度器将 tile 分为两种模式：
 - **DP（Data Parallel）模式**：完整 tile，每个核独立处理完整的 (m, n) tile，结果直接输出到 GM
@@ -345,6 +365,7 @@ rowIdx % 2 != 0：反向扫描（nBlockIdx = nBlockNums - 1 - nBlockIdx)
 ### usedCoreNums 配置
 - **建议值**：根据实际 AIC 核数量设置（如 8、16）
 - **SK 模式比例**：`tailMNBlockNums = (mBlockNums × nBlockNums) % usedCoreNums`
+- **准入检查**：`mBlockNums × nBlockNums`（多 batch 时含 batch）须不能整除 `usedCoreNums`，否则不满足 StreamK 准入条件（详见[准入条件](#准入条件)）
 - **优化**：调整 usedCoreNums 以减少 SK 模式 block 数量
 
 ### singleCoreK 配置

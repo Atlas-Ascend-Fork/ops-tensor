@@ -106,8 +106,6 @@ OCP 的零判断使用 BF16 原始指数：全为零/次正规数的组使用零
 这里的 FP32 是校验解码类型，不是新增算子输出类型。本样例输出始终为
 E4M3FN/E8M0；Y 使用上述双千分之一标准，但不以浮点容差放宽 scale 算法
 或布局语义。CPU golden 的 BF16 舍入和 MX 量化过程保持不变。
-CPU 回归覆盖正负零、容差内外、非有限值、scale 错误及 Y/scale 抵消反例；
-CPU 测试通过不代表 NPU 精度验证。验证依赖版本为 NumPy 1.26.4、ml_dtypes 0.5.4。
 
 ## CSV 字段
 
@@ -156,14 +154,6 @@ bash examples/acl/common/run.sh --ops=grouped_matmul \
 bash examples/acl/common/run.sh --ops=grouped_matmul
 ```
 
-仅验证样例数据生成器、结果校验脚本及 NZ/ZN 搬运地址模型的 CPU 自检，可执行：
-
-```bash
-python3 -m unittest discover -s examples/acl/grouped_matmul/quant_grouped_matmul_swiglu_quant_mx/tests -p 'test_*.py'
-```
-
-其中搬运地址用例只验证 Python 地址模型，不执行 NPU DMA；上述自检均不验证 NPU Kernel 精度，算子输出须运行样例并与 golden 比较。
-
 ## 目录结构
 
 ```text
@@ -171,11 +161,6 @@ quant_grouped_matmul_swiglu_quant_mx/
 ├── quant_grouped_matmul_swiglu_quant_mx.cpp
 ├── quant_grouped_matmul_swiglu_quant_mx.conf
 ├── quant_grouped_matmul_swiglu_quant_mx.csv
-├── tests/
-│   ├── test_example_data.py
-│   ├── test_result_verifier.py
-│   ├── test_swiglu_weight_nz_concat_addresses.py
-│   └── test_swiglu_weight_nz_scalar_equivalence.py
 └── README.md
 ```
 

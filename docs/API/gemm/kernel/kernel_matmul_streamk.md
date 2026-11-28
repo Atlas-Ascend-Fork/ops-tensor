@@ -25,6 +25,12 @@ StreamK 矩阵乘 Kernel，支持 AIC + AIV 双核协同计算。支持 workspac
 ### BlockScheduler 限制
 仅支持 `BlockSchedulerMatmulStreamK` 调度器，支持 DP+SK 混合策略。
 
+### tiling 准入条件
+进入 StreamK Kernel 前必须满足调度器的[准入条件](../block/block_scheduler_matmul_streamk.md#准入条件)，核心约束：
+- `(mBlockNums × nBlockNums) % usedCoreNum != 0`：MN 块数整除核数时不存在 SK 块，末轮 DP 块会被误判为 SK 并写入 workspace，而 AIV 侧 `lastLoopTotalCnt == 0` 全部早退不回写，导致输出整片全零
+- 多 batch 场景需同时保证 `(mBlockNums × nBlockNums × batch) % usedCoreNum != 0`（AIV 的早退判断按含 batch 口径计算）
+- **无 kernel 侧兜底**，整除场景须由 tiling 侧退回非 StreamK 模板（如 Basic），或调整 baseM/baseN/usedCoreNum 使余数非零
+
 ### HF32 模式
 可选 HF32 计算模式，通过 scheduler 参数控制。
 

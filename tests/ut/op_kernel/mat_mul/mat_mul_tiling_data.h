@@ -53,6 +53,7 @@ struct MatMulV3BasicTilingData {
     uint32_t sliceM = 1;
     uint32_t srcNdStride = 1;
     uint32_t innerBatch = 1;
+    int32_t batch = 0;
 };
 #pragma pack(pop)
 
