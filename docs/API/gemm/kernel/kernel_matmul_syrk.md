@@ -4,46 +4,29 @@
 ## 功能说明
 对称秩 k 更新 kernel：`C = alpha * (A @ A^T) + beta * C`，配 [BlockMmadSyrk](../block/block_mmad_matmul_syrk.md) 与 `BlockEpilogueFmmWithScaleAdd` 使用。
 
-遍历**紧凑上三角槽位空间**（`BlockSchedulerSyrkTriangular`，stride 轮询，每核 slots/核数 ±1；下三角槽位不占索引）。每个被处理槽位：
+遍历完整 M×N block 网格但只处理上三角（`coordN >= coordM`），下三角槽位即刻跳过。每个被处理槽位：
 
-1. 驱动一次 `BlockMmadSyrk` 调用：单次 nd2nz GM→L1 搬运产出 L1 双视图（对角块一次搬运同时喂 L0A/L0B），单条 Mmad 链产出 (i, j) 累加器。
-2. fixpipe 双发（`BlockMmadSyrk::CopyOutFromL0C2UB`）：
-   - `nz2nd` → AIV sub0 的 (i, j) ND 图像；
-   - `nz2dn`（硬件转置）→ AIV sub1 的 (j, i) DN 图像。
-   两路写回均无 GM 回读、无软件转置。
-3. 两个 AIV 并行跑 scale-add epilogue：sub0 写 C[i, j]、sub1 写 C[j, i]。
+1. 驱动一次 `BlockMmadSyrk` 调用：两次共享的 nd2nz GM→L1 搬运（对角块一次）产出 C[i, j]，**每个 pair 单条 Mmad 链**（cube 量 ≈ 1/2）。
+2. AIV 跑 scale-add epilogue 写出 (i, j) tile。
+3. 非对角槽位调用 `WriteTransposedTile` 将刚写出的结果**转置写出**到镜像位置 C[j, i] = C[i, j]^T（依赖输入 C 对称，syrk 需求已约定）。
 
-## fill_mode（DispatchPolicy 模板参数，编译期）
+### WriteTransposedTile
 
-| fill_mode | 行为 |
-|---|---|
-| `full` | 双图像（nz2nd + nz2dn），完整对称矩阵输出 |
-| `up` | 仅 (i, j) ND 图像，`DUAL_DST_SPLIT_M` fixpipe 把行对半分给两个 AIV；对角块按元素粒度三角掩码（`triMask=1`：行 <= 列保留计算值，其余恢复原 C） |
-| `low` | kernel 层交换 A/B tile 先算出 (j, i) 转置 tile，再走与 up 相同的 split-M 输出；对角块 `triMask=2`（行 >= 列保留） |
-
-`up`/`low` 固定走 split-M 双 AIV 输出：`SPLIT_M` 由 `FILL_MODE` 编译期派生，不经 Params 传递。
-
-## 三角掩码（triMask）
-
-- `0`：整 tile 写出（非对角块，整块都在目标三角内）。
-- `1`/`2`：对角块逐元素比较全局行号与列号（`rowBase` 校准 sub 半幅的行偏移，`vcmps_ge`/`vcmps_le` 生成掩码，`vsel` 选择），掩码外元素写回 staged 原 C，保证 bit-exact。
-- `beta == 0` 且 `triMask != 0` 时仍强制加载 x3 staging（掩码恢复需要原值），计算主体用 `skipX3` 的 VF 实例（不读、不乘 C，NaN/Inf 不传播）。
-
-## staging 同步
-
-x3 staging 与输出复用同一 UB 区。每块写前等两个方向（`MTE3→MTE2` 供 x3 load、`MTE3→V` 供向量输出），store 后两个方向各 set 一次；每块每方向严格 set/wait 配对。对角块（load）与 `beta == 0` 非对角块（skip）混合轮转时不产生跨类型窗口。
+- 内部 16×16 块：tensor_api 分块跨步 GM→UB 回读（L2 热）→ `asc_transpose`（3510 `vtranspose`，b16 位级 16×16 转置，half/bf16 通用）→ 分块跨步 UB→GM 写出。
+- 边角块与 CPU 仿真回退**标量路径**（`ASCENDC_CPU_DEBUG == 1` 时整条走标量）。
+- **同步**：`TRANSPOSE_EVENT = 3`（epilogue 占用 0/1/2）。每块链路 `MTE3_MTE2 drain → gather → MTE2_V → vtranspose → V_MTE3 → scatter`；首部的 MTE3→MTE2 等待经 epilogue 的 V→MTE3 同步传递性排空此前全部向量工作。
+- **scratch 布局**：两块 512B（16×16 b16）位于 **UB 顶端（TOTAL_UB_SIZE - 1024）**——避开 AIC 并发 fixpipe（下一 tile 累加器受 tiling 契约约束 ≤ L0C/2 < UB 顶）与下一 epilogue staging（AIV 程序序，ready-flag 握手之后才开始）。
+- **splitM**：开启时两个 AIV 子块按 rowBlocks 对分转置写出工作。
 
 ## Host tiling 契约
 
-见 [BlockMmadSyrk](../block/block_mmad_matmul_syrk.md)：`mL1 == nL1 == baseM == baseN == baseBlock`（对称方块）、每轴单尾块、16 对齐、L1 双缓冲；`baseBlock² × sizeof(float)` 受 L0C 预算约束——`full` 取 L0C/2 上限，`up`/`low` 单图像取全量 L0C 预算。
+见 [BlockMmadSyrk](../block/block_mmad_matmul_syrk.md)：`mL1/nL1 <= min(baseM, baseN)`，`mTailCnt == nTailCnt == 1`，`baseM * baseN * sizeof(float) <= L0C_SIZE / 2`，baseN 16 对齐。
 
 ## 数据流
 
 ```
-GM(A) ─→ [BlockMmadSyrk: nd2nz(对角1次/非对角2次) → L1镜像 → L0A/L0B → Mmad 单链] ─→ L0C
-                                                                                    │ fixpipe ×2
-                                          ┌─────────────────────────────────────────┴──────────────┐
-                                    nz2nd → UB(sub0) (i,j) ND                        nz2dn → UB(sub1) (j,i) DN
-                                          │ AIC/AIV 握手                                          │
-                                    [epilogue] 写 C[i,j]                              [epilogue] 写 C[j,i]
+GM(A) ─→ [BlockMmadSyrk: nd2nz×2 → L1镜像 → L0A/L0B → Mmad 单链] ─→ L0C ─→ UB(0)
+                                                                        │ AIC/AIV 握手
+GM(C) ◄─ [epilogue: alpha*acc + beta*C] (i,j)                          ▼
+GM(C) ◄─ [WriteTransposedTile: GM→UB → vtranspose → UB→GM] (j,i) = (i,j)^T
 ```

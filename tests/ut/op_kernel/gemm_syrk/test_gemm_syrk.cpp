@@ -53,7 +53,6 @@ struct SyrkCase {
     float alpha;
     float beta;
     bool trans = false;
-    uint8_t fillMode = 0; // Blaze::Gemm::SYRK_FILL_MODE_FULL / UP / LOW
     uint32_t baseM = 16;
     uint32_t baseN = 16;
     uint32_t mL1 = 16;
@@ -144,22 +143,11 @@ protected:
     template <SyrkKernelType KERNEL_TYPE, typename ElementType>
     void RunSyrkCase(const SyrkCase& testCase)
     {
-        if (testCase.fillMode == Blaze::Gemm::SYRK_FILL_MODE_UP) {
-            return testCase.trans ?
-                       RunSyrkCaseImpl<KERNEL_TYPE, true, ElementType, Blaze::Gemm::SYRK_FILL_MODE_UP>(testCase) :
-                       RunSyrkCaseImpl<KERNEL_TYPE, false, ElementType, Blaze::Gemm::SYRK_FILL_MODE_UP>(testCase);
-        }
-        if (testCase.fillMode == Blaze::Gemm::SYRK_FILL_MODE_LOW) {
-            return testCase.trans ?
-                       RunSyrkCaseImpl<KERNEL_TYPE, true, ElementType, Blaze::Gemm::SYRK_FILL_MODE_LOW>(testCase) :
-                       RunSyrkCaseImpl<KERNEL_TYPE, false, ElementType, Blaze::Gemm::SYRK_FILL_MODE_LOW>(testCase);
-        }
         return testCase.trans ? RunSyrkCaseImpl<KERNEL_TYPE, true, ElementType>(testCase) :
                                 RunSyrkCaseImpl<KERNEL_TYPE, false, ElementType>(testCase);
     }
 
-    template <SyrkKernelType KERNEL_TYPE, bool TRANS, typename ElementType,
-              uint8_t FILL_MODE = Blaze::Gemm::SYRK_FILL_MODE_FULL>
+    template <SyrkKernelType KERNEL_TYPE, bool TRANS, typename ElementType>
     void RunSyrkCaseImpl(const SyrkCase& testCase)
     {
         static_assert(std::is_same_v<ElementType, half> || std::is_same_v<ElementType, bfloat16_t>);
@@ -187,14 +175,10 @@ protected:
         std::string genCmd = std::string("cd ") + dataDir + " && rm -rf *.bin";
         const bool isFp16 = std::is_same_v<ElementType, half>;
         const std::string dtype = isFp16 ? "float16" : "bfloat16";
-        const char* fillModeName = FILL_MODE == Blaze::Gemm::SYRK_FILL_MODE_UP ?
-                                       "up" :
-                                       (FILL_MODE == Blaze::Gemm::SYRK_FILL_MODE_LOW ? "low" : "full");
         std::string genDataCmd = std::string("cd ") + dataDir + " && python3 gen_data.py --m " + std::to_string(m) +
                                  " --k " + std::to_string(k) + " --batch " + std::to_string(batch) + " --dtype " +
                                  dtype + " --alpha " + std::to_string(testCase.alpha) + " --beta " +
-                                 std::to_string(testCase.beta) + " --fill_mode " + fillModeName +
-                                 (testCase.trans ? " --trans" : "");
+                                 std::to_string(testCase.beta) + (testCase.trans ? " --trans" : "");
         int genRet = system(genCmd.c_str());
         ASSERT_EQ(genRet, 0) << "Failed to clean old .bin files in gemm_syrk_data";
         genRet = system(genDataCmd.c_str());
@@ -241,7 +225,7 @@ protected:
         tilingData->beta = testCase.beta;
 
         AscendC::SetKernelMode(KernelMode::MIX_MODE);
-        auto kernelFunc = gemm_syrk_kernel_entry<KERNEL_TYPE, TRANS, ElementType, FILL_MODE>;
+        auto kernelFunc = gemm_syrk_kernel_entry<KERNEL_TYPE, TRANS, ElementType>;
         // cIn and c bind the same buffer: in-place update.
         ASSERT_TRUE(KERNEL_RUN_KF(kernelFunc, blockNum, aGM, cGM, cGM, workspaceGM, tilingGM))
             << "Kernel execution failed: one or more cores exited with non-zero status";
@@ -256,10 +240,8 @@ protected:
         EXPECT_TRUE(CompareWithGolden(output, golden, cCount, atol, rtol, mismatchIdx))
             << "golden mismatch at flat index " << mismatchIdx;
 
-        if constexpr (FILL_MODE == Blaze::Gemm::SYRK_FILL_MODE_FULL) {
-            const float symMaxDiff = MaxSymmetryDiff(output, batch, m);
-            EXPECT_LE(symMaxDiff, atol) << "output is not symmetric, maxDiff=" << symMaxDiff;
-        }
+        const float symMaxDiff = MaxSymmetryDiff(output, batch, m);
+        EXPECT_LE(symMaxDiff, atol) << "output is not symmetric, maxDiff=" << symMaxDiff;
     }
 
     static constexpr size_t WORKSPACE_TILE_SIZE = 256UL * 256 * 4;
@@ -371,63 +353,4 @@ TEST_F(GemmSyrkTest, Test_BF16_SyrkSingleFetch_Trans_Basic)
 {
     // bf16 transposed pair grid: m=32 -> 2x2 grid.
     RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, bfloat16_t>({1, 32, 16, 1, 1.0F, 1.0F, true});
-}
-
-// ---------------------------------------------------------------------------
-// fill_mode "up"/"low": only the named triangle (incl. the diagonal) is
-// written; the mirror keeps the staged original C (gen_data poisons it with a
-// sentinel so any accidental write surfaces in the golden comparison).
-// ---------------------------------------------------------------------------
-TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_FillModeUp_Basic)
-{
-    // Single diagonal tile: the whole tile is masked at element granularity.
-    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, half>({1, 16, 16, 1, 3.0F, 2.0F, false, Blaze::Gemm::SYRK_FILL_MODE_UP});
-}
-
-TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_FillModeLow_Basic)
-{
-    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, half>({1, 16, 16, 1, 3.0F, 2.0F, false, Blaze::Gemm::SYRK_FILL_MODE_LOW});
-}
-
-TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_FillModeUp_BetaZero)
-{
-    // beta == 0 on a triMask tile: the mask restore must not be compiled out
-    // with the skipped beta addend (x3 is force-loaded for the restore).
-    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, half>({1, 16, 16, 1, 1.5F, 0.0F, false, Blaze::Gemm::SYRK_FILL_MODE_UP});
-}
-
-TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_FillModeLow_BetaZero)
-{
-    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, half>({1, 16, 16, 1, 1.5F, 0.0F, false, Blaze::Gemm::SYRK_FILL_MODE_LOW});
-}
-
-TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_FillModeUp_MultiCore_BetaZero)
-{
-    // m=32 over two cores: diagonal (triMask) and off-diagonal (beta==0 skip)
-    // tiles interleave on one core, exercising the staging-release pairing.
-    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, half>({1, 32, 16, 2, 2.0F, 0.0F, false, Blaze::Gemm::SYRK_FILL_MODE_UP});
-}
-
-TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_FillModeLow_MultiCore)
-{
-    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, half>({1, 32, 16, 2, 2.0F, 1.5F, false, Blaze::Gemm::SYRK_FILL_MODE_LOW});
-}
-
-TEST_F(GemmSyrkTest, Test_FP16_SyrkSingleFetch_FillModeUp_Trans)
-{
-    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, half>({1, 16, 16, 1, 3.0F, 2.0F, true, Blaze::Gemm::SYRK_FILL_MODE_UP});
-}
-
-TEST_F(GemmSyrkTest, Test_BF16_SyrkSingleFetch_FillModeLow_Trans_BetaZero)
-{
-    // bf16 transposed storage, low triangle, beta == 0: triMask + skip mix.
-    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, bfloat16_t>(
-        {1, 32, 16, 1, 1.5F, 0.0F, true, Blaze::Gemm::SYRK_FILL_MODE_LOW});
-}
-
-TEST_F(GemmSyrkTest, Test_BF16_SyrkSingleFetch_FillModeUp_Tail)
-{
-    // m tail 17 (odd M over the split-M fixpipe) with fill_mode "up".
-    RunSyrkCase<SYRK_KERNEL_SINGLE_FETCH, bfloat16_t>(
-        {1, 17, 10, 2, 3.687209F, 2.067589F, false, Blaze::Gemm::SYRK_FILL_MODE_UP});
 }

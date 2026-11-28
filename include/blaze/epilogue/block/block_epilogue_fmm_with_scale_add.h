@@ -36,6 +36,38 @@
 namespace Blaze {
 namespace Epilogue {
 namespace Block {
+namespace Detail {
+
+#ifdef __NPU_ARCH__
+constexpr AscendC::Reg::CastTrait FMM_WITH_SCALE_ADD_B16_TO_FP32_ZERO = {
+    AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
+    AscendC::RoundMode::UNKNOWN};
+constexpr AscendC::Reg::CastTrait FMM_WITH_SCALE_ADD_B16_TO_FP32_ONE = {
+    AscendC::Reg::RegLayout::ONE, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
+    AscendC::RoundMode::UNKNOWN};
+constexpr AscendC::Reg::CastTrait FMM_WITH_SCALE_ADD_FP32_TO_B16 = {
+    AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT, AscendC::Reg::MaskMergeMode::ZEROING,
+    AscendC::RoundMode::CAST_RINT};
+#endif // __NPU_ARCH__
+
+constexpr float FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE = 1.0F;
+
+template <typename ElementType_>
+struct FmmWithScaleAddVfParams {
+    __ubuf__ float* accAddr{nullptr};
+    __ubuf__ ElementType_* x3Addr{nullptr};
+    uint32_t rowsThisStage{0};
+    uint32_t curN{0};
+    uint32_t nAlignAcc{0};
+    uint32_t nAlignElement{0};
+    uint32_t vlF32{0};
+    uint32_t vfLoops{0};
+    float alpha{FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
+    float beta{FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
+};
+
+} // namespace Detail
+
 template <class DispatchPolicy_, class ElementType_>
 class BlockEpilogueFmmWithScaleAdd {
 public:
@@ -51,8 +83,8 @@ public:
     struct Params {
         GM_ADDR x3GmAddr{nullptr};
         GM_ADDR outputGmAddr{nullptr};
-        float alpha{FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
-        float beta{FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
+        float alpha{Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
+        float beta{Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
         ProblemShape problemShape{};
         bool splitM{false};
         int64_t baseM{0};
@@ -74,44 +106,9 @@ public:
     template <typename TensorC>
     __aicore__ inline void operator()(TensorC& ubTensor, const BlockShape& blockShape, int64_t dstOffset, bool splitM,
                                       int64_t baseM, int64_t baseN, int64_t stagingBaseOffset = -1,
-                                      int64_t stagingBytes = -1, bool isDiagonal = false, uint8_t triMask = 0);
+                                      int64_t stagingBytes = -1, bool isDiagonal = false);
 
 private:
-    static constexpr float FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE = 1.0F;
-#ifdef __NPU_ARCH__
-    // NOTE: plain AscendC::RoundMode (top-level) is used here; the
-    // AscendC::Reg::RoundMode spelling is guarded by
-    // #if __NPU_ARCH__ == 3510/... in kernel_reg_compute_utils.h and does not
-    // resolve in every compile pass of the device chain.
-    static constexpr AscendC::Reg::CastTrait FMM_WITH_SCALE_ADD_B16_TO_FP32_ZERO = {
-        AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
-        AscendC::RoundMode::UNKNOWN};
-    static constexpr AscendC::Reg::CastTrait FMM_WITH_SCALE_ADD_B16_TO_FP32_ONE = {
-        AscendC::Reg::RegLayout::ONE, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
-        AscendC::RoundMode::UNKNOWN};
-    static constexpr AscendC::Reg::CastTrait FMM_WITH_SCALE_ADD_FP32_TO_B16 = {
-        AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::NO_SAT, AscendC::Reg::MaskMergeMode::ZEROING,
-        AscendC::RoundMode::CAST_RINT};
-#endif // __NPU_ARCH__
-
-    // Vector-function parameter bundle. Field order is append-only: existing
-    // aggregate initializers depend on the position stability, so new fields
-    // (e.g. triMask, rowBase) must be added at the END.
-    struct VfParams {
-        __ubuf__ float* accAddr{nullptr};
-        __ubuf__ ElementType_* x3Addr{nullptr};
-        uint32_t rowsThisStage{0};
-        uint32_t curN{0};
-        uint32_t nAlignAcc{0};
-        uint32_t nAlignElement{0};
-        uint32_t vlF32{0};
-        uint32_t vfLoops{0};
-        float alpha{FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
-        float beta{FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
-        uint8_t triMask{0};
-        uint32_t rowBase{0};
-    };
-
     static constexpr int64_t SPLIT_M_ALIGN = 2;
     static constexpr uint32_t DATA_BLOCK = 32;
     static constexpr uint32_t ACC_ALIGN = DATA_BLOCK / sizeof(float);
@@ -123,11 +120,12 @@ private:
     static constexpr uint64_t AIC_SYNC_AIV_MODE_4 = 4;
     static constexpr uint16_t AIV_SYNC_AIC_FLAG = 4;
     static constexpr uint16_t AIC_SYNC_AIV_FLAG = 6;
+    using VfParams = Detail::FmmWithScaleAddVfParams<ElementType_>;
 
     template <typename TensorC>
     __aicore__ inline void ProcessTile(TensorC& ubTensor, int64_t localRows, int64_t accumulatorRows, int64_t tileN,
                                        int64_t tileGmOffset, int64_t stagingBaseOffset, int64_t stagingBytes,
-                                       bool isDiagonal = false, uint8_t triMask = 0, uint32_t rowBase = 0);
+                                       bool isDiagonal = false);
     template <bool hasAlphaScale, bool hasBetaScale, bool skipX3 = false>
     static __simd_vf__ inline void FmmScaleAddVf(const VfParams params);
 
@@ -138,8 +136,8 @@ private:
     int64_t baseM_{0};
     int64_t baseN_{0};
     bool splitM_{false};
-    float alpha_{FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
-    float beta_{FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
+    float alpha_{Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
+    float beta_{Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE};
     bool hasAlphaScale_{false};
     bool hasBetaScale_{false};
     bool betaZero_{false};
@@ -172,8 +170,8 @@ __aicore__ inline void BlockEpilogueFmmWithScaleAdd<DispatchPolicy_, ElementType
         // Alpha and beta are scalar attributes copied into tilingData by the host.
         alpha_ = params.alpha;
         beta_ = params.beta;
-        hasAlphaScale_ = alpha_ != FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE;
-        hasBetaScale_ = beta_ != FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE;
+        hasAlphaScale_ = alpha_ != Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE;
+        hasBetaScale_ = beta_ != Detail::FMM_WITH_SCALE_ADD_DEFAULT_SCALE_VALUE;
         betaZero_ = beta_ == 0.0F;
         m_ = asc::te::get<Blaze::Gemm::MNK_M>(params.problemShape);
         n_ = asc::te::get<Blaze::Gemm::MNK_N>(params.problemShape);
@@ -216,7 +214,7 @@ template <class DispatchPolicy_, class ElementType_>
 template <typename TensorC>
 __aicore__ inline void BlockEpilogueFmmWithScaleAdd<DispatchPolicy_, ElementType_>::operator()(
     TensorC& ubTensor, const BlockShape& blockShape, int64_t dstOffset, bool splitM, int64_t baseM, int64_t baseN,
-    int64_t stagingBaseOffset, int64_t stagingBytes, bool isDiagonal, uint8_t triMask)
+    int64_t stagingBaseOffset, int64_t stagingBytes, bool isDiagonal)
 {
     int64_t curM = asc::te::get<Blaze::Gemm::MNK_M>(blockShape);
     if (baseM != 0) {
@@ -248,7 +246,7 @@ __aicore__ inline void BlockEpilogueFmmWithScaleAdd<DispatchPolicy_, ElementType
         }
         Gemm::Sync::WaitForCube<AIC_SYNC_AIV_MODE_4, PIPE_V>(AIC_SYNC_AIV_FLAG);
         ProcessTile(ubTensor, localRows, accumulatorRows, tileN, dstOffset + nIdx * curBaseN + localRowOffset * n_,
-                    stagingBaseOffset, stagingBytes, isDiagonal, triMask, static_cast<uint32_t>(localRowOffset));
+                    stagingBaseOffset, stagingBytes, isDiagonal);
         Gemm::Sync::NotifyCube<AIC_SYNC_AIV_MODE_4, PIPE_MTE3>(AIV_SYNC_AIC_FLAG);
     }
 }
@@ -257,7 +255,7 @@ template <class DispatchPolicy_, class ElementType_>
 template <typename TensorC>
 __aicore__ inline void BlockEpilogueFmmWithScaleAdd<DispatchPolicy_, ElementType_>::ProcessTile(
     TensorC& ubTensor, int64_t localRows, int64_t accumulatorRows, int64_t tileN, int64_t tileGmOffset,
-    int64_t stagingBaseOffset, int64_t stagingBytes, bool isDiagonal, uint8_t triMask, uint32_t rowBase)
+    int64_t stagingBaseOffset, int64_t stagingBytes, bool isDiagonal)
 {
     if (localRows <= 0 || tileN <= 0) {
         return;
@@ -302,24 +300,16 @@ __aicore__ inline void BlockEpilogueFmmWithScaleAdd<DispatchPolicy_, ElementType
             asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(rowsThisStage, n_));
         auto x3Gm = x3GmStorage.slice(origin, validShape);
 
-        // x3 and output share the same UB region, so every tile waits BOTH
-        // pipe directions before writing it (MTE3->MTE2 for the x3 load,
-        // MTE3->V for the output write) and every store raises BOTH after it.
-        // Each tile therefore sets and waits each direction exactly once,
-        // keeping the pairs matched even when diagonal (triMask) tiles and
-        // beta==0 skip tiles interleave on one core under split-M polling.
-        if (!betaZero_ || triMask != 0) {
+        if (!betaZero_) {
+            // x3 and output share the same UB region. Wait for the previous UB2GM before overwriting it.
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
             auto copyGmToUb = asc::te::make_copy(asc::te::copy_gm_to_ub{});
             asc::te::copy(copyGmToUb, x3Ub, x3Gm);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(X3_EVENT);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(X3_EVENT);
         } else {
-            // cuBLAS beta == 0 contract: C is never read (NaN/Inf must not
-            // propagate) -- no load, keep the pairing barrier only.
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(X3_SKIP_EVENT);
         }
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(X3_SKIP_EVENT);
 
         auto accAddr = reinterpret_cast<__ubuf__ float*>(ubTensor.data().get()) + stageOffset * nAlignAcc;
         VfParams vfParams{accAddr,
@@ -331,9 +321,7 @@ __aicore__ inline void BlockEpilogueFmmWithScaleAdd<DispatchPolicy_, ElementType
                           vlF32,
                           vfLoops,
                           alpha_,
-                          beta_,
-                          triMask,
-                          rowBase + static_cast<uint32_t>(stageOffset)};
+                          beta_};
         if (betaZero_) {
             // cuBLAS semantics: out = alpha * acc, the x3 (C) addend is neither loaded nor added.
             if (hasAlphaScale_) {
@@ -362,8 +350,13 @@ __aicore__ inline void BlockEpilogueFmmWithScaleAdd<DispatchPolicy_, ElementType
         if (!isDiagonal) {
             asc::te::copy(copyUbToGm, outputGm, x3Ub);
         }
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(X3_SKIP_EVENT);
+        if (betaZero_) {
+            // Release the staging region for the next vector write (no MTE2
+            // load in between, so the MTE3 -> V event carries the ordering).
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(X3_SKIP_EVENT);
+        } else {
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(BUFFER_REUSE_EVENT);
+        }
     }
 }
 
@@ -397,10 +390,10 @@ __simd_vf__ inline void BlockEpilogueFmmWithScaleAdd<DispatchPolicy_, ElementTyp
                     AscendC::Reg::DataCopy(x3Zero, x3Row + col);
                 } else {
                     AscendC::Reg::DataCopy(x3Packed, x3Row + col);
-                    AscendC::Reg::Cast<float, ElementType_, FMM_WITH_SCALE_ADD_B16_TO_FP32_ZERO>(x3Zero, x3Packed,
-                                                                                                 maskF32);
-                    AscendC::Reg::Cast<float, ElementType_, FMM_WITH_SCALE_ADD_B16_TO_FP32_ONE>(x3One, x3Packed,
-                                                                                                allB16);
+                    AscendC::Reg::Cast<float, ElementType_, Detail::FMM_WITH_SCALE_ADD_B16_TO_FP32_ZERO>(
+                        x3Zero, x3Packed, maskF32);
+                    AscendC::Reg::Cast<float, ElementType_, Detail::FMM_WITH_SCALE_ADD_B16_TO_FP32_ONE>(x3One, x3Packed,
+                                                                                                        allB16);
                     AscendC::Reg::Interleave(x3Zero, x3One, x3Zero, x3One);
                 }
             }
@@ -429,38 +422,12 @@ __simd_vf__ inline void BlockEpilogueFmmWithScaleAdd<DispatchPolicy_, ElementTyp
                 AscendC::Reg::Add(outF32, acc, x3Zero, maskF32);
             }
 
-            if (params.triMask != 0) {
-                if constexpr (skipX3) {
-                    // The main addend skipped the x3 read; load the staged
-                    // original here for the mask restore.
-                    if constexpr (AscendC::IsSameType<ElementType_, float>::value) {
-                        AscendC::Reg::DataCopy(x3Zero, x3Row + col);
-                    } else {
-                        AscendC::Reg::DataCopy(x3Packed, x3Row + col);
-                        AscendC::Reg::Cast<float, ElementType_, FMM_WITH_SCALE_ADD_B16_TO_FP32_ZERO>(x3Zero, x3Packed,
-                                                                                                     maskF32);
-                        AscendC::Reg::Cast<float, ElementType_, FMM_WITH_SCALE_ADD_B16_TO_FP32_ONE>(x3One, x3Packed,
-                                                                                                    allB16);
-                        AscendC::Reg::Interleave(x3Zero, x3One, x3Zero, x3One);
-                    }
-                }
-                AscendC::Reg::RegTensor<int32_t> idxReg;
-                AscendC::Reg::Arange<int32_t>(idxReg, static_cast<int32_t>(col));
-                AscendC::Reg::MaskReg triMaskReg;
-                const int32_t tileRow = static_cast<int32_t>(params.rowBase + row);
-                if (params.triMask == 1) {
-                    AscendC::Reg::Compares<int32_t, AscendC::CMPMODE::GE>(triMaskReg, idxReg, tileRow, maskF32);
-                } else {
-                    AscendC::Reg::Compares<int32_t, AscendC::CMPMODE::LE>(triMaskReg, idxReg, tileRow, maskF32);
-                }
-                AscendC::Reg::Select(outF32, outF32, x3Zero, triMaskReg);
-            }
-
             if constexpr (AscendC::IsSameType<ElementType_, float>::value) {
                 AscendC::Reg::DataCopy<ElementType_, AscendC::Reg::StoreDist::DIST_NORM_B32>(outRow + col, outF32,
                                                                                              maskF32);
             } else {
-                AscendC::Reg::Cast<ElementType_, float, FMM_WITH_SCALE_ADD_FP32_TO_B16>(outB16, outF32, maskF32);
+                AscendC::Reg::Cast<ElementType_, float, Detail::FMM_WITH_SCALE_ADD_FP32_TO_B16>(outB16, outF32,
+                                                                                                maskF32);
                 AscendC::Reg::DataCopy<ElementType_, AscendC::Reg::StoreDist::DIST_PACK_B32>(outRow + col, outB16,
                                                                                              maskF32);
             }
